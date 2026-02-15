@@ -27,6 +27,15 @@ import {
   SkillExecutionResult,
 } from '../../skills';
 import { WorkerPool, getWorkerPool, WorkerResult } from '../workers';
+import {
+  CrewManager,
+  getCrewManager,
+  CrewConfig,
+  CrewExecutionResult,
+  LLM_PRESETS,
+  PRESET_CREWS,
+  getPresetCrew,
+} from '../../crew';
 
 // ===========================================================================
 // TYPES
@@ -180,6 +189,7 @@ export class BrainAgent extends BaseAgent {
   private webSearch: WebSearchService;
   private skillManager: SkillManager | null = null;
   private workerPool: WorkerPool;
+  private crewManager: CrewManager | null = null;
   // modelRouter est hérité de BaseAgent (protected)
 
   constructor(config?: Partial<AgentConfig>) {
@@ -1439,6 +1449,207 @@ ${originalResponse}
     }
 
     return { used: false };
+  }
+
+  // ===========================================================================
+  // CREW AI INTEGRATION - Délégation à des équipes d'agents
+  // ===========================================================================
+
+  /**
+   * Initialiser le CrewManager pour déléguer des tâches complexes
+   * Utilise Ollama par défaut pour économiser les coûts
+   */
+  async initializeCrewAI(): Promise<void> {
+    if (this.crewManager) {
+      console.log('[Brain] CrewAI déjà initialisé');
+      return;
+    }
+
+    console.log('[Brain] 🚀 Initialisation CrewAI...');
+    this.crewManager = getCrewManager();
+
+    try {
+      await this.crewManager.start();
+      console.log('[Brain] ✅ CrewAI prêt');
+
+      // Lister les modèles Ollama disponibles
+      const models = await this.crewManager.listOllamaModels();
+      if (models.length > 0) {
+        console.log(`[Brain] 📦 Modèles Ollama: ${models.join(', ')}`);
+      } else {
+        console.log('[Brain] ⚠️ Aucun modèle Ollama détecté, utilisation des fallbacks cloud');
+      }
+    } catch (error) {
+      console.error('[Brain] ❌ Erreur initialisation CrewAI:', error);
+      this.crewManager = null;
+    }
+  }
+
+  /**
+   * Déléguer une tâche complexe à un crew d'agents
+   * Sélectionne automatiquement le preset le plus adapté
+   */
+  async delegateToCrew(
+    taskType: 'research' | 'code-review' | 'content' | 'data-analysis',
+    inputs: Record<string, unknown>,
+    options?: { timeout?: number }
+  ): Promise<CrewExecutionResult | null> {
+    if (!this.crewManager) {
+      await this.initializeCrewAI();
+    }
+
+    if (!this.crewManager) {
+      console.error('[Brain] ❌ CrewAI non disponible');
+      return null;
+    }
+
+    const preset = getPresetCrew(taskType);
+    if (!preset) {
+      console.error(`[Brain] ❌ Preset inconnu: ${taskType}`);
+      return null;
+    }
+
+    // Valider les inputs requis
+    for (const required of preset.requiredInputs) {
+      if (!(required in inputs)) {
+        console.error(`[Brain] ❌ Input manquant pour ${taskType}: ${required}`);
+        return null;
+      }
+    }
+
+    console.log(`[Brain] 👥 Délégation au crew "${preset.name}"`);
+
+    try {
+      const crew = preset.buildCrew(inputs);
+      const result = await this.crewManager.executeCrew(crew, options);
+
+      // Logger le résultat
+      if (result.success) {
+        console.log(`[Brain] ✅ Crew "${taskType}" terminé (${result.totalExecutionTimeMs}ms)`);
+
+        // Stocker en mémoire pour apprendre
+        this.send('memory', 'memory_store', {
+          type: 'task_result',
+          content: JSON.stringify({
+            crewType: taskType,
+            inputs,
+            output: result.finalOutput?.substring(0, 1000),
+            tokensUsed: result.totalTokensUsed,
+            executionTimeMs: result.totalExecutionTimeMs,
+          }),
+          metadata: {
+            tags: ['crew_execution', 'success', taskType],
+            importance: 0.7,
+          },
+        });
+      } else {
+        console.log(`[Brain] ⚠️ Crew "${taskType}" échoué: ${result.error}`);
+      }
+
+      return result;
+    } catch (error) {
+      console.error(`[Brain] ❌ Erreur crew "${taskType}":`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Exécuter un crew personnalisé
+   */
+  async executeCustomCrew(
+    config: CrewConfig,
+    options?: { timeout?: number }
+  ): Promise<CrewExecutionResult | null> {
+    if (!this.crewManager) {
+      await this.initializeCrewAI();
+    }
+
+    if (!this.crewManager) {
+      console.error('[Brain] ❌ CrewAI non disponible');
+      return null;
+    }
+
+    console.log(`[Brain] 👥 Exécution crew custom "${config.name}"`);
+
+    try {
+      return await this.crewManager.executeCrew(config, options);
+    } catch (error) {
+      console.error(`[Brain] ❌ Erreur crew custom:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Obtenir les presets de crews disponibles
+   */
+  getAvailableCrewPresets(): Array<{ id: string; name: string; description: string }> {
+    return Object.entries(PRESET_CREWS).map(([id, preset]) => ({
+      id,
+      name: preset.name,
+      description: preset.description,
+    }));
+  }
+
+  /**
+   * Obtenir les presets LLM disponibles (Ollama prioritaire)
+   */
+  getLLMPresets(): typeof LLM_PRESETS {
+    return LLM_PRESETS;
+  }
+
+  /**
+   * Sélectionner le meilleur LLM pour une tâche via CrewManager
+   * Priorise Ollama (gratuit) quand possible
+   */
+  async selectCrewLLM(
+    complexity: 'simple' | 'moderate' | 'complex',
+    requiresCode = false
+  ) {
+    if (!this.crewManager) {
+      await this.initializeCrewAI();
+    }
+
+    if (!this.crewManager) {
+      // Fallback: retourner un preset par défaut
+      return LLM_PRESETS.OLLAMA_FAST;
+    }
+
+    return this.crewManager.selectBestLLM(complexity, requiresCode);
+  }
+
+  /**
+   * Vérifier si CrewAI est disponible et Ollama connecté
+   */
+  async checkCrewAIHealth(): Promise<{
+    available: boolean;
+    ollamaConnected: boolean;
+    models: string[];
+  }> {
+    if (!this.crewManager) {
+      return { available: false, ollamaConnected: false, models: [] };
+    }
+
+    try {
+      const health = await this.crewManager.checkHealth();
+      return {
+        available: health.status === 'ok',
+        ollamaConnected: health.ollamaConnected,
+        models: health.availableModels,
+      };
+    } catch {
+      return { available: false, ollamaConnected: false, models: [] };
+    }
+  }
+
+  /**
+   * Arrêter CrewAI proprement
+   */
+  async stopCrewAI(): Promise<void> {
+    if (this.crewManager) {
+      await this.crewManager.stop();
+      this.crewManager = null;
+      console.log('[Brain] 🛑 CrewAI arrêté');
+    }
   }
 
   // ===========================================================================

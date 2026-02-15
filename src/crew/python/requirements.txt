@@ -1,0 +1,9 @@
+# CrewAI dependencies
+crewai>=0.80.0
+crewai-tools>=0.14.0
+
+# HTTP client (for Ollama)
+requests>=2.31.0
+
+# LiteLLM for multi-provider support
+litellm>=1.40.0
