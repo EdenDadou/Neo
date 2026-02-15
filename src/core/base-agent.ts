@@ -12,6 +12,7 @@ import type { AgentConfig, AgentMessage, AgentRole } from './types';
 import { messageBus } from './message-bus';
 import { getTokenManager, TokenManager } from './token-manager';
 import { getModelRouter, ModelRouter } from './models';
+import { getAnthropicAuthType } from '../utils/env';
 
 export abstract class BaseAgent {
   protected config: AgentConfig;
@@ -178,11 +179,19 @@ export abstract class BaseAgent {
   /**
    * Appeler le LLM avec le système prompt de l'agent
    * Track automatiquement l'usage des tokens
+   * Supporte OAuth tokens (Claude Pro/Max) et API keys standard
    */
   protected async think(
     userMessage: string,
     additionalContext?: string
   ): Promise<string> {
+    const authType = getAnthropicAuthType();
+
+    // Si OAuth token, utiliser l'API directement avec Bearer auth
+    if (authType === 'oauth') {
+      return this.thinkWithOAuth(userMessage, additionalContext);
+    }
+
     // If no Anthropic client, try to use modelRouter
     if (!this.client) {
       return this.thinkOptimized(userMessage, 'simple_chat', additionalContext);
@@ -218,6 +227,73 @@ export abstract class BaseAgent {
       return textBlock ? textBlock.text : '';
     } catch (error) {
       console.error(`[${this.config.name}] Erreur think:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Appeler Claude avec OAuth token (Bearer auth)
+   * Pour les abonnements Claude Pro/Max
+   */
+  private async thinkWithOAuth(
+    userMessage: string,
+    additionalContext?: string
+  ): Promise<string> {
+    const oauthToken = process.env.ANTHROPIC_API_KEY;
+
+    if (!oauthToken) {
+      throw new Error('OAuth token not configured');
+    }
+
+    const systemPrompt = additionalContext
+      ? `${this.config.systemPrompt}\n\n--- CONTEXTE ADDITIONNEL ---\n${additionalContext}`
+      : this.config.systemPrompt;
+
+    const body: Record<string, unknown> = {
+      model: this.config.model,
+      max_tokens: this.config.maxTokens,
+      temperature: this.config.temperature,
+      messages: [{ role: 'user', content: userMessage }],
+    };
+
+    if (systemPrompt) {
+      body.system = systemPrompt;
+    }
+
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${oauthToken}`,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Anthropic OAuth error: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json() as {
+        content: Array<{ type: string; text?: string }>;
+        usage: { input_tokens: number; output_tokens: number };
+      };
+
+      // Track token usage
+      this.tokenManager.recordUsage(this.config.name, {
+        inputTokens: data.usage.input_tokens,
+        outputTokens: data.usage.output_tokens,
+        model: this.config.model,
+        provider: 'anthropic',
+        cost: 0, // OAuth = pas de coût API direct
+      });
+
+      const textBlock = data.content.find((block) => block.type === 'text');
+      return textBlock?.text || '';
+    } catch (error) {
+      console.error(`[${this.config.name}] Erreur thinkWithOAuth:`, error);
       throw error;
     }
   }

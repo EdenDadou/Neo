@@ -9,6 +9,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import type { MemoryEntry } from '../types';
+import { getAnthropicAuthType } from '../../utils/env';
 
 export interface FactCheckResult {
   isConsistent: boolean;
@@ -44,16 +45,86 @@ const CORRECTION_TRIGGERS = [
 
 export class FactChecker {
   private client: Anthropic | null;
+  private authType: 'oauth' | 'api_key' | 'none';
 
   constructor() {
     // Initialize Anthropic client with API key from environment
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (apiKey && apiKey !== 'test-key-for-structure-check' && apiKey !== 'your_api_key_here') {
+    this.authType = getAnthropicAuthType();
+
+    if (this.authType === 'api_key') {
       this.client = new Anthropic({ apiKey });
+    } else if (this.authType === 'oauth') {
+      // OAuth uses direct API calls, not SDK
+      this.client = null;
+      console.log('[FactChecker] Using OAuth token authentication');
     } else {
       this.client = null;
       console.warn('[FactChecker] ⚠️ No valid ANTHROPIC_API_KEY - fact checking will use fallback');
     }
+  }
+
+  /**
+   * Helper pour appeler l'API Anthropic (supporte OAuth et API key)
+   */
+  private async callAnthropic(systemPrompt: string, userMessage: string): Promise<string | null> {
+    if (this.authType === 'oauth') {
+      // Use Bearer auth for OAuth tokens
+      const oauthToken = process.env.ANTHROPIC_API_KEY;
+      if (!oauthToken) return null;
+
+      try {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${oauthToken}`,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 500,
+            temperature: 0,
+            system: systemPrompt,
+            messages: [{ role: 'user', content: userMessage }],
+          }),
+        });
+
+        if (!response.ok) {
+          console.error('[FactChecker] OAuth API error:', response.status);
+          return null;
+        }
+
+        const data = await response.json() as {
+          content: Array<{ type: string; text?: string }>;
+        };
+
+        const textBlock = data.content.find(block => block.type === 'text');
+        return textBlock?.text || null;
+      } catch (error) {
+        console.error('[FactChecker] OAuth call error:', error);
+        return null;
+      }
+    } else if (this.client) {
+      // Use SDK for standard API keys
+      try {
+        const response = await this.client.messages.create({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 500,
+          temperature: 0,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userMessage }],
+        });
+
+        const textBlock = response.content.find(block => block.type === 'text');
+        return textBlock ? textBlock.text : null;
+      } catch (error) {
+        console.error('[FactChecker] SDK call error:', error);
+        return null;
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -79,8 +150,8 @@ export class FactChecker {
       };
     }
 
-    // Analyse approfondie avec Claude
-    if (!this.client) {
+    // Analyse approfondie avec Claude (supporte OAuth et API key)
+    if (this.authType === 'none') {
       // Fallback without API
       return {
         isCorrection: hasQuickTrigger,
@@ -96,11 +167,7 @@ export class FactChecker {
     }
 
     try {
-      const response = await this.client.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 500,
-        temperature: 0,
-        system: `Tu es un détecteur de corrections. Analyse si l'utilisateur corrige ou contredit ce que l'assistant a dit.
+      const systemPrompt = `Tu es un détecteur de corrections. Analyse si l'utilisateur corrige ou contredit ce que l'assistant a dit.
 
 IMPORTANT: Sois précis. Une question n'est PAS une correction. Un complément d'info n'est PAS une correction.
 Une CORRECTION c'est quand l'utilisateur dit explicitement que l'assistant s'est trompé.
@@ -113,22 +180,20 @@ Réponds UNIQUEMENT en JSON valide:
   "originalError": "ce que l'assistant a dit de faux" ou null,
   "correction": "la bonne information" ou null,
   "feedback": "explication courte de l'erreur" ou null
-}`,
-        messages: [{
-          role: 'user',
-          content: `RÉPONSE PRÉCÉDENTE DE L'ASSISTANT:
+}`;
+
+      const userPrompt = `RÉPONSE PRÉCÉDENTE DE L'ASSISTANT:
 "${previousAssistantResponse.substring(0, 500)}"
 
 MESSAGE DE L'UTILISATEUR:
 "${userMessage}"
 
-Analyse: est-ce une correction?`
-        }]
-      });
+Analyse: est-ce une correction?`;
 
-      const content = response.content[0];
-      if (content.type === 'text') {
-        const jsonMatch = content.text.match(/\{[\s\S]*\}/);
+      const responseText = await this.callAnthropic(systemPrompt, userPrompt);
+
+      if (responseText) {
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
 
@@ -198,8 +263,8 @@ Analyse: est-ce une correction?`
       };
     }
 
-    // Check if client is available
-    if (!this.client) {
+    // Check if API is available
+    if (this.authType === 'none') {
       return {
         isConsistent: true,
         contradictions: [],
@@ -210,11 +275,7 @@ Analyse: est-ce une correction?`
     }
 
     try {
-      const response = await this.client.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 800,
-        temperature: 0,
-        system: `Tu es un vérificateur de cohérence. Compare la réponse proposée aux faits stockés.
+      const systemPrompt = `Tu es un vérificateur de cohérence. Compare la réponse proposée aux faits stockés.
 
 RÈGLES:
 - Une contradiction = la réponse dit le CONTRAIRE d'un fait stocké
@@ -236,22 +297,20 @@ Réponds en JSON:
   "supportingMemories": ["id1", "id2"],
   "confidence": 0.0-1.0,
   "warnings": ["avertissement si pertinent"]
-}`,
-        messages: [{
-          role: 'user',
-          content: `FAITS STOCKÉS EN MÉMOIRE:
+}`;
+
+      const userPrompt = `FAITS STOCKÉS EN MÉMOIRE:
 ${factsContext}
 
 RÉPONSE PROPOSÉE:
 "${proposedResponse.substring(0, 1000)}"
 
-Vérifie la cohérence.`
-        }]
-      });
+Vérifie la cohérence.`;
 
-      const content = response.content[0];
-      if (content.type === 'text') {
-        const jsonMatch = content.text.match(/\{[\s\S]*\}/);
+      const responseText = await this.callAnthropic(systemPrompt, userPrompt);
+
+      if (responseText) {
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
 

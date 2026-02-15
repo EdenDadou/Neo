@@ -43,17 +43,31 @@ EOF
 # Configurer la clé API de manière interactive
 configure_api_key() {
     echo ""
-    echo -e "    ${YELLOW}Configuration de la clé API${NC}"
+    echo -e "    ${YELLOW}Configuration de la clé API / Token${NC}"
     echo -e "    ${DIM}─────────────────────────────────────────${NC}"
     echo ""
     echo -e "    Neo utilise Claude (Anthropic) comme cerveau principal."
-    echo -e "    ${DIM}Obtenez une clé sur: ${WHITE}https://console.anthropic.com${NC}"
+    echo ""
+    echo -e "    ${WHITE}Deux options:${NC}"
+    echo -e "    ${CYAN}1.${NC} Token OAuth ${DIM}(abonnement Claude Pro/Max)${NC}"
+    echo -e "       ${DIM}Commence par: ${WHITE}sk-ant-oat...${NC}"
+    echo ""
+    echo -e "    ${CYAN}2.${NC} Clé API ${DIM}(crédits API séparés)${NC}"
+    echo -e "       ${DIM}Commence par: ${WHITE}sk-ant-api...${NC}"
+    echo -e "       ${DIM}Obtenez sur: ${WHITE}https://console.anthropic.com${NC}"
     echo ""
 
     while true; do
-        read -p "    Clé API Anthropic (sk-ant-...): " API_KEY
+        read -p "    Token ou Clé API (sk-ant-...): " API_KEY
 
-        if [[ "$API_KEY" =~ ^sk-ant- ]]; then
+        if [[ "$API_KEY" =~ ^sk-ant-oat ]]; then
+            echo -e "    ${GREEN}✓${NC} Token OAuth détecté (abonnement Claude)"
+            break
+        elif [[ "$API_KEY" =~ ^sk-ant-api ]]; then
+            echo -e "    ${GREEN}✓${NC} Clé API détectée (crédits API)"
+            break
+        elif [[ "$API_KEY" =~ ^sk-ant- ]]; then
+            echo -e "    ${GREEN}✓${NC} Clé Anthropic détectée"
             break
         elif [[ "$API_KEY" == "" ]]; then
             echo -e "    ${YELLOW}!${NC} Clé vide, Neo fonctionnera en mode dégradé"

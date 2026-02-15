@@ -11,6 +11,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropicAuthType } from '../../utils/env';
 
 // ===========================================================================
 // TYPES
@@ -659,6 +660,14 @@ export class ModelRouter {
   }
 
   private async completeAnthropic(model: ModelInfo, request: CompletionRequest): Promise<CompletionResponse> {
+    const authType = getAnthropicAuthType();
+
+    // Pour les tokens OAuth, utiliser l'API directement avec Bearer auth
+    if (authType === 'oauth') {
+      return this.completeAnthropicOAuth(model, request);
+    }
+
+    // Pour les clés API standard, utiliser le SDK
     if (!this.anthropicClient) {
       throw new Error('Anthropic client not initialized');
     }
@@ -682,6 +691,64 @@ export class ModelRouter {
       provider: 'anthropic',
       tokensUsed,
       cost: (tokensUsed / 1000) * model.costPer1kTokens,
+    };
+  }
+
+  /**
+   * Appel Anthropic avec OAuth token (Bearer auth)
+   * Pour les abonnements Claude Pro/Max
+   */
+  private async completeAnthropicOAuth(model: ModelInfo, request: CompletionRequest): Promise<CompletionResponse> {
+    const oauthToken = this.config.anthropicApiKey;
+
+    if (!oauthToken) {
+      throw new Error('OAuth token not configured');
+    }
+
+    const messages = request.messages.map(m => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    }));
+
+    const body: Record<string, unknown> = {
+      model: model.id,
+      max_tokens: request.maxTokens || 2048,
+      messages,
+    };
+
+    if (request.systemPrompt) {
+      body.system = request.systemPrompt;
+    }
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${oauthToken}`,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Anthropic OAuth error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json() as {
+      content: Array<{ type: string; text?: string }>;
+      usage: { input_tokens: number; output_tokens: number };
+    };
+
+    const content = data.content[0]?.type === 'text' ? data.content[0].text || '' : '';
+    const tokensUsed = data.usage.input_tokens + data.usage.output_tokens;
+
+    return {
+      content,
+      model: model.id,
+      provider: 'anthropic',
+      tokensUsed,
+      cost: 0, // OAuth/subscription = pas de coût API direct
     };
   }
 

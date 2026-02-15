@@ -95,3 +95,31 @@ export function hasAnthropicKey(): boolean {
   const key = process.env.ANTHROPIC_API_KEY;
   return !!(key && key !== 'test-key-for-structure-check' && key !== 'your_api_key_here' && key.startsWith('sk-ant-'));
 }
+
+/**
+ * Check if the key is an OAuth token (from Claude Pro/Max subscription)
+ * OAuth tokens start with sk-ant-oat
+ */
+export function isOAuthToken(): boolean {
+  const key = process.env.ANTHROPIC_API_KEY;
+  return !!(key && key.startsWith('sk-ant-oat'));
+}
+
+/**
+ * Check if the key is a standard API key (from console.anthropic.com)
+ * Standard API keys start with sk-ant-api
+ */
+export function isStandardApiKey(): boolean {
+  const key = process.env.ANTHROPIC_API_KEY;
+  return !!(key && key.startsWith('sk-ant-api'));
+}
+
+/**
+ * Get the authentication type for Anthropic
+ */
+export function getAnthropicAuthType(): 'oauth' | 'api_key' | 'none' {
+  if (isOAuthToken()) return 'oauth';
+  if (isStandardApiKey()) return 'api_key';
+  if (hasAnthropicKey()) return 'api_key'; // Assume API key for other sk-ant- prefixes
+  return 'none';
+}
