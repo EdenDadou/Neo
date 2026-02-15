@@ -412,7 +412,7 @@ Fournis une analyse structurée en JSON:
     }
 
     // Fallback vers Claude Haiku 4.5
-    return 'claude-haiku-4-5-20250515';
+    return 'claude-haiku-4-5-20251001';
   }
 
   /**

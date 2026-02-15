@@ -10,6 +10,9 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Simple debug flag (logger not initialized yet)
+const isDebug = () => process.env.DEBUG === 'true' || process.env.VERBOSE === 'true';
+
 /**
  * Load environment variables from .env file
  */
@@ -19,7 +22,7 @@ export function config(): void {
   const envPath = resolve(projectRoot, '.env');
 
   if (!existsSync(envPath)) {
-    console.warn('[Env] No .env file found at', envPath);
+    if (isDebug()) console.warn('[Env] No .env file found at', envPath);
     return;
   }
 
@@ -53,21 +56,11 @@ export function config(): void {
       }
     }
 
-    console.log('[Env] Configuration loaded from .env');
-
-    // Validate critical variables
+    // Validate critical variables (only warn if not configured)
     if (!process.env.ANTHROPIC_API_KEY ||
         process.env.ANTHROPIC_API_KEY === 'test-key-for-structure-check' ||
         process.env.ANTHROPIC_API_KEY === 'your_api_key_here') {
-      console.warn('[Env] ⚠️ ANTHROPIC_API_KEY not configured!');
-      console.warn('[Env] Run ./neo config to configure Neo');
-    }
-
-    // Log permissions
-    const allowWrite = process.env.ALLOW_FILE_WRITE === 'true';
-    const allowShell = process.env.ALLOW_SHELL_EXEC === 'true';
-    if (allowWrite || allowShell) {
-      console.log(`[Env] Permissions: write=${allowWrite}, shell=${allowShell}`);
+      console.warn('⚠️  ANTHROPIC_API_KEY non configurée - ./neo config');
     }
   } catch (error) {
     console.error('[Env] Error loading .env:', error);
@@ -118,26 +111,14 @@ export function isStandardApiKey(): boolean {
  * Get the authentication type for Anthropic
  */
 export function getAnthropicAuthType(): 'oauth' | 'api_key' | 'none' {
-  const key = process.env.ANTHROPIC_API_KEY;
-
-  // Debug log
-  if (key) {
-    const prefix = key.substring(0, 15);
-    console.log(`[Auth] Checking key type: ${prefix}...`);
-  }
-
   if (isOAuthToken()) {
-    console.log('[Auth] Detected: OAuth token');
     return 'oauth';
   }
   if (isStandardApiKey()) {
-    console.log('[Auth] Detected: Standard API key');
     return 'api_key';
   }
   if (hasAnthropicKey()) {
-    console.log('[Auth] Detected: Other Anthropic key (treating as api_key)');
     return 'api_key'; // Assume API key for other sk-ant- prefixes
   }
-  console.log('[Auth] No valid key detected');
   return 'none';
 }

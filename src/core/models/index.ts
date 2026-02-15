@@ -209,7 +209,7 @@ const MODELS: ModelInfo[] = [
 
   // === STANDARD (Tier: standard) ===
   {
-    id: 'claude-haiku-4-5-20250515',
+    id: 'claude-haiku-4-5-20251001',
     name: 'Claude Haiku 4.5',
     provider: 'anthropic',
     tier: 'standard',

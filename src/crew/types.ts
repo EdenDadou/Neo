@@ -85,12 +85,12 @@ export const LLM_PRESETS = {
   // Modèles cloud (PAYANTS - utiliser en dernier recours)
   CLAUDE_HAIKU: {
     provider: 'anthropic' as const,
-    model: 'claude-haiku-4-5-20250515',
+    model: 'claude-haiku-4-5-20251001',
     temperature: 0.7,
   },
   CLAUDE_SONNET: {
     provider: 'anthropic' as const,
-    model: 'claude-sonnet-4-5-20250514',
+    model: 'claude-sonnet-4-5-20250929',
     temperature: 0.7,
   },
 } as const;

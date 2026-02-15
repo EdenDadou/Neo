@@ -10,27 +10,18 @@ loadEnv();
 
 import { Core } from './core';
 import { Gateway } from './interfaces/gateway';
+import { initLogger, logger } from './utils/logger';
 
 async function main() {
-  console.log('');
-  console.log('╔═══════════════════════════════════════════════════════════╗');
-  console.log('║                                                           ║');
-  console.log('║     🧠 NEO - Assistant IA Multi-Agents                    ║');
-  console.log('║                                                           ║');
-  console.log('║     Core Agents:                                          ║');
-  console.log('║       • VOX    - Interface utilisateur                    ║');
-  console.log('║       • MEMORY - Mémoire 10 ans + Learning                ║');
-  console.log('║       • BRAIN  - Orchestrateur intelligent                ║');
-  console.log('║                                                           ║');
-  console.log('║     Capacités:                                            ║');
-  console.log('║       • Recherche web native                              ║');
-  console.log('║       • Modèles gratuits/pas chers                        ║');
-  console.log('║       • Personnalité persistante                          ║');
-  console.log('║                                                           ║');
-  console.log('╚═══════════════════════════════════════════════════════════╝');
-  console.log('');
+  // Initialiser le logger (mode verbose si DEBUG=true)
+  initLogger();
 
-  // Créer le Core
+  // Bannière toujours visible
+  console.log('');
+  console.log('🧠 NEO - Assistant IA Multi-Agents');
+  console.log('───────────────────────────────────');
+
+  // Créer le Core (debug mode active les logs système)
   const core = new Core({ debug: process.env.DEBUG === 'true' });
 
   // Créer la Gateway
@@ -40,22 +31,14 @@ async function main() {
   await core.start();
   await gateway.start();
 
-  console.log('');
-  console.log('📡 API Endpoints:');
-  console.log('   POST /api/auth/register  - Créer un compte');
-  console.log('   POST /api/auth/login     - Se connecter');
-  console.log('   POST /api/chat           - Envoyer un message');
-  console.log('   POST /api/memory         - Stocker une mémoire');
-  console.log('   GET  /api/memory/search  - Rechercher en mémoire');
-  console.log('   GET  /api/stats          - Statistiques');
-  console.log('   POST /api/correct        - Enregistrer une correction');
-  console.log('');
-  console.log('🔌 WebSocket: ws://localhost:3001?token=YOUR_JWT');
-  console.log('');
+  const port = process.env.PORT || 3001;
+  console.log(`\n✅ Serveur prêt sur http://localhost:${port}`);
+  console.log('   WebSocket: ws://localhost:' + port);
+  console.log('\n💡 Utilisez DEBUG=true pour voir tous les logs système\n');
 
   // Gestion de l'arrêt
   const shutdown = async () => {
-    console.log('\n\nArrêt en cours...');
+    logger.debug('Server', 'Arrêt en cours...');
     await gateway.stop();
     await core.stop();
     process.exit(0);
