@@ -165,36 +165,41 @@ export class VoxAgent extends BaseAgent {
       timestamp: new Date(),
     });
 
-    // 1. Analyser l'entrée basiquement
-    const analysis = await this.analyzeInput(input);
+    try {
+      // 1. Analyser l'entrée basiquement
+      const analysis = await this.analyzeInput(input);
 
-    // Si clarification nécessaire, demander directement
-    if (analysis.needsClarification && analysis.clarificationQuestion) {
-      this.emitToUser(analysis.clarificationQuestion);
-      return;
+      // Si clarification nécessaire, demander directement
+      if (analysis.needsClarification && analysis.clarificationQuestion) {
+        this.emitToUser(analysis.clarificationQuestion);
+        return;
+      }
+
+      // 2. Demander le rapport de contexte à Memory
+      console.log('[Vox] 📋 Demande de contexte à Memory...');
+      const contextReport = await this.requestContextReport(input);
+
+      // 3. Réécrire le prompt avec le contexte
+      console.log('[Vox] ✍️ Réécriture du prompt avec contexte...');
+      const enrichedPrompt = await this.rewritePromptWithContext(input, contextReport);
+
+      // 4. Envoyer au Brain
+      this.state.pendingResponse = true;
+      this.send('brain', 'user_input', {
+        originalInput: input,
+        enrichedInput: enrichedPrompt.enrichedPrompt,
+        analysis,
+        contextReport: {
+          confidence: contextReport.confidence,
+          warnings: [...contextReport.warnings, ...enrichedPrompt.warnings],
+          contextUsed: enrichedPrompt.contextUsed,
+        },
+        conversationContext: this.getRecentContext(),
+      });
+    } catch (error) {
+      console.error('[Vox] Erreur traitement entrée:', error);
+      this.emitToUser("Désolé, je rencontre un problème technique. Vérifiez la configuration avec ./neo config");
     }
-
-    // 2. Demander le rapport de contexte à Memory
-    console.log('[Vox] 📋 Demande de contexte à Memory...');
-    const contextReport = await this.requestContextReport(input);
-
-    // 3. Réécrire le prompt avec le contexte
-    console.log('[Vox] ✍️ Réécriture du prompt avec contexte...');
-    const enrichedPrompt = await this.rewritePromptWithContext(input, contextReport);
-
-    // 4. Envoyer au Brain
-    this.state.pendingResponse = true;
-    this.send('brain', 'user_input', {
-      originalInput: input,
-      enrichedInput: enrichedPrompt.enrichedPrompt,
-      analysis,
-      contextReport: {
-        confidence: contextReport.confidence,
-        warnings: [...contextReport.warnings, ...enrichedPrompt.warnings],
-        contextUsed: enrichedPrompt.contextUsed,
-      },
-      conversationContext: this.getRecentContext(),
-    });
   }
 
   // ===========================================================================

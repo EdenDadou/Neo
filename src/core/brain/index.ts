@@ -1041,33 +1041,45 @@ ${originalResponse}
   // ===========================================================================
 
   protected async handleMessage(message: AgentMessage): Promise<void> {
-    switch (message.type) {
-      case 'user_input':
-        await this.handleUserInput(message);
-        break;
+    try {
+      switch (message.type) {
+        case 'user_input':
+          await this.handleUserInput(message);
+          break;
 
-      case 'context_response':
-        this.handleMemoryResponse(message);
-        break;
+        case 'context_response':
+          this.handleMemoryResponse(message);
+          break;
 
-      case 'fact_check_response':
-        this.handleFactCheckResponse(message);
-        break;
+        case 'fact_check_response':
+          this.handleFactCheckResponse(message);
+          break;
 
-      case 'task_result':
-        await this.handleTaskResult(message);
-        break;
+        case 'task_result':
+          await this.handleTaskResult(message);
+          break;
 
-      case 'skill_detected':
-        this.handleSkillDetected(message);
-        break;
+        case 'skill_detected':
+          this.handleSkillDetected(message);
+          break;
 
-      case 'learning_update':
-        this.handleLearningUpdate(message);
-        break;
+        case 'learning_update':
+          this.handleLearningUpdate(message);
+          break;
 
-      default:
-        console.log(`[Brain] Message non géré: ${message.type}`);
+        default:
+          console.log(`[Brain] Message non géré: ${message.type}`);
+      }
+    } catch (error) {
+      console.error(`[Brain] Erreur handleMessage (${message.type}):`, error);
+      // Send error response to Vox
+      if (message.type === 'user_input') {
+        this.send('vox', 'response_ready', {
+          response: "Désolé, je rencontre un problème technique. Vérifiez que la clé API est valide avec ./neo config",
+          confidence: 0,
+          error: true,
+        });
+      }
     }
   }
 
