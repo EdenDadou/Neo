@@ -413,6 +413,73 @@ async function installDependencies(): Promise<boolean> {
   }
 }
 
+/**
+ * Télécharge le modèle d'embeddings HuggingFace en arrière-plan
+ * Non-bloquant et silencieux en cas d'erreur
+ */
+async function downloadEmbeddingsModel(): Promise<void> {
+  const cacheDir = path.join(process.cwd(), '.cache', 'models');
+  const modelDir = path.join(cacheDir, 'Xenova', 'all-MiniLM-L6-v2');
+
+  // Vérifier si le modèle existe déjà
+  if (fs.existsSync(path.join(modelDir, 'config.json'))) {
+    printInfo('Modèle d\'embeddings déjà en cache');
+    return;
+  }
+
+  // Créer le dossier cache
+  if (!fs.existsSync(cacheDir)) {
+    fs.mkdirSync(cacheDir, { recursive: true });
+  }
+
+  printInfo('Téléchargement du modèle d\'embeddings en arrière-plan...');
+
+  // Liste des fichiers nécessaires pour le modèle quantifié
+  const baseUrl = 'https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main';
+  const files = [
+    'config.json',
+    'tokenizer.json',
+    'tokenizer_config.json',
+    'onnx/model_quantized.onnx'
+  ];
+
+  // Créer le dossier du modèle
+  const onnxDir = path.join(modelDir, 'onnx');
+  if (!fs.existsSync(onnxDir)) {
+    fs.mkdirSync(onnxDir, { recursive: true });
+  }
+
+  // Télécharger en arrière-plan avec spawn (non-bloquant)
+  const downloadProcess = spawn('sh', ['-c', `
+    cd "${modelDir}" 2>/dev/null || exit 0
+
+    # Télécharger les fichiers avec wget ou curl (silencieux)
+    for file in ${files.join(' ')}; do
+      target_file="${modelDir}/$file"
+      target_dir=$(dirname "$target_file")
+      mkdir -p "$target_dir" 2>/dev/null
+
+      if [ ! -f "$target_file" ]; then
+        if command -v wget >/dev/null 2>&1; then
+          wget -q -O "$target_file" "${baseUrl}/$file" 2>/dev/null || true
+        elif command -v curl >/dev/null 2>&1; then
+          curl -sL -o "$target_file" "${baseUrl}/$file" 2>/dev/null || true
+        fi
+      fi
+    done
+
+    echo "done" 2>/dev/null || true
+  `], {
+    detached: true,
+    stdio: 'ignore'
+  });
+
+  // Détacher le processus pour qu'il continue en arrière-plan
+  downloadProcess.unref();
+
+  printInfo('Le modèle sera disponible après le téléchargement (quelques minutes)');
+}
+
 async function configureSecurity(rl: readline.Interface, config: Partial<WizardConfig>): Promise<Partial<WizardConfig>> {
   printStep(5, 6, 'Configuration sécurité et dashboard');
 
@@ -617,6 +684,11 @@ export async function runWizard(): Promise<void> {
     const depsOk = await installDependencies();
     if (!depsOk) {
       printWarning('Certaines dépendances n\'ont pas pu être installées');
+    }
+
+    // Téléchargement du modèle d'embeddings en arrière-plan (non-bloquant)
+    if (!config.enableOllama) {
+      await downloadEmbeddingsModel();
     }
 
     // Step 5: Sécurité et Dashboard

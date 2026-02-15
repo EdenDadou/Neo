@@ -24,6 +24,9 @@ if (!existsSync(CACHE_DIR)) {
 }
 env.cacheDir = CACHE_DIR;
 env.allowLocalModels = true;
+env.localModelPath = CACHE_DIR;
+// Désactiver le téléchargement si le modèle n'est pas en cache local
+env.allowRemoteModels = false;
 
 export interface EmbeddingResult {
   text: string;
@@ -79,7 +82,14 @@ export class EmbeddingsService {
         console.log('[Embeddings] ✅ Modèle chargé avec succès');
         console.log(`[Embeddings] Dimension: ${this.embeddingDimension}`);
       } catch (error) {
-        console.error('[Embeddings] ❌ Erreur chargement modèle:', error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        if (errorMsg.includes('429')) {
+          console.warn('[Embeddings] ⚠️ Rate limit HuggingFace (429) - Fallback local activé');
+          console.warn('[Embeddings] 💡 Pour télécharger le modèle manuellement:');
+          console.warn(`[Embeddings]    git lfs clone https://huggingface.co/Xenova/all-MiniLM-L6-v2 ${CACHE_DIR}/Xenova/all-MiniLM-L6-v2`);
+        } else {
+          console.error('[Embeddings] ❌ Erreur chargement modèle:', error);
+        }
         // Mark as failed so embed() uses fallback instead of retrying
         this.initFailed = true;
         // Don't throw - let embed() use the fallback
