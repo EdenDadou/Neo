@@ -17,7 +17,7 @@
  */
 
 import { BaseAgent } from '../base-agent';
-import {
+import type {
   AgentConfig,
   AgentMessage,
   EnrichedContext,
@@ -33,7 +33,8 @@ import {
 } from '../types';
 import { PersistenceLayer } from './persistence';
 import { EmbeddingsService } from './embeddings';
-import { FactChecker, CorrectionDetectionResult, FactCheckResult } from './fact-checker';
+import { FactChecker } from './fact-checker';
+import type { CorrectionDetectionResult, FactCheckResult } from './fact-checker';
 import { randomUUID } from 'crypto';
 import { PROTECTED_TRAITS, REQUIRED_TRAITS, validateAction, getCoreRulesPrompt } from '../rules';
 import { initializeSkillSystem, SkillManager } from '../../skills';

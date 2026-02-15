@@ -47,7 +47,7 @@
 // TYPES
 // ===========================================================================
 
-export {
+export type {
   // Agent & Task types
   CrewAgentConfig,
   CrewTaskConfig,
@@ -56,7 +56,6 @@ export {
 
   // LLM types
   LLMConfig,
-  LLM_PRESETS,
 
   // Execution types
   TaskResult,
@@ -72,6 +71,9 @@ export {
   // Preset types
   PresetCrew,
 } from './types';
+
+// Constants (valeurs, pas types)
+export { LLM_PRESETS } from './types';
 
 // ===========================================================================
 // CREW MANAGER
@@ -101,7 +103,7 @@ export {
 
 import { getCrewManager } from './crew-manager';
 import { getPresetCrew } from './presets';
-import { CrewConfig, CrewExecutionResult } from './types';
+import type { CrewConfig, CrewExecutionResult } from './types';
 
 /**
  * Exécute rapidement un preset de crew

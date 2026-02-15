@@ -5,7 +5,8 @@
  * des modèles locaux (Ollama) par défaut pour minimiser les coûts.
  */
 
-import { CrewConfig, LLM_PRESETS, PresetCrew } from './types';
+import type { CrewConfig, PresetCrew } from './types';
+import { LLM_PRESETS } from './types';
 
 // ===========================================================================
 // RESEARCH CREW

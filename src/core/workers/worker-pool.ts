@@ -10,7 +10,8 @@
 
 import { EventEmitter } from 'events';
 import { randomUUID } from 'crypto';
-import { WorkerAgent, WorkerTask, WorkerResult, WorkerTaskType } from './worker-agent';
+import { WorkerAgent } from './worker-agent';
+import type { WorkerTask, WorkerResult, WorkerTaskType } from './worker-agent';
 
 // ===========================================================================
 // TYPES

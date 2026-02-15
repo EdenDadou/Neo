@@ -102,8 +102,10 @@ export { WorkerExecutor } from './executor/worker-executor';
 // HELPER: Créer et configurer le système de skills complet
 // ===========================================================================
 
-import { SkillManager, getSkillManager, SkillPersistence } from './skill-manager';
-import { CapabilityManager, getCapabilityManager, MemoryInterface, LLMInterface } from './capabilities';
+import { SkillManager, getSkillManager } from './skill-manager';
+import type { SkillPersistence } from './skill-manager';
+import { CapabilityManager, getCapabilityManager } from './capabilities';
+import type { MemoryInterface, LLMInterface } from './capabilities';
 import type { PersistenceLayer } from '../core/memory/persistence';
 import type { SkillDefinition } from './types';
 

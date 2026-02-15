@@ -8,7 +8,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import { AgentConfig, AgentMessage, AgentRole } from './types';
+import type { AgentConfig, AgentMessage, AgentRole } from './types';
 import { messageBus } from './message-bus';
 import { getTokenManager, TokenManager } from './token-manager';
 import { getModelRouter, ModelRouter } from './models';

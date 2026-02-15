@@ -8,7 +8,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import { MemoryEntry } from '../types';
+import type { MemoryEntry } from '../types';
 
 export interface FactCheckResult {
   isConsistent: boolean;

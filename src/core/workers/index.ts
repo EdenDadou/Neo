@@ -5,16 +5,13 @@
  * Brain délègue tout travail aux workers pour rester disponible.
  */
 
-export {
-  WorkerAgent,
+export { WorkerAgent } from './worker-agent';
+export type {
   WorkerTask,
   WorkerResult,
   WorkerTaskType,
   WorkerStatus,
 } from './worker-agent';
 
-export {
-  WorkerPool,
-  PoolConfig,
-  getWorkerPool,
-} from './worker-pool';
+export { WorkerPool, getWorkerPool } from './worker-pool';
+export type { PoolConfig } from './worker-pool';

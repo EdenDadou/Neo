@@ -4,7 +4,7 @@
  */
 
 import { EventEmitter } from 'events';
-import { AgentMessage, AgentRole, MessageType } from './types';
+import type { AgentMessage, AgentRole, MessageType } from './types';
 import { randomUUID } from 'crypto';
 
 export class MessageBus extends EventEmitter {

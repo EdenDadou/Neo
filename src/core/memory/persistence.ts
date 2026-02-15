@@ -8,7 +8,7 @@
  */
 
 import Database from 'better-sqlite3';
-import { MemoryEntry, Task, Skill, LearningEntry, MemoryType } from '../types';
+import type { MemoryEntry, Task, Skill, LearningEntry, MemoryType } from '../types';
 import { randomUUID } from 'crypto';
 import * as path from 'path';
 import * as fs from 'fs';

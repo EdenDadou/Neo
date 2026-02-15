@@ -9,14 +9,19 @@ import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 import * as path from 'path';
 import * as fs from 'fs';
-import {
+import { fileURLToPath } from 'url';
+import { LLM_PRESETS } from './types';
+import type {
   CrewConfig,
   CrewExecutionResult,
   CrewIPCRequest,
   CrewIPCResponse,
-  LLM_PRESETS,
   LLMConfig,
 } from './types';
+
+// ESM compatibility for __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ===========================================================================
 // TYPES INTERNES

@@ -12,29 +12,33 @@
  */
 
 import { BaseAgent } from '../base-agent';
-import {
+import type {
   AgentConfig,
   AgentMessage,
   MemoryEntry,
   Skill,
 } from '../types';
 import { randomUUID } from 'crypto';
-import { WebSearchService, SearchResult } from '../../utils/web-search';
-import { ModelInfo } from '../models';
-import {
-  SkillManager,
+import { WebSearchService } from '../../utils/web-search';
+import type { SearchResult } from '../../utils/web-search';
+import type { ModelInfo } from '../models';
+import { SkillManager } from '../../skills';
+import type {
   SkillDefinition,
   SkillExecutionResult,
 } from '../../skills';
-import { WorkerPool, getWorkerPool, WorkerResult } from '../workers';
+import { WorkerPool, getWorkerPool } from '../workers';
+import type { WorkerResult } from '../workers';
 import {
   CrewManager,
   getCrewManager,
-  CrewConfig,
-  CrewExecutionResult,
   LLM_PRESETS,
   PRESET_CREWS,
   getPresetCrew,
+} from '../../crew';
+import type {
+  CrewConfig,
+  CrewExecutionResult,
 } from '../../crew';
 
 // ===========================================================================

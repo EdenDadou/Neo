@@ -18,7 +18,7 @@
  */
 
 import { BaseAgent } from '../base-agent';
-import { AgentConfig, AgentMessage, ConversationTurn } from '../types';
+import type { AgentConfig, AgentMessage, ConversationTurn } from '../types';
 import { ContextReport } from '../memory';
 
 // ===========================================================================
