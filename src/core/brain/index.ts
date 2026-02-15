@@ -64,6 +64,8 @@ interface BrainState {
   decisionHistory: Decision[];
   pendingMemoryRequests: Map<string, (entries: MemoryEntry[]) => void>;
   pendingFactChecks: Map<string, (result: FactCheckResult) => void>;
+  isProcessingRequest: boolean; // Circuit breaker pour éviter récursion
+  contextRequestDepth: number; // Limite de profondeur pour requêtes contexte
   metrics: {
     totalRequests: number;
     successfulResponses: number;
@@ -224,6 +226,8 @@ export class BrainAgent extends BaseAgent {
       decisionHistory: [],
       pendingMemoryRequests: new Map(),
       pendingFactChecks: new Map(),
+      isProcessingRequest: false,
+      contextRequestDepth: 0,
       metrics: {
         totalRequests: 0,
         successfulResponses: 0,
@@ -396,6 +400,15 @@ export class BrainAgent extends BaseAgent {
       limit?: number;
     } = {}
   ): Promise<MemoryEntry[]> {
+    // Limite de profondeur pour éviter récursion infinie
+    const MAX_CONTEXT_DEPTH = 3;
+    if (this.state.contextRequestDepth >= MAX_CONTEXT_DEPTH) {
+      console.log(`[Brain] ⚠️ Limite de profondeur atteinte (${MAX_CONTEXT_DEPTH}), skip queryMemory`);
+      return [];
+    }
+
+    this.state.contextRequestDepth++;
+
     return new Promise((resolve) => {
       const requestId = `brain_query_${Date.now()}`;
 
@@ -1041,10 +1054,27 @@ ${originalResponse}
   // ===========================================================================
 
   protected async handleMessage(message: AgentMessage): Promise<void> {
+    // Ignorer les messages qui ne sont pas destinés à Brain
+    if (message.to !== 'brain' && message.to !== 'broadcast') {
+      return;
+    }
+
+    // Circuit breaker pour user_input: éviter traitement concurrent
+    if (message.type === 'user_input' && this.state.isProcessingRequest) {
+      console.log('[Brain] ⚠️ Requête ignorée (déjà en traitement)');
+      return;
+    }
+
     try {
       switch (message.type) {
         case 'user_input':
-          await this.handleUserInput(message);
+          this.state.isProcessingRequest = true;
+          this.state.contextRequestDepth = 0; // Reset depth counter
+          try {
+            await this.handleUserInput(message);
+          } finally {
+            this.state.isProcessingRequest = false;
+          }
           break;
 
         case 'context_response':
@@ -1072,6 +1102,7 @@ ${originalResponse}
       }
     } catch (error) {
       console.error(`[Brain] Erreur handleMessage (${message.type}):`, error);
+      this.state.isProcessingRequest = false; // Reset on error
       // Send error response to Vox
       if (message.type === 'user_input') {
         this.send('vox', 'response_ready', {

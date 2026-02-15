@@ -8,7 +8,7 @@
     "neo": "./neo",
     "setup": "tsx install.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "tsx src/server.ts",
     "dev": "tsx src/server.ts",
     "dev:cli": "tsx src/index.ts",
     "dev:watch": "tsx watch src/server.ts",

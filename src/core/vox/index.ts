@@ -120,6 +120,7 @@ Réponds en JSON:
 export class VoxAgent extends BaseAgent {
   private state: VoxState;
   private pendingContextRequests: Map<string, (report: ContextReport) => void> = new Map();
+  private isProcessingMessage = false; // Circuit breaker pour éviter récursion
 
   constructor(config?: Partial<AgentConfig>) {
     super({
@@ -372,21 +373,40 @@ export class VoxAgent extends BaseAgent {
   // ===========================================================================
 
   protected async handleMessage(message: AgentMessage): Promise<void> {
-    switch (message.type) {
-      case 'response_ready':
-        await this.handleBrainResponse(message);
-        break;
+    // Circuit breaker: ignorer si déjà en train de traiter un message
+    if (this.isProcessingMessage) {
+      console.log(`[Vox] ⚠️ Message ignoré (déjà en traitement): ${message.type}`);
+      return;
+    }
 
-      case 'context_report':
-        this.handleContextReport(message);
-        break;
+    // Ignorer les messages qui ne sont pas destinés à Vox
+    if (message.to !== 'vox' && message.to !== 'broadcast') {
+      return;
+    }
 
-      case 'error':
-        await this.handleError(message);
-        break;
+    this.isProcessingMessage = true;
+    try {
+      switch (message.type) {
+        case 'response_ready':
+          // Ne traiter que les réponses de Brain, pas les broadcasts pour user
+          if (message.from === 'brain') {
+            await this.handleBrainResponse(message);
+          }
+          break;
 
-      default:
-        console.log(`[Vox] Message non géré: ${message.type}`);
+        case 'context_report':
+          this.handleContextReport(message);
+          break;
+
+        case 'error':
+          await this.handleError(message);
+          break;
+
+        default:
+          console.log(`[Vox] Message non géré: ${message.type}`);
+      }
+    } finally {
+      this.isProcessingMessage = false;
     }
   }
 

@@ -98,10 +98,23 @@ export class MessageBus extends EventEmitter {
 
   /**
    * S'abonner aux messages destinés à un agent
+   * FIX: Filtrer les broadcasts pour ne pas recevoir ses propres messages
    */
   subscribe(role: AgentRole, handler: (message: AgentMessage) => void): void {
     this.on(`message:${role}`, handler);
-    this.on('broadcast', handler);
+
+    // Wrapper pour filtrer les broadcasts provenant de soi-même
+    const broadcastHandler = (message: AgentMessage) => {
+      // Ne pas traiter ses propres broadcasts pour éviter les boucles infinies
+      if (message.from === role) {
+        return;
+      }
+      handler(message);
+    };
+
+    // Stocker le handler wrappé pour le unsubscribe
+    (handler as { _broadcastWrapper?: (message: AgentMessage) => void })._broadcastWrapper = broadcastHandler;
+    this.on('broadcast', broadcastHandler);
   }
 
   /**
@@ -109,7 +122,13 @@ export class MessageBus extends EventEmitter {
    */
   unsubscribe(role: AgentRole, handler: (message: AgentMessage) => void): void {
     this.off(`message:${role}`, handler);
-    this.off('broadcast', handler);
+    // Utiliser le handler wrappé pour le broadcast
+    const broadcastWrapper = (handler as { _broadcastWrapper?: (message: AgentMessage) => void })._broadcastWrapper;
+    if (broadcastWrapper) {
+      this.off('broadcast', broadcastWrapper);
+    } else {
+      this.off('broadcast', handler);
+    }
   }
 
   /**

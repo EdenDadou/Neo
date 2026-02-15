@@ -52,6 +52,7 @@ interface MemoryAgentState {
   lastConsolidation: Date | null;
   currentSessionId: string;
   pendingEmbeddings: string[];
+  activeHandlers: Set<string>; // Track active message handlers to prevent recursion
 }
 
 export interface ContextReport {
@@ -198,6 +199,7 @@ export class MemoryAgent extends BaseAgent {
       lastConsolidation: null,
       currentSessionId: randomUUID(),
       pendingEmbeddings: [],
+      activeHandlers: new Set(),
     };
   }
 
@@ -1329,6 +1331,26 @@ Réponds en JSON:
   // ===========================================================================
 
   protected async handleMessage(message: AgentMessage): Promise<void> {
+    // Ignorer les messages qui ne sont pas destinés à Memory
+    if (message.to !== 'memory' && message.to !== 'broadcast') {
+      return;
+    }
+
+    // Circuit breaker: éviter de traiter le même type de message en récursion
+    if (this.state.activeHandlers.has(message.type)) {
+      console.log(`[Memory] ⚠️ Handler déjà actif pour: ${message.type}, ignoré`);
+      return;
+    }
+
+    // Limiter le nombre de handlers actifs pour éviter stack overflow
+    if (this.state.activeHandlers.size >= 10) {
+      console.log(`[Memory] ⚠️ Trop de handlers actifs (${this.state.activeHandlers.size}), ignoré`);
+      this.reply(message, { error: true, message: 'Too many concurrent handlers' });
+      return;
+    }
+
+    this.state.activeHandlers.add(message.type);
+
     try {
       switch (message.type) {
         case 'context_request':
@@ -1362,6 +1384,8 @@ Réponds en JSON:
       console.error(`[Memory] Erreur dans handleMessage (${message.type}):`, error);
       // Reply with error to prevent caller from hanging
       this.reply(message, { error: true, message: String(error) });
+    } finally {
+      this.state.activeHandlers.delete(message.type);
     }
   }
 
