@@ -10,12 +10,12 @@
  */
 
 import { EventEmitter } from 'events';
-import {
+import type {
   CapabilityType,
   CapabilityConfig,
   CapabilityGrant,
-  CAPABILITY_LIMITS,
 } from './types';
+import { CAPABILITY_LIMITS } from './types';
 
 // ===========================================================================
 // RATE LIMITER

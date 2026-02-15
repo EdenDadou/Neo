@@ -10,7 +10,7 @@
 
 import { EventEmitter } from 'events';
 import { randomUUID } from 'crypto';
-import {
+import type {
   SkillDefinition,
   SkillCreateInput,
   SkillUpdateInput,
@@ -20,8 +20,8 @@ import {
   SkillStats,
   SkillEvent,
   CapabilityType,
-  SKILL_DEFAULTS,
 } from './types';
+import { SKILL_DEFAULTS } from './types';
 import { WorkerExecutor } from './executor/worker-executor';
 import { CapabilityManager } from './capabilities';
 

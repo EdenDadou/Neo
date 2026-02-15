@@ -34,7 +34,7 @@
 // TYPES
 // ===========================================================================
 
-export {
+export type {
   // Types de capabilities
   CapabilityType,
   CapabilityConfig,
@@ -62,8 +62,10 @@ export {
 
   // Events
   SkillEvent,
+} from './types';
 
-  // Constants
+// Constants (valeurs, pas types)
+export {
   SKILL_DEFAULTS,
   CAPABILITY_LIMITS,
 } from './types';
@@ -249,7 +251,7 @@ export function initializeSkillSystem(config: SkillSystemConfig): {
 // HELPER: Créer un skill depuis un pattern détecté
 // ===========================================================================
 
-import { SkillCreateInput, CapabilityType } from './types';
+import type { SkillCreateInput, CapabilityType } from './types';
 
 /**
  * Template pour créer un skill de web scraping

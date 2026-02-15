@@ -11,15 +11,15 @@
 import { Worker } from 'worker_threads';
 import { EventEmitter } from 'events';
 import * as path from 'path';
-import {
+import type {
   SkillDefinition,
   CapabilityGrant,
   WorkerMessage,
   WorkerResponse,
   SerializedCapabilities,
   CapabilityType,
-  SKILL_DEFAULTS,
 } from '../types';
+import { SKILL_DEFAULTS } from '../types';
 
 // ===========================================================================
 // TYPES
