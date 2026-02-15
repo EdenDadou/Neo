@@ -526,7 +526,7 @@ export class SkillManager extends EventEmitter {
   // ===========================================================================
 
   /**
-   * Obtenir les statistiques
+   * Obtenir les statistiques globales du système
    */
   getStats(): SkillStats {
     const skills = Array.from(this.skills.values());

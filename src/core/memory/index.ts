@@ -36,6 +36,7 @@ import { EmbeddingsService } from './embeddings';
 import { FactChecker, CorrectionDetectionResult, FactCheckResult } from './fact-checker';
 import { randomUUID } from 'crypto';
 import { PROTECTED_TRAITS, REQUIRED_TRAITS, validateAction, getCoreRulesPrompt } from '../rules';
+import { initializeSkillSystem, SkillManager } from '../../skills';
 
 // Re-export for use by other modules
 export { PROTECTED_TRAITS, REQUIRED_TRAITS, getCoreRulesPrompt };
@@ -149,6 +150,7 @@ export class MemoryAgent extends BaseAgent {
   private persistence: PersistenceLayer;
   private embeddings: EmbeddingsService;
   private factChecker: FactChecker;
+  private skillManager: SkillManager | null = null;
   private synthesisTimer: NodeJS.Timeout | null = null;
   private consolidationTimer: NodeJS.Timeout | null = null;
   private embeddingTimer: NodeJS.Timeout | null = null;
@@ -170,6 +172,25 @@ export class MemoryAgent extends BaseAgent {
     this.embeddings = new EmbeddingsService();
     this.factChecker = new FactChecker();
 
+    // Initialiser le système de skills
+    const { skillManager } = initializeSkillSystem({
+      persistence: this.persistence,
+      memory: {
+        search: async (query: string, limit: number) => {
+          return this.search(query, { limit });
+        },
+        get: async (id: string) => {
+          return this.persistence.getMemory(id);
+        },
+        store: async (type: string, content: string, metadata?: Record<string, unknown>) => {
+          return this.store(type as MemoryType, content, metadata);
+        },
+      },
+    });
+
+    this.skillManager = skillManager;
+    // capabilityManager est géré par le SkillManager lui-même
+
     this.state = {
       isProcessing: false,
       lastSynthesis: null,
@@ -185,6 +206,13 @@ export class MemoryAgent extends BaseAgent {
 
   protected async onStart(): Promise<void> {
     console.log('[Memory] 🧠 Démarrage des cycles autonomes...');
+
+    // Démarrer le système de skills
+    if (this.skillManager) {
+      await this.skillManager.start();
+      const stats = this.skillManager.getStats();
+      console.log(`[Memory] 🔧 Skills: ${stats.totalSkills} chargés (${stats.builtinSkills} built-in)`);
+    }
 
     // Préchauffer le modèle d'embeddings
     try {
