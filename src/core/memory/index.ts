@@ -1663,6 +1663,134 @@ Applique ces traits dans toutes tes réponses de manière cohérente.
   }
 
   // ===========================================================================
+  // LONG-TERM MEMORY MAINTENANCE
+  // ===========================================================================
+
+  /**
+   * Cycle de maintenance de la mémoire long-terme
+   * À appeler périodiquement (toutes les 24h recommandé)
+   */
+  async runMaintenanceCycle(): Promise<{
+    conversationsCompressed: number;
+    backupsDeleted: number;
+    optimized: boolean;
+    integrityOk: boolean;
+  }> {
+    console.log('[Memory] 🔄 Cycle de maintenance démarré...');
+
+    const result = {
+      conversationsCompressed: 0,
+      backupsDeleted: 0,
+      optimized: false,
+      integrityOk: true,
+    };
+
+    try {
+      // 1. Compresser les vieilles conversations (> 2 ans)
+      result.conversationsCompressed = this.persistence.compressOldConversations(2);
+      if (result.conversationsCompressed > 0) {
+        console.log(`[Memory] 📦 ${result.conversationsCompressed} conversations compressées`);
+      }
+
+      // 2. Nettoyer les vieux backups (garder les 10 derniers)
+      result.backupsDeleted = this.persistence.cleanOldBackups(10);
+
+      // 3. Vérifier l'intégrité de la base
+      const integrity = this.persistence.checkIntegrity();
+      result.integrityOk = integrity.ok;
+
+      if (!integrity.ok) {
+        console.error('[Memory] ❌ Problème d\'intégrité détecté:', integrity.errors);
+        // Créer un backup d'urgence
+        this.persistence.backup();
+      }
+
+      // 4. Optimiser si nécessaire (fragmentée > 20%)
+      const stats = this.persistence.getStats();
+      if (stats.dbSizeMB > 100) { // Optimiser si > 100MB
+        this.persistence.optimize();
+        result.optimized = true;
+      }
+
+      // 5. Créer un backup régulier
+      this.persistence.backup();
+
+      console.log('[Memory] ✅ Cycle de maintenance terminé');
+    } catch (error) {
+      console.error('[Memory] ❌ Erreur maintenance:', error);
+    }
+
+    return result;
+  }
+
+  /**
+   * Récupérer l'historique des changements de personnalité
+   */
+  getPersonalityHistory(trait?: string, limit = 50): Array<{
+    id: string;
+    trait: string;
+    oldValue: string | null;
+    newValue: string;
+    changedAt: Date;
+    reason?: string;
+  }> {
+    return this.persistence.getPersonalityHistory(trait, limit);
+  }
+
+  /**
+   * Récupérer les statistiques de mémoire par année
+   * Utile pour visualiser l'évolution sur 10+ ans
+   */
+  getMemoryStatsByYear(): Array<{
+    year: string;
+    totalMemories: number;
+    avgImportance: number;
+    topTypes: Record<string, number>;
+  }> {
+    return this.persistence.getMemoryStatsByYear();
+  }
+
+  /**
+   * Récupérer les mémoires d'une période spécifique
+   */
+  getMemoriesByPeriod(startDate: Date, endDate: Date, options?: {
+    type?: MemoryType;
+    minImportance?: number;
+    limit?: number;
+  }): MemoryEntry[] {
+    return this.persistence.getMemoriesByPeriod(startDate, endDate, options);
+  }
+
+  /**
+   * Archiver les mémoires peu importantes et anciennes
+   * Garde les mémoires en BD mais réduit leur priorité de recherche
+   */
+  archiveOldMemories(olderThanYears: number, maxImportance = 0.3): number {
+    const cutoffDate = new Date();
+    cutoffDate.setFullYear(cutoffDate.getFullYear() - olderThanYears);
+
+    // Rechercher les mémoires à archiver
+    const toArchive = this.persistence.searchMemories({
+      includeArchived: false,
+    }).filter(m =>
+      m.createdAt < cutoffDate &&
+      m.importance <= maxImportance &&
+      !['correction', 'preference'].includes(m.type) // Ne jamais archiver les corrections/préférences
+    );
+
+    // Archiver (marquer comme archived)
+    for (const memory of toArchive) {
+      this.persistence.archiveMemory(memory.id);
+    }
+
+    if (toArchive.length > 0) {
+      console.log(`[Memory] 📁 ${toArchive.length} mémoires archivées (> ${olderThanYears} ans, importance < ${maxImportance})`);
+    }
+
+    return toArchive.length;
+  }
+
+  // ===========================================================================
   // API PUBLIQUE
   // ===========================================================================
 

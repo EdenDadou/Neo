@@ -444,6 +444,18 @@ export class PersistenceLayer {
   }
 
   /**
+   * Archiver une mémoire spécifique par son ID
+   */
+  archiveMemory(id: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE memories
+      SET is_archived = 1
+      WHERE id = ?
+    `).run(id);
+    return result.changes > 0;
+  }
+
+  /**
    * Supprimer une mémoire par son ID
    */
   deleteMemory(id: string): boolean {

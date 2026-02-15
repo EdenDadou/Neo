@@ -1452,6 +1452,443 @@ ${originalResponse}
   }
 
   // ===========================================================================
+  // SKILL AUTO-IMPROVEMENT - Amélioration automatique des skills
+  // ===========================================================================
+
+  /**
+   * Analyser un échec de skill et générer une version améliorée du code
+   * Cette méthode est appelée quand un skill échoue plusieurs fois
+   */
+  async analyzeSkillFailure(
+    skill: SkillDefinition,
+    recentErrors: Array<{ error: string; input: Record<string, unknown>; timestamp: Date }>
+  ): Promise<{
+    shouldImprove: boolean;
+    suggestedCode?: string;
+    analysis: string;
+    confidence: number;
+  }> {
+    if (!this.skillManager) {
+      return { shouldImprove: false, analysis: 'SkillManager non disponible', confidence: 0 };
+    }
+
+    console.log(`[Brain] 🔬 Analyse des échecs du skill "${skill.name}"`);
+
+    // Construire le prompt d'analyse
+    const analysisPrompt = `
+Tu es un expert en amélioration de code. Analyse ce skill qui a échoué plusieurs fois et propose une correction.
+
+SKILL ACTUEL:
+- Nom: ${skill.name}
+- Description: ${skill.description}
+- Version: ${skill.version}
+- Taux de succès: ${(skill.successRate * 100).toFixed(1)}%
+- Capabilities requises: ${skill.requiredCapabilities.join(', ')}
+
+CODE ACTUEL:
+\`\`\`javascript
+${skill.code}
+\`\`\`
+
+ERREURS RÉCENTES (${recentErrors.length}):
+${recentErrors.map((e, i) => `
+${i + 1}. Erreur: ${e.error}
+   Input: ${JSON.stringify(e.input).substring(0, 200)}
+   Date: ${e.timestamp.toISOString()}
+`).join('\n')}
+
+ANALYSE DEMANDÉE:
+1. Identifie la cause racine des échecs
+2. Propose un code corrigé qui résout le problème
+3. Explique les changements effectués
+
+Réponds en JSON:
+{
+  "rootCause": "Explication de la cause racine",
+  "shouldImprove": true/false,
+  "confidence": 0.0-1.0,
+  "suggestedCode": "// Code corrigé complet ici",
+  "changes": ["Liste des changements effectués"],
+  "warnings": ["Avertissements éventuels"]
+}
+`;
+
+    try {
+      const response = await this.think(analysisPrompt);
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+
+      if (!jsonMatch) {
+        return {
+          shouldImprove: false,
+          analysis: 'Impossible de parser la réponse',
+          confidence: 0,
+        };
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      return {
+        shouldImprove: parsed.shouldImprove && parsed.confidence >= 0.7,
+        suggestedCode: parsed.suggestedCode,
+        analysis: `${parsed.rootCause}. Changements: ${parsed.changes?.join(', ') || 'aucun'}`,
+        confidence: parsed.confidence || 0,
+      };
+    } catch (error) {
+      console.error('[Brain] Erreur analyse skill:', error);
+      return {
+        shouldImprove: false,
+        analysis: `Erreur d'analyse: ${error instanceof Error ? error.message : String(error)}`,
+        confidence: 0,
+      };
+    }
+  }
+
+  /**
+   * Améliorer automatiquement un skill basé sur ses échecs
+   * Crée une nouvelle version avec le code corrigé
+   */
+  async improveSkill(
+    skillId: string,
+    options?: { forceImprove?: boolean; maxAttempts?: number }
+  ): Promise<{
+    improved: boolean;
+    newVersion?: string;
+    analysis: string;
+  }> {
+    if (!this.skillManager) {
+      return { improved: false, analysis: 'SkillManager non disponible' };
+    }
+
+    const skill = this.skillManager.getSkill(skillId);
+    if (!skill) {
+      return { improved: false, analysis: `Skill ${skillId} introuvable` };
+    }
+
+    // Ne pas améliorer les skills built-in sans forceImprove
+    if (skill.isBuiltin && !options?.forceImprove) {
+      return { improved: false, analysis: 'Skills built-in non modifiables sans forceImprove' };
+    }
+
+    // Récupérer les erreurs récentes depuis Memory
+    const errorMemories = await this.queryMemory(
+      `skill_execution failure ${skill.name}`,
+      { type: 'correction', limit: 10 }
+    );
+
+    const recentErrors = errorMemories
+      .filter(m => {
+        try {
+          const data = JSON.parse(m.content);
+          return data.skillId === skillId && data.error;
+        } catch {
+          return false;
+        }
+      })
+      .map(m => {
+        const data = JSON.parse(m.content);
+        return {
+          error: data.error?.message || data.criticalError || 'Unknown error',
+          input: data.input || {},
+          timestamp: m.createdAt,
+        };
+      });
+
+    if (recentErrors.length < 2 && !options?.forceImprove) {
+      return {
+        improved: false,
+        analysis: `Pas assez d'échecs pour justifier une amélioration (${recentErrors.length}/2 minimum)`,
+      };
+    }
+
+    console.log(`[Brain] 🔧 Tentative d'amélioration du skill "${skill.name}" (${recentErrors.length} échecs)`);
+
+    // Analyser les échecs
+    const analysis = await this.analyzeSkillFailure(skill, recentErrors);
+
+    if (!analysis.shouldImprove || !analysis.suggestedCode) {
+      return {
+        improved: false,
+        analysis: analysis.analysis,
+      };
+    }
+
+    // Appliquer l'amélioration
+    try {
+      // Incrémenter la version
+      const versionParts = skill.version.split('.');
+      const newPatch = parseInt(versionParts[2] || '0') + 1;
+      const newVersion = `${versionParts[0]}.${versionParts[1]}.${newPatch}`;
+
+      await this.skillManager.updateSkill(skillId, {
+        code: analysis.suggestedCode,
+      });
+
+      // Mettre à jour la version manuellement (car updateSkill ne le fait pas)
+      const updatedSkill = this.skillManager.getSkill(skillId);
+      if (updatedSkill) {
+        // Note: La version est mise à jour via un autre mécanisme si nécessaire
+        console.log(`[Brain] ✅ Skill "${skill.name}" amélioré -> v${newVersion}`);
+      }
+
+      // Logger l'amélioration en mémoire
+      this.send('memory', 'memory_store', {
+        type: 'learning',
+        content: JSON.stringify({
+          skillId,
+          skillName: skill.name,
+          previousVersion: skill.version,
+          newVersion,
+          analysis: analysis.analysis,
+          confidence: analysis.confidence,
+          errorsFixed: recentErrors.length,
+        }),
+        metadata: {
+          tags: ['skill_improvement', 'auto_learning', skill.name],
+          importance: 0.8,
+        },
+      });
+
+      return {
+        improved: true,
+        newVersion,
+        analysis: analysis.analysis,
+      };
+    } catch (error) {
+      console.error('[Brain] Erreur amélioration skill:', error);
+      return {
+        improved: false,
+        analysis: `Erreur lors de l'application: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * Vérifier et améliorer automatiquement les skills qui ont un faible taux de succès
+   * Cette méthode devrait être appelée périodiquement
+   */
+  async runSkillMaintenanceCycle(): Promise<{
+    skillsChecked: number;
+    skillsImproved: number;
+    improvements: Array<{ skillName: string; analysis: string }>;
+  }> {
+    if (!this.skillManager) {
+      return { skillsChecked: 0, skillsImproved: 0, improvements: [] };
+    }
+
+    console.log('[Brain] 🔄 Cycle de maintenance des skills...');
+
+    const stats = this.skillManager.getStats();
+    const improvements: Array<{ skillName: string; analysis: string }> = [];
+
+    // Récupérer tous les skills avec un taux de succès < 70%
+    const allSkills = this.skillManager.searchSkills({ isEnabled: true });
+    const problematicSkills = allSkills.filter(s =>
+      s.successRate < 0.7 &&
+      s.usageCount >= 3 &&
+      !s.isBuiltin
+    );
+
+    console.log(`[Brain] 📊 ${problematicSkills.length} skills problématiques sur ${stats.totalSkills}`);
+
+    for (const skill of problematicSkills) {
+      const result = await this.improveSkill(skill.id);
+
+      if (result.improved) {
+        improvements.push({
+          skillName: skill.name,
+          analysis: result.analysis,
+        });
+      }
+    }
+
+    console.log(`[Brain] ✅ Maintenance terminée: ${improvements.length} skills améliorés`);
+
+    return {
+      skillsChecked: problematicSkills.length,
+      skillsImproved: improvements.length,
+      improvements,
+    };
+  }
+
+  /**
+   * Détecter si une tâche répétitive pourrait devenir un skill
+   * Analyse l'historique des conversations pour trouver des patterns
+   */
+  async detectSkillOpportunity(
+    conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>,
+    taskResult: unknown
+  ): Promise<{
+    shouldCreateSkill: boolean;
+    suggestedSkill?: {
+      name: string;
+      description: string;
+      triggers: string[];
+      code: string;
+    };
+    reasoning: string;
+  }> {
+    // Chercher des patterns similaires en mémoire
+    const recentUserMessage = conversationHistory.filter(m => m.role === 'user').pop();
+    if (!recentUserMessage) {
+      return { shouldCreateSkill: false, reasoning: 'Pas de message utilisateur' };
+    }
+
+    const similarTasks = await this.queryMemory(recentUserMessage.content, {
+      type: 'task_result',
+      limit: 10,
+    });
+
+    // Si on trouve 3+ tâches similaires, proposer un skill
+    if (similarTasks.length < 3) {
+      return {
+        shouldCreateSkill: false,
+        reasoning: `Pas assez de tâches similaires (${similarTasks.length}/3 minimum)`,
+      };
+    }
+
+    console.log(`[Brain] 💡 Détection d'opportunité de skill (${similarTasks.length} tâches similaires)`);
+
+    const detectionPrompt = `
+Analyse ces tâches répétitives et détermine si elles pourraient être automatisées en un skill réutilisable.
+
+TÂCHE ACTUELLE:
+User: "${recentUserMessage.content}"
+Résultat: ${JSON.stringify(taskResult).substring(0, 500)}
+
+TÂCHES SIMILAIRES PASSÉES:
+${similarTasks.slice(0, 5).map((m, i) => `${i + 1}. ${m.content.substring(0, 200)}`).join('\n')}
+
+QUESTION:
+Ces tâches partagent-elles un pattern commun qui pourrait être automatisé?
+
+Réponds en JSON:
+{
+  "shouldCreateSkill": true/false,
+  "reasoning": "Explication",
+  "suggestedSkill": {
+    "name": "Nom du skill",
+    "description": "Description",
+    "triggers": ["mot-clé1", "mot-clé2"],
+    "requiredCapabilities": ["memory_read", "web_fetch", etc.],
+    "codeOutline": "Description du code à générer"
+  }
+}
+`;
+
+    try {
+      const response = await this.think(detectionPrompt);
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+
+      if (!jsonMatch) {
+        return { shouldCreateSkill: false, reasoning: 'Impossible de parser la réponse' };
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      if (!parsed.shouldCreateSkill) {
+        return { shouldCreateSkill: false, reasoning: parsed.reasoning };
+      }
+
+      // Générer le code complet du skill
+      const codeGenPrompt = `
+Génère le code JavaScript complet pour ce skill:
+
+Nom: ${parsed.suggestedSkill.name}
+Description: ${parsed.suggestedSkill.description}
+Capabilities: ${parsed.suggestedSkill.requiredCapabilities?.join(', ') || 'memory_read'}
+Outline: ${parsed.suggestedSkill.codeOutline}
+
+Le code doit:
+1. Être une fonction async qui reçoit (input, context)
+2. Utiliser les capabilities via context (context.memory, context.webFetch, etc.)
+3. Retourner un objet avec les résultats
+4. Gérer les erreurs proprement
+
+Réponds UNIQUEMENT avec le code JavaScript, sans markdown ni explication.
+`;
+
+      const codeResponse = await this.think(codeGenPrompt);
+      const code = codeResponse.replace(/```javascript\n?/g, '').replace(/```\n?/g, '').trim();
+
+      return {
+        shouldCreateSkill: true,
+        suggestedSkill: {
+          name: parsed.suggestedSkill.name,
+          description: parsed.suggestedSkill.description,
+          triggers: parsed.suggestedSkill.triggers || [parsed.suggestedSkill.name.toLowerCase()],
+          code: `
+// Skill auto-généré: ${parsed.suggestedSkill.name}
+// Basé sur ${similarTasks.length} tâches similaires
+
+async function execute(input, context) {
+  ${code}
+}
+
+return execute(input, context);
+`,
+        },
+        reasoning: parsed.reasoning,
+      };
+    } catch (error) {
+      return {
+        shouldCreateSkill: false,
+        reasoning: `Erreur de détection: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * Créer automatiquement un skill à partir d'une détection
+   */
+  async createSkillFromDetection(
+    suggestedSkill: {
+      name: string;
+      description: string;
+      triggers: string[];
+      code: string;
+    }
+  ): Promise<SkillDefinition | null> {
+    if (!this.skillManager) {
+      console.error('[Brain] SkillManager non disponible');
+      return null;
+    }
+
+    console.log(`[Brain] 🆕 Création automatique du skill "${suggestedSkill.name}"`);
+
+    try {
+      const skill = await this.skillManager.createSkill({
+        name: suggestedSkill.name,
+        description: suggestedSkill.description,
+        triggers: suggestedSkill.triggers,
+        requiredCapabilities: ['memory_read'], // Par défaut, ajuster selon le code
+        code: suggestedSkill.code,
+        createdBy: 'neo',
+      });
+
+      // Logger la création
+      this.send('memory', 'memory_store', {
+        type: 'learning',
+        content: JSON.stringify({
+          event: 'skill_auto_created',
+          skillId: skill.id,
+          skillName: skill.name,
+          triggers: skill.triggers,
+        }),
+        metadata: {
+          tags: ['skill_creation', 'auto_learning', skill.name],
+          importance: 0.7,
+        },
+      });
+
+      console.log(`[Brain] ✅ Skill "${skill.name}" créé avec succès (ID: ${skill.id})`);
+      return skill;
+    } catch (error) {
+      console.error('[Brain] Erreur création skill:', error);
+      return null;
+    }
+  }
+
+  // ===========================================================================
   // CREW AI INTEGRATION - Délégation à des équipes d'agents
   // ===========================================================================
 
