@@ -26,5 +26,8 @@ data/
 *.db-shm
 *.db-wal
 
+# Model cache
+.cache/
+
 # Tests
 coverage/

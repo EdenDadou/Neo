@@ -9,7 +9,21 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { pipeline } from '@xenova/transformers';
+import { pipeline, env } from '@xenova/transformers';
+import { existsSync, mkdirSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Configure cache directory for models
+const CACHE_DIR = resolve(__dirname, '../../../.cache/models');
+if (!existsSync(CACHE_DIR)) {
+  mkdirSync(CACHE_DIR, { recursive: true });
+}
+env.cacheDir = CACHE_DIR;
+env.allowLocalModels = true;
 
 export interface EmbeddingResult {
   text: string;
