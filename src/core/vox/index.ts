@@ -126,7 +126,7 @@ export class VoxAgent extends BaseAgent {
     super({
       name: 'Vox',
       role: 'vox',
-      model: 'claude-3-5-haiku-20241022', // Haiku suffit pour l'interface
+      model: 'claude-haiku-4-5-20250515', // Haiku 4.5 pour l'interface
       maxTokens: 1024,
       temperature: 0.3,
       systemPrompt: VOX_SYSTEM_PROMPT,

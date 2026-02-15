@@ -163,7 +163,7 @@ export class MemoryAgent extends BaseAgent {
     super({
       name: 'Memory',
       role: 'memory',
-      model: 'claude-3-5-haiku-20241022', // Haiku suffit pour extraction/synthèse
+      model: 'claude-haiku-4-5-20250515', // Haiku 4.5 pour extraction/synthèse
       maxTokens: 2048,
       temperature: 0.1,
       systemPrompt: MEMORY_SYSTEM_PROMPT,

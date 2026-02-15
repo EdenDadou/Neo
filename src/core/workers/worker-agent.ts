@@ -411,8 +411,8 @@ Fournis une analyse structurée en JSON:
       }
     }
 
-    // Fallback vers Claude Haiku
-    return 'claude-3-5-haiku-20241022';
+    // Fallback vers Claude Haiku 4.5
+    return 'claude-haiku-4-5-20250515';
   }
 
   /**
