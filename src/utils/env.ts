@@ -118,8 +118,26 @@ export function isStandardApiKey(): boolean {
  * Get the authentication type for Anthropic
  */
 export function getAnthropicAuthType(): 'oauth' | 'api_key' | 'none' {
-  if (isOAuthToken()) return 'oauth';
-  if (isStandardApiKey()) return 'api_key';
-  if (hasAnthropicKey()) return 'api_key'; // Assume API key for other sk-ant- prefixes
+  const key = process.env.ANTHROPIC_API_KEY;
+
+  // Debug log
+  if (key) {
+    const prefix = key.substring(0, 15);
+    console.log(`[Auth] Checking key type: ${prefix}...`);
+  }
+
+  if (isOAuthToken()) {
+    console.log('[Auth] Detected: OAuth token');
+    return 'oauth';
+  }
+  if (isStandardApiKey()) {
+    console.log('[Auth] Detected: Standard API key');
+    return 'api_key';
+  }
+  if (hasAnthropicKey()) {
+    console.log('[Auth] Detected: Other Anthropic key (treating as api_key)');
+    return 'api_key'; // Assume API key for other sk-ant- prefixes
+  }
+  console.log('[Auth] No valid key detected');
   return 'none';
 }
