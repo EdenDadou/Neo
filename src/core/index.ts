@@ -389,43 +389,36 @@ export class Core extends EventEmitter {
    * Configurer le forwarding des événements
    */
   private setupEventForwarding(): void {
-    // Écouter les réponses du système pour les émettre
-    messageBus.on('message', (message) => {
-      // Réponses prêtes pour l'utilisateur
-      if (message.type === 'response_ready') {
-        const payload = message.payload as { target?: string; message?: string; response?: string };
+    // Track emitted messages to avoid duplicates
+    const emittedMessages = new Set<string>();
 
-        // Vox envoie avec target: 'user' et message
-        if (payload.target === 'user' && payload.message) {
-          console.log('[Core] 📤 Émission réponse vers Gateway');
-          this.emit('response', payload.message);
-        }
-        // Brain envoie avec response (sans target)
-        else if (payload.response && !payload.target) {
-          // C'est une réponse interne Brain → Vox, ne pas émettre
-        }
-      }
+    const emitOnce = (message: string) => {
+      const hash = message.substring(0, 100);
+      if (emittedMessages.has(hash)) return;
+      emittedMessages.add(hash);
+      // Clean old entries after 5 seconds
+      setTimeout(() => emittedMessages.delete(hash), 5000);
+      this.emit('response', message);
+    };
 
-      // Événements de typing (si implémenté plus tard)
-      if (message.type === 'typing') {
-        this.emit('typing');
-      }
-
-      // Erreurs
-      if (message.type === 'error') {
-        const payload = message.payload as { message?: string };
-        this.emit('error', { message: payload.message || 'Unknown error' });
-      }
-    });
-
-    // Aussi écouter les broadcasts
+    // Écouter les broadcasts (Vox envoie via broadcast)
     messageBus.on('broadcast', (message) => {
       if (message.type === 'response_ready') {
         const payload = message.payload as { target?: string; message?: string };
         if (payload.target === 'user' && payload.message) {
-          console.log('[Core] 📤 Émission réponse (broadcast) vers Gateway');
-          this.emit('response', payload.message);
+          emitOnce(payload.message);
         }
+      }
+    });
+
+    // Écouter les messages directs pour typing et erreurs
+    messageBus.on('message', (message) => {
+      if (message.type === 'typing') {
+        this.emit('typing');
+      }
+      if (message.type === 'error') {
+        const payload = message.payload as { message?: string };
+        this.emit('error', { message: payload.message || 'Unknown error' });
       }
     });
   }

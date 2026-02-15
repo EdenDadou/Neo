@@ -20,6 +20,7 @@ import { createServer } from 'http';
 import { Core } from '../core';
 import { randomUUID } from 'crypto';
 import { UserStore } from './user-store';
+import { logger } from '../utils/logger';
 
 // Configuration
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production-' + randomUUID();
@@ -456,7 +457,10 @@ export class Gateway {
 
     // Écouter les réponses du Core pour les broadcaster
     this.core.on('response', (message: string) => {
-      console.log(`[Gateway] 📤 Broadcasting response to ${this.clients.size} client(s)`);
+      // Afficher la réponse dans le terminal avec formatage
+      logger.response('Neo', message);
+
+      // Broadcaster aux clients WebSocket
       this.broadcastToClients({
         type: 'response',
         content: message,

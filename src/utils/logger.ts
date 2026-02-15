@@ -2,56 +2,37 @@
  * Logger centralisé pour Neo
  *
  * Par défaut, affiche uniquement:
- * - Les réponses des agents (Vox, Brain, Memory)
- * - Les erreurs
+ * - Les réponses finales (encadrées)
+ * - Les erreurs critiques
  *
  * Mode verbose (DEBUG=true): affiche tout
  */
 
 export type LogLevel = 'debug' | 'info' | 'agent' | 'warn' | 'error';
 
-// Patterns à toujours afficher (réponses importantes)
+// Patterns à toujours afficher
 const ALWAYS_SHOW_PATTERNS = [
-  /^\[Vox\] 📤/,       // Réponses Vox
-  /^🎙️ Vox:/,          // Réponses formatées
-  /^🧠 Brain:/,        // Réponses Brain
-  /^💾 Memory:/,       // Réponses Memory
-  /^👤 User:/,         // Input utilisateur
+  /^┌─/,               // Début de réponse encadrée
+  /^│/,                // Contenu de réponse encadrée
+  /^└─/,               // Fin de réponse encadrée
   /^✅ Serveur/,       // Démarrage serveur
   /^🧠 NEO/,           // Bannière
-  /^───/,              // Séparateurs
+  /^───/,              // Séparateurs bannière
   /^💡/,               // Tips
   /WebSocket:/,        // Info connexion
+  /^Vous >/,           // Input utilisateur (CLI)
 ];
 
-// Patterns à masquer en mode non-verbose
+// Patterns à masquer en mode non-verbose (tout le reste par défaut)
 const HIDE_PATTERNS = [
-  /^\[Env\]/,
-  /^\[Auth\]/,
-  /^\[Persistence\]/,
-  /^\[Embeddings\]/,
-  /^\[ModelRouter\]/,
-  /^\[SkillManager\]/,
-  /^\[Skills\]/,
-  /^\[WorkerExecutor\]/,
-  /^\[Core\]/,
-  /^\[Memory\]/,         // Tous les logs Memory système
-  /^\[Brain\].*init/i,
-  /^\[Brain\].*démarr/i,
-  /^\[Brain\].*modèle/i,
-  /^\[Brain\].*Agent/,
-  /^\[Brain\].*Recherche/i,
-  /^\[Vox\].*Agent/,
-  /^\[Vox\].*📋/,        // Demande contexte
-  /^\[Vox\].*✍️/,        // Réécriture
-  /^\[Vox\].*✅/,        // Prompt enrichi
-  /^\[Vox\].*📥/,        // Entrée utilisateur (doublon)
-  /^\[WebSearch\]/,
-  /^\[Gateway\]/,
-  /^\[UserStore\]/,
-  /^\[TokenManager\]/,
-  /^\[FactChecker\]/,
+  /^\[/,               // Tout ce qui commence par [xxx]
   /^╔|^║|^╚/,          // Bordures bannière
+  /Fallback/i,         // Messages de fallback
+  /OAuth/i,            // Messages OAuth
+  /tokens?.*\$/i,      // Messages de tokens/coût
+  /Modèle optimisé/i,  // Sélection de modèle
+  /warmup/i,           // Warmup
+  /embedding/i,        // Embeddings
 ];
 
 // Sauvegarde des fonctions originales
@@ -81,7 +62,8 @@ function shouldShow(args: unknown[]): boolean {
     return false;
   }
 
-  return true;
+  // Par défaut, masquer
+  return false;
 }
 
 /**
@@ -98,24 +80,32 @@ export function initLogger(): void {
       }
     };
 
-    // console.warn - garder les warnings importants seulement
+    // console.warn - masquer en mode non-verbose
     console.warn = (...args: unknown[]) => {
+      // Masquer tous les warnings sauf erreurs critiques
       const message = args.map(a => String(a)).join(' ');
-      // Masquer les warnings de configuration
-      if (message.includes('ANTHROPIC_API_KEY') ||
-          message.includes('No valid') ||
+      if (message.includes('EADDRINUSE') || message.includes('FATAL')) {
+        originalConsole.warn(...args);
+      }
+    };
+
+    // console.error - afficher uniquement les erreurs critiques
+    console.error = (...args: unknown[]) => {
+      const message = args.map(a => String(a)).join(' ');
+      // Masquer les erreurs OAuth/fallback non critiques
+      if (message.includes('OAuth') ||
+          message.includes('fallback') ||
+          message.includes('Fallback') ||
           message.includes('warmup')) {
         return;
       }
-      originalConsole.warn(...args);
+      originalConsole.error(...args);
     };
   }
-
-  // console.error reste toujours actif
 }
 
 // ============================================================================
-// Logger class pour usage explicite
+// Logger class pour usage explicite dans le code
 // ============================================================================
 
 class Logger {
@@ -129,55 +119,70 @@ class Logger {
   }
 
   /**
-   * Réponse d'un agent vers l'utilisateur - toujours visible avec formatage
+   * Réponse d'un agent - toujours visible avec formatage encadré
    */
   response(source: string, message: string): void {
-    const prefix = this.getAgentPrefix(source);
-    originalConsole.log(`\n${prefix} ${message}\n`);
+    originalConsole.log('');
+    originalConsole.log('┌─────────────────────────────────────────────────────────────');
+    originalConsole.log(`│ ${this.getAgentIcon(source)} ${this.getAgentName(source)}:`);
+    originalConsole.log('├─────────────────────────────────────────────────────────────');
+    message.split('\n').forEach(line => {
+      originalConsole.log(`│ ${line}`);
+    });
+    originalConsole.log('└─────────────────────────────────────────────────────────────');
+    originalConsole.log('');
   }
 
   /**
-   * Message entrant de l'utilisateur - toujours visible
+   * Message entrant de l'utilisateur
    */
   userInput(message: string): void {
-    originalConsole.log(`\n👤 User: ${message}`);
+    originalConsole.log(`\nVous > ${message}`);
   }
 
   /**
-   * Avertissement - toujours visible
+   * Avertissement - uniquement en mode verbose
    */
   warn(source: string, message: string, ...args: unknown[]): void {
-    originalConsole.warn(`[${source}] ⚠️ ${message}`, ...args);
+    if (isVerbose) {
+      originalConsole.warn(`[${source}] ⚠️ ${message}`, ...args);
+    }
   }
 
   /**
-   * Erreur - toujours visible
+   * Erreur critique - toujours visible
    */
   error(source: string, message: string, error?: unknown): void {
-    originalConsole.error(`[${source}] ❌ ${message}`);
+    originalConsole.error(`❌ [${source}] ${message}`);
     if (error && isVerbose) {
       originalConsole.error(error);
     }
   }
 
   /**
-   * Agent message - toujours visible
+   * Agent message - pour les messages importants des agents
    */
-  agent(source: string, message: string, ...args: unknown[]): void {
-    const prefix = this.getAgentPrefix(source);
-    originalConsole.log(`${prefix} ${message}`, ...args);
+  agent(source: string, message: string): void {
+    this.response(source, message);
   }
 
-  private getAgentPrefix(source: string): string {
+  private getAgentIcon(source: string): string {
     switch (source.toLowerCase()) {
-      case 'vox':
-        return '🎙️ Vox:';
-      case 'brain':
-        return '🧠 Brain:';
-      case 'memory':
-        return '💾 Memory:';
-      default:
-        return `[${source}]`;
+      case 'vox': return '🎙️';
+      case 'brain': return '🧠';
+      case 'memory': return '💾';
+      case 'neo': return '🧠';
+      default: return '🤖';
+    }
+  }
+
+  private getAgentName(source: string): string {
+    switch (source.toLowerCase()) {
+      case 'vox': return 'Vox';
+      case 'brain': return 'Brain';
+      case 'memory': return 'Memory';
+      case 'neo': return 'Neo';
+      default: return source;
     }
   }
 }
