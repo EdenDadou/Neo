@@ -384,7 +384,7 @@ export class ModelRouter {
     const maxTierValue = tierOrder[maxTier];
 
     // Filtrer les modèles compatibles
-    let candidates = this.availableModels.filter(model => {
+    const candidates = this.availableModels.filter(model => {
       // Vérifier le tier
       if (tierOrder[model.tier] > maxTierValue) return false;
 

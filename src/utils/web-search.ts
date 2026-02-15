@@ -138,7 +138,7 @@ export class WebSearchService {
     while ((match = resultRegex.exec(html)) !== null && results.length < maxResults) {
       const url = match[1];
       const title = match[2].trim();
-      let snippet = match[3]
+      const snippet = match[3]
         .replace(/<[^>]*>/g, '')  // Enlever les tags HTML
         .replace(/&amp;/g, '&')
         .replace(/&lt;/g, '<')

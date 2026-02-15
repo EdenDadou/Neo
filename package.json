@@ -14,8 +14,15 @@
     "dev:watch": "tsx watch src/server.ts",
     "dev:web": "cd web && npm run dev",
     "test": "vitest",
-    "lint": "eslint src --ext .ts",
-    "typecheck": "tsc --noEmit"
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write src/",
+    "format:check": "prettier --check src/",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run lint && npm run format:check",
+    "check:fix": "npm run lint:fix && npm run format"
   },
   "bin": {
     "neo": "./neo"
@@ -46,6 +53,7 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.0.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
@@ -53,9 +61,13 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^2.0.0",
     "eslint": "^9.0.0",
+    "eslint-config-prettier": "^10.0.0",
+    "prettier": "^3.5.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0",
     "vitest": "^2.0.0"
   },
   "engines": {
