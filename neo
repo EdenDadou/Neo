@@ -1,0 +1,305 @@
+#!/bin/bash
+
+# Neo AI - Lanceur principal
+# Usage: ./neo [command]
+
+set -e
+
+# Couleurs
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
+NC='\033[0m'
+BOLD='\033[1m'
+DIM='\033[2m'
+
+# Répertoire du script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Animation de chargement
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+        local temp=${spinstr#?}
+        printf " ${CYAN}%c${NC}  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b"
+    done
+    printf "    \b\b\b\b"
+}
+
+# Logo animé
+print_logo() {
+    clear
+    echo ""
+    echo -e "${CYAN}"
+    cat << 'EOF'
+    ███╗   ██╗███████╗ ██████╗
+    ████╗  ██║██╔════╝██╔═══██╗
+    ██╔██╗ ██║█████╗  ██║   ██║
+    ██║╚██╗██║██╔══╝  ██║   ██║
+    ██║ ╚████║███████╗╚██████╔╝
+    ╚═╝  ╚═══╝╚══════╝ ╚═════╝
+EOF
+    echo -e "${NC}"
+    echo -e "    ${DIM}Assistant IA Multi-Agents${NC} ${WHITE}v0.2.0${NC}"
+    echo ""
+}
+
+# Barre de progression
+progress_bar() {
+    local current=$1
+    local total=$2
+    local width=40
+    local percent=$((current * 100 / total))
+    local filled=$((width * current / total))
+    local empty=$((width - filled))
+
+    printf "\r    ${DIM}[${NC}"
+    printf "${CYAN}%${filled}s${NC}" | tr ' ' '█'
+    printf "${DIM}%${empty}s${NC}" | tr ' ' '░'
+    printf "${DIM}]${NC} ${WHITE}%3d%%${NC}" $percent
+}
+
+# Vérification des prérequis
+check_prerequisites() {
+    local errors=0
+
+    echo -e "    ${DIM}Vérification du système...${NC}"
+    echo ""
+
+    # Node.js
+    if command -v node &> /dev/null; then
+        local node_version=$(node -v)
+        echo -e "    ${GREEN}✓${NC} Node.js ${WHITE}$node_version${NC}"
+    else
+        echo -e "    ${RED}✗${NC} Node.js non installé"
+        errors=$((errors + 1))
+    fi
+
+    # npm
+    if command -v npm &> /dev/null; then
+        local npm_version=$(npm -v)
+        echo -e "    ${GREEN}✓${NC} npm ${WHITE}v$npm_version${NC}"
+    else
+        echo -e "    ${RED}✗${NC} npm non installé"
+        errors=$((errors + 1))
+    fi
+
+    # .env
+    if [ -f ".env" ]; then
+        echo -e "    ${GREEN}✓${NC} Configuration ${WHITE}.env${NC}"
+    else
+        echo -e "    ${RED}✗${NC} Fichier .env manquant"
+        errors=$((errors + 1))
+    fi
+
+    # node_modules
+    if [ -d "node_modules" ]; then
+        echo -e "    ${GREEN}✓${NC} Dépendances installées"
+    else
+        echo -e "    ${YELLOW}!${NC} Dépendances manquantes"
+        echo ""
+        echo -e "    ${DIM}Installation des dépendances...${NC}"
+        npm install --silent
+        echo -e "    ${GREEN}✓${NC} Dépendances installées"
+    fi
+
+    # Ollama (optionnel)
+    if command -v ollama &> /dev/null; then
+        echo -e "    ${GREEN}✓${NC} Ollama ${DIM}(embeddings locaux)${NC}"
+    else
+        echo -e "    ${DIM}○${NC} Ollama ${DIM}(non installé)${NC}"
+    fi
+
+    echo ""
+
+    if [ $errors -gt 0 ]; then
+        echo -e "    ${RED}Erreurs détectées. Lancez ./setup.sh d'abord.${NC}"
+        exit 1
+    fi
+}
+
+# Démarrer Ollama si nécessaire
+start_ollama() {
+    if command -v ollama &> /dev/null; then
+        if ! pgrep -x "ollama" > /dev/null; then
+            echo -e "    ${DIM}Démarrage d'Ollama...${NC}"
+            ollama serve > /dev/null 2>&1 &
+            sleep 2
+        fi
+    fi
+}
+
+# Menu principal
+show_menu() {
+    echo -e "    ${WHITE}${BOLD}Que souhaitez-vous faire?${NC}"
+    echo ""
+    echo -e "    ${CYAN}[1]${NC} ${WHITE}Chat${NC}         Mode conversation interactif"
+    echo -e "    ${CYAN}[2]${NC} ${WHITE}API${NC}          Serveur REST (port 3001)"
+    echo -e "    ${CYAN}[3]${NC} ${WHITE}Web${NC}          Dashboard + API"
+    echo -e "    ${CYAN}[4]${NC} ${WHITE}Status${NC}       État du système"
+    echo ""
+    echo -e "    ${DIM}[q] Quitter${NC}"
+    echo ""
+    printf "    ${CYAN}▶${NC} "
+}
+
+# Afficher le status
+show_status() {
+    echo ""
+    echo -e "    ${WHITE}${BOLD}État du système${NC}"
+    echo -e "    ${DIM}─────────────────────────────────${NC}"
+    echo ""
+
+    # Mémoire
+    if [ -f "data/neo.db" ]; then
+        local db_size=$(du -h data/neo.db 2>/dev/null | cut -f1)
+        echo -e "    ${GREEN}●${NC} Base de données  ${WHITE}$db_size${NC}"
+    else
+        echo -e "    ${YELLOW}○${NC} Base de données  ${DIM}vide${NC}"
+    fi
+
+    # Sessions
+    local sessions=$(ls data/sessions/*.json 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "    ${GREEN}●${NC} Sessions         ${WHITE}$sessions${NC}"
+
+    # API
+    if curl -s http://localhost:3001/health > /dev/null 2>&1; then
+        echo -e "    ${GREEN}●${NC} API              ${WHITE}en ligne${NC} ${DIM}:3001${NC}"
+    else
+        echo -e "    ${DIM}○${NC} API              ${DIM}hors ligne${NC}"
+    fi
+
+    # Web
+    if curl -s http://localhost:5173 > /dev/null 2>&1; then
+        echo -e "    ${GREEN}●${NC} Dashboard        ${WHITE}en ligne${NC} ${DIM}:5173${NC}"
+    else
+        echo -e "    ${DIM}○${NC} Dashboard        ${DIM}hors ligne${NC}"
+    fi
+
+    echo ""
+}
+
+# Démarrer le chat CLI
+start_chat() {
+    echo ""
+    echo -e "    ${GREEN}●${NC} ${WHITE}Démarrage du mode conversation...${NC}"
+    echo ""
+    echo -e "    ${DIM}─────────────────────────────────────────${NC}"
+    echo ""
+
+    start_ollama
+    exec npm run dev:cli
+}
+
+# Démarrer l'API
+start_api() {
+    echo ""
+    echo -e "    ${GREEN}●${NC} ${WHITE}Démarrage du serveur API...${NC}"
+    echo -e "    ${DIM}   http://localhost:3001${NC}"
+    echo ""
+
+    start_ollama
+    exec npm run dev
+}
+
+# Démarrer le web complet
+start_web() {
+    echo ""
+    echo -e "    ${GREEN}●${NC} ${WHITE}Démarrage du dashboard...${NC}"
+    echo -e "    ${DIM}   Dashboard: http://localhost:5173${NC}"
+    echo -e "    ${DIM}   API:       http://localhost:3001${NC}"
+    echo ""
+
+    start_ollama
+
+    # Démarrer l'API en background
+    npm run dev &
+    API_PID=$!
+
+    # Attendre que l'API soit prête
+    sleep 3
+
+    # Démarrer le frontend
+    npm run dev:web
+
+    # Cleanup
+    kill $API_PID 2>/dev/null
+}
+
+# Gestion des arguments
+case "${1:-}" in
+    chat|c|cli)
+        print_logo
+        check_prerequisites
+        start_chat
+        ;;
+    api|a|server)
+        print_logo
+        check_prerequisites
+        start_api
+        ;;
+    web|w|dashboard)
+        print_logo
+        check_prerequisites
+        start_web
+        ;;
+    status|s)
+        print_logo
+        show_status
+        ;;
+    help|h|--help|-h)
+        print_logo
+        echo -e "    ${WHITE}${BOLD}Usage:${NC} ./neo ${DIM}[command]${NC}"
+        echo ""
+        echo -e "    ${WHITE}Commandes:${NC}"
+        echo -e "    ${CYAN}chat${NC}    ${DIM}(c)${NC}   Mode conversation interactif"
+        echo -e "    ${CYAN}api${NC}     ${DIM}(a)${NC}   Serveur REST uniquement"
+        echo -e "    ${CYAN}web${NC}     ${DIM}(w)${NC}   Dashboard + API"
+        echo -e "    ${CYAN}status${NC}  ${DIM}(s)${NC}   État du système"
+        echo ""
+        echo -e "    ${DIM}Sans argument: menu interactif${NC}"
+        echo ""
+        ;;
+    "")
+        # Menu interactif
+        print_logo
+        check_prerequisites
+
+        while true; do
+            show_menu
+            read -n1 choice
+            echo ""
+
+            case $choice in
+                1) start_chat ;;
+                2) start_api ;;
+                3) start_web ;;
+                4) show_status ;;
+                q|Q)
+                    echo ""
+                    echo -e "    ${DIM}À bientôt!${NC}"
+                    echo ""
+                    exit 0
+                    ;;
+                *)
+                    echo -e "    ${RED}Option invalide${NC}"
+                    ;;
+            esac
+        done
+        ;;
+    *)
+        echo -e "${RED}Commande inconnue: $1${NC}"
+        echo "Utilisez ./neo --help pour l'aide"
+        exit 1
+        ;;
+esac

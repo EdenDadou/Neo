@@ -81,8 +81,10 @@ export { SkillManager, getSkillManager } from './skill-manager';
 export {
   CapabilityManager,
   getCapabilityManager,
+} from './capabilities';
 
-  // Interfaces pour connexion avec le Core
+// Interfaces pour connexion avec le Core
+export type {
   MemoryInterface,
   BrowserInterface,
   LLMInterface,
