@@ -214,8 +214,9 @@ export class BrainAgent extends BaseAgent {
 
     // Pool de workers pour délégation des tâches
     // Brain reste TOUJOURS disponible pour orchestrer
+    // minWorkers: 0 = lazy loading, workers créés à la demande
     this.workerPool = getWorkerPool({
-      minWorkers: 2,
+      minWorkers: 0,
       maxWorkers: 8,
       defaultTaskTimeout: 30000,
     });
@@ -245,10 +246,8 @@ export class BrainAgent extends BaseAgent {
   protected async onStart(): Promise<void> {
     console.log('[Brain] 🧠 Initialisation...');
 
-    // Démarrer le pool de workers
-    this.workerPool.start();
-    console.log('[Brain] 👷 Pool de workers démarré');
-
+    // Pool de workers configuré mais PAS démarré
+    // Il démarre automatiquement à la première tâche (lazy loading)
     // Écouter les événements du pool
     this.workerPool.on('task_completed', (result: WorkerResult) => {
       console.log(`[Brain] ✅ Tâche worker terminée: ${result.taskId.slice(0, 8)}`);

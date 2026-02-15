@@ -302,7 +302,7 @@ export const SKILL_DEFAULTS = {
   TIMEOUT_MS: 30000,           // 30 secondes
   MEMORY_LIMIT_MB: 256,        // 256 MB
   MAX_WORKERS: 5,              // Pool de 5 workers max
-  MIN_WORKERS: 1,              // Au moins 1 worker actif
+  MIN_WORKERS: 0,              // Lazy loading: workers créés à la demande
   WORKER_IDLE_TIMEOUT_MS: 60000, // Arrêter worker inactif après 1 min
 } as const;
 

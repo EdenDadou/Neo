@@ -137,8 +137,9 @@ export class WorkerExecutor extends EventEmitter {
    * Exécuter un skill dans un worker
    */
   async execute(request: ExecutionRequest): Promise<unknown> {
+    // Lazy start: démarrer automatiquement si nécessaire
     if (!this.isRunning) {
-      throw new Error('WorkerExecutor non démarré');
+      await this.start();
     }
 
     return new Promise((resolve, reject) => {

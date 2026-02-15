@@ -139,9 +139,9 @@ export class WorkerPool extends EventEmitter {
     }
   ): Promise<WorkerResult> {
     return new Promise((resolve, reject) => {
+      // Lazy start: démarrer le pool automatiquement si nécessaire
       if (!this.isRunning) {
-        reject(new Error('Pool non démarré'));
-        return;
+        this.start();
       }
 
       const task: WorkerTask = {
