@@ -80,6 +80,7 @@ export class FactChecker {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${oauthToken}`,
             'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'oauth-2025-04-20',
           },
           body: JSON.stringify({
             model: 'claude-sonnet-4-20250514',
