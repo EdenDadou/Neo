@@ -236,6 +236,17 @@ Analyse: est-ce une correction?`;
     proposedResponse: string,
     relevantMemories: MemoryEntry[]
   ): Promise<FactCheckResult> {
+    // Si pas de réponse à vérifier, retourner résultat par défaut
+    if (!proposedResponse) {
+      return {
+        isConsistent: true,
+        contradictions: [],
+        supportedBy: [],
+        confidence: 0.5,
+        warnings: ['Aucune réponse à vérifier'],
+      };
+    }
+
     // Si pas de mémoires pertinentes, pas de contradiction possible
     if (relevantMemories.length === 0) {
       return {
@@ -304,7 +315,7 @@ Réponds en JSON:
 ${factsContext}
 
 RÉPONSE PROPOSÉE:
-"${proposedResponse.substring(0, 1000)}"
+"${(proposedResponse || '').substring(0, 1000)}"
 
 Vérifie la cohérence.`;
 

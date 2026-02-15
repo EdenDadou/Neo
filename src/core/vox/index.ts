@@ -439,6 +439,13 @@ export class VoxAgent extends BaseAgent {
 
     this.state.pendingResponse = false;
 
+    // Vérifier que la réponse existe
+    if (!payload.response) {
+      console.error('[Vox] ⚠️ Réponse Brain vide ou undefined, utilisation fallback');
+      this.emitToUser("Désolé, je n'ai pas pu générer de réponse. Pouvez-vous reformuler ?");
+      return;
+    }
+
     // Formater la réponse pour l'utilisateur
     let formattedResponse = payload.response;
 
@@ -497,6 +504,11 @@ export class VoxAgent extends BaseAgent {
    * Émettre une réponse vers l'utilisateur
    */
   private emitToUser(message: string): void {
+    if (!message) {
+      console.error('[Vox] ⚠️ Tentative d\'émission d\'un message vide ou undefined');
+      return;
+    }
+
     this.send('broadcast', 'response_ready', {
       target: 'user',
       message,

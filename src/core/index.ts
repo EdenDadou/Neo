@@ -121,7 +121,22 @@ export class Core extends EventEmitter {
       throw new Error('Le système n\'est pas démarré. Appelez start() d\'abord.');
     }
 
-    await this.vox.receiveUserInput(message);
+    try {
+      await this.vox.receiveUserInput(message);
+    } catch (error) {
+      console.error('[Core] ⚠️ Erreur lors du traitement du message:', error);
+      // Émettre une réponse d'erreur propre au lieu de planter
+      this.emit('response', "Désolé, une erreur s'est produite. Pouvez-vous reformuler votre question ?");
+
+      // Tenter de récupérer les agents si nécessaire
+      const health = this.getHealthStatus();
+      if (!health.isHealthy) {
+        console.log('[Core] 🔄 Tentative de récupération automatique des agents...');
+        for (const agentName of health.unhealthyAgents) {
+          await this.recoverAgent(agentName as 'vox' | 'memory' | 'brain');
+        }
+      }
+    }
   }
 
   /**
@@ -393,6 +408,11 @@ export class Core extends EventEmitter {
     const emittedMessages = new Set<string>();
 
     const emitOnce = (message: string) => {
+      // Protection contre les messages undefined/null
+      if (!message || typeof message !== 'string') {
+        console.warn('[Core] ⚠️ Tentative d\'émission d\'un message invalide, ignoré');
+        return;
+      }
       const hash = message.substring(0, 100);
       if (emittedMessages.has(hash)) return;
       emittedMessages.add(hash);
@@ -403,22 +423,30 @@ export class Core extends EventEmitter {
 
     // Écouter les broadcasts (Vox envoie via broadcast)
     messageBus.on('broadcast', (message) => {
-      if (message.type === 'response_ready') {
-        const payload = message.payload as { target?: string; message?: string };
-        if (payload.target === 'user' && payload.message) {
-          emitOnce(payload.message);
+      try {
+        if (message.type === 'response_ready') {
+          const payload = message.payload as { target?: string; message?: string };
+          if (payload.target === 'user' && payload.message) {
+            emitOnce(payload.message);
+          }
         }
+      } catch (error) {
+        console.error('[Core] ⚠️ Erreur dans le handler broadcast:', error);
       }
     });
 
     // Écouter les messages directs pour typing et erreurs
     messageBus.on('message', (message) => {
-      if (message.type === 'typing') {
-        this.emit('typing');
-      }
-      if (message.type === 'error') {
-        const payload = message.payload as { message?: string };
-        this.emit('error', { message: payload.message || 'Unknown error' });
+      try {
+        if (message.type === 'typing') {
+          this.emit('typing');
+        }
+        if (message.type === 'error') {
+          const payload = message.payload as { message?: string };
+          this.emit('error', { message: payload.message || 'Unknown error' });
+        }
+      } catch (error) {
+        console.error('[Core] ⚠️ Erreur dans le handler message:', error);
       }
     });
   }

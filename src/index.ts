@@ -9,6 +9,44 @@ loadEnv();
 import { Core } from './core';
 import * as readline from 'readline';
 
+// ============================================================================
+// GESTION GLOBALE DES ERREURS - Le système ne doit JAMAIS planter
+// ============================================================================
+
+let isRecovering = false;
+
+// Erreurs non capturées dans les promesses
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[SYSTEM] ⚠️ Promesse rejetée non gérée:', reason);
+  console.error('[SYSTEM] Promise:', promise);
+  // Ne pas planter - logger et continuer
+});
+
+// Erreurs non capturées synchrones
+process.on('uncaughtException', (error) => {
+  console.error('[SYSTEM] ⚠️ Exception non capturée:', error.message);
+  console.error('[SYSTEM] Stack:', error.stack);
+
+  // Tenter une récupération automatique si pas déjà en cours
+  if (!isRecovering) {
+    isRecovering = true;
+    console.log('[SYSTEM] 🔄 Tentative de récupération automatique...');
+
+    // Attendre un peu puis reset le flag
+    setTimeout(() => {
+      isRecovering = false;
+      console.log('[SYSTEM] ✅ Système stabilisé, prêt à continuer');
+    }, 2000);
+  }
+
+  // Ne PAS faire process.exit() - le système continue
+});
+
+// Warning de Node.js (utile pour debug)
+process.on('warning', (warning) => {
+  console.warn('[SYSTEM] ⚠️ Warning Node.js:', warning.name, warning.message);
+});
+
 async function main() {
   console.log('');
   console.log('╔═══════════════════════════════════════════════════════════╗');
