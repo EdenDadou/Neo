@@ -102,14 +102,22 @@ check_prerequisites() {
         errors=$((errors + 1))
     fi
 
-    # node_modules
+    # node_modules - vérifier si présent ET à jour
     if [ -d "node_modules" ]; then
-        echo -e "    ${GREEN}✓${NC} Dépendances installées"
+        # Vérifier si package.json est plus récent que node_modules
+        if [ "package.json" -nt "node_modules" ] || [ "package-lock.json" -nt "node_modules" ] 2>/dev/null; then
+            echo -e "    ${YELLOW}!${NC} Mise à jour des dépendances..."
+            npm install --silent 2>/dev/null
+            touch node_modules  # Mettre à jour le timestamp
+            echo -e "    ${GREEN}✓${NC} Dépendances mises à jour"
+        else
+            echo -e "    ${GREEN}✓${NC} Dépendances installées"
+        fi
     else
         echo -e "    ${YELLOW}!${NC} Dépendances manquantes"
         echo ""
         echo -e "    ${DIM}Installation des dépendances...${NC}"
-        npm install --silent
+        npm install --silent 2>/dev/null
         echo -e "    ${GREEN}✓${NC} Dépendances installées"
     fi
 
@@ -236,6 +244,29 @@ start_web() {
     kill $API_PID 2>/dev/null
 }
 
+# Mettre à jour Neo
+do_update() {
+    echo ""
+    echo -e "    ${CYAN}●${NC} ${WHITE}Mise à jour de Neo...${NC}"
+    echo ""
+
+    # Git pull
+    if [ -d ".git" ]; then
+        echo -e "    ${DIM}Récupération des mises à jour...${NC}"
+        git pull --quiet 2>/dev/null && echo -e "    ${GREEN}✓${NC} Code mis à jour" || echo -e "    ${YELLOW}!${NC} Pas de mise à jour git"
+    fi
+
+    # npm install
+    echo -e "    ${DIM}Mise à jour des dépendances...${NC}"
+    npm install --silent 2>/dev/null
+    touch node_modules
+    echo -e "    ${GREEN}✓${NC} Dépendances à jour"
+
+    echo ""
+    echo -e "    ${GREEN}✓${NC} ${WHITE}Neo est à jour!${NC}"
+    echo ""
+}
+
 # Gestion des arguments
 case "${1:-}" in
     chat|c|cli)
@@ -257,6 +288,10 @@ case "${1:-}" in
         print_logo
         show_status
         ;;
+    update|u|upgrade)
+        print_logo
+        do_update
+        ;;
     help|h|--help|-h)
         print_logo
         echo -e "    ${WHITE}${BOLD}Usage:${NC} ./neo ${DIM}[command]${NC}"
@@ -266,6 +301,7 @@ case "${1:-}" in
         echo -e "    ${CYAN}api${NC}     ${DIM}(a)${NC}   Serveur REST uniquement"
         echo -e "    ${CYAN}web${NC}     ${DIM}(w)${NC}   Dashboard + API"
         echo -e "    ${CYAN}status${NC}  ${DIM}(s)${NC}   État du système"
+        echo -e "    ${CYAN}update${NC}  ${DIM}(u)${NC}   Mettre à jour Neo"
         echo ""
         echo -e "    ${DIM}Sans argument: menu interactif${NC}"
         echo ""
