@@ -1,0 +1,1463 @@
+/**
+ * BRAIN - Agent Orchestrateur Intelligent
+ *
+ * NOUVEAU FLUX:
+ * 1. Reçoit le prompt ENRICHI de Vox (déjà contextualisé par Memory)
+ * 2. Peut demander PLUS de contexte à Memory si besoin
+ * 3. Élabore des plans d'exécution stratégiques
+ * 4. Spawn et coordonne des agents spécialisés
+ * 5. Prend les décisions critiques
+ *
+ * C'est l'élément le PLUS INTELLIGENT du core
+ */
+
+import { BaseAgent } from '../base-agent';
+import {
+  AgentConfig,
+  AgentMessage,
+  MemoryEntry,
+  Skill,
+} from '../types';
+import { randomUUID } from 'crypto';
+import { WebSearchService, SearchResult } from '../../utils/web-search';
+import { ModelInfo } from '../models';
+import {
+  SkillManager,
+  SkillDefinition,
+  SkillExecutionResult,
+} from '../../skills';
+import { WorkerPool, getWorkerPool, WorkerResult } from '../workers';
+
+// ===========================================================================
+// TYPES
+// ===========================================================================
+
+interface FactCheckResult {
+  isConsistent: boolean;
+  contradictions: Array<{
+    claim: string;
+    storedFact: string;
+    memoryId: string;
+    severity: 'minor' | 'major' | 'critical';
+  }>;
+  supportedBy: string[];
+  confidence: number;
+  warnings: string[];
+}
+
+interface BrainState {
+  activeWorkers: Map<string, WorkerInfo>;
+  currentPlan: ExecutionPlan | null;
+  decisionHistory: Decision[];
+  pendingMemoryRequests: Map<string, (entries: MemoryEntry[]) => void>;
+  pendingFactChecks: Map<string, (result: FactCheckResult) => void>;
+  metrics: {
+    totalRequests: number;
+    successfulResponses: number;
+    averageConfidence: number;
+    contradictionsAvoided: number;
+    webSearches: number;
+    modelCosts: number;
+  };
+}
+
+interface WorkerInfo {
+  id: string;
+  type: string;
+  taskId: string;
+  startedAt: Date;
+  status: 'running' | 'completed' | 'failed';
+}
+
+interface ExecutionPlan {
+  id: string;
+  goal: string;
+  steps: PlanStep[];
+  currentStepIndex: number;
+  createdAt: Date;
+}
+
+interface PlanStep {
+  id: string;
+  action: string;
+  agentType: string;
+  parameters: Record<string, unknown>;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  result?: unknown;
+}
+
+interface Decision {
+  id: string;
+  context: string;
+  options: string[];
+  chosen: string;
+  reasoning: string;
+  timestamp: Date;
+  outcome?: 'success' | 'failure';
+}
+
+interface EnrichedInput {
+  originalInput: string;
+  enrichedInput: string;
+  analysis: {
+    intent: string;
+    confidence: number;
+    processedInput: string;
+    emotionalTone: string;
+  };
+  contextReport: {
+    confidence: number;
+    warnings: string[];
+    contextUsed: string[];
+  };
+  conversationContext: Array<{ role: 'user' | 'assistant'; content: string }>;
+}
+
+// ===========================================================================
+// PROMPTS
+// ===========================================================================
+
+const BRAIN_SYSTEM_PROMPT = `Tu es BRAIN, le cerveau orchestrateur d'un système d'IA avancé.
+
+TON RÔLE :
+- Tu es l'intelligence centrale qui coordonne tout
+- Tu reçois les demandes utilisateur DÉJÀ enrichies de contexte par Memory/Vox
+- Tu peux demander PLUS de contexte à Memory si nécessaire
+- Tu élabores des plans d'exécution stratégiques
+- Tu spawnes et coordonnes des agents spécialisés
+- Tu prends les décisions critiques
+
+PRINCIPES :
+1. VÉRITÉ : Ne jamais affirmer ce dont tu n'es pas sûr
+2. TRANSPARENCE : Expliquer ton raisonnement
+3. EFFICACITÉ : Minimiser les étapes inutiles
+4. APPRENTISSAGE : Utiliser les learnings passés
+5. PRUDENCE : Demander confirmation si impact important
+
+CAPACITÉS :
+- Analyser et décomposer des problèmes complexes
+- Créer des plans d'exécution multi-étapes
+- Demander plus d'informations à Memory si besoin
+- Coordonner plusieurs agents en parallèle
+- Synthétiser les résultats de multiples sources
+- Adapter la stratégie en temps réel
+
+FORMAT DE SORTIE pour les plans :
+{
+  "analysis": "Compréhension du problème",
+  "approach": "Stratégie choisie",
+  "confidence": 0.0-1.0,
+  "needsMoreContext": boolean,
+  "contextQuery": "ce qu'on cherche en plus" ou null,
+  "steps": [
+    {
+      "action": "Description de l'action",
+      "agentType": "coder|researcher|analyst|writer|custom",
+      "parameters": {},
+      "rationale": "Pourquoi cette étape"
+    }
+  ],
+  "risks": ["Risque potentiel 1"],
+  "fallbackPlan": "Plan B si échec"
+}
+
+FORMAT DE SORTIE pour les réponses directes :
+{
+  "response": "La réponse",
+  "confidence": 0.0-1.0,
+  "sources": ["source1", "source2"],
+  "needsMoreInfo": boolean,
+  "moreInfoQuery": "ce qu'il faudrait chercher" ou null,
+  "followUpQuestions": ["question1"]
+}`;
+
+// ===========================================================================
+// BRAIN AGENT
+// ===========================================================================
+
+export class BrainAgent extends BaseAgent {
+  private state: BrainState;
+  private webSearch: WebSearchService;
+  private skillManager: SkillManager | null = null;
+  private workerPool: WorkerPool;
+  // modelRouter est hérité de BaseAgent (protected)
+
+  constructor(config?: Partial<AgentConfig>) {
+    super({
+      name: 'Brain',
+      role: 'brain',
+      model: 'claude-sonnet-4-5-20250929', // Sonnet 4.5 pour raisonnement complexe
+      maxTokens: 4096,
+      temperature: 0.7,
+      systemPrompt: BRAIN_SYSTEM_PROMPT,
+      ...config,
+    });
+
+    this.webSearch = new WebSearchService();
+    // modelRouter est déjà initialisé par BaseAgent
+
+    // Pool de workers pour délégation des tâches
+    // Brain reste TOUJOURS disponible pour orchestrer
+    this.workerPool = getWorkerPool({
+      minWorkers: 2,
+      maxWorkers: 8,
+      defaultTaskTimeout: 30000,
+    });
+
+    this.state = {
+      activeWorkers: new Map(),
+      currentPlan: null,
+      decisionHistory: [],
+      pendingMemoryRequests: new Map(),
+      pendingFactChecks: new Map(),
+      metrics: {
+        totalRequests: 0,
+        successfulResponses: 0,
+        averageConfidence: 0,
+        contradictionsAvoided: 0,
+        webSearches: 0,
+        modelCosts: 0,
+      },
+    };
+  }
+
+  /**
+   * Initialisation au démarrage - détecter les modèles disponibles
+   */
+  protected async onStart(): Promise<void> {
+    console.log('[Brain] 🧠 Initialisation...');
+
+    // Démarrer le pool de workers
+    this.workerPool.start();
+    console.log('[Brain] 👷 Pool de workers démarré');
+
+    // Écouter les événements du pool
+    this.workerPool.on('task_completed', (result: WorkerResult) => {
+      console.log(`[Brain] ✅ Tâche worker terminée: ${result.taskId.slice(0, 8)}`);
+    });
+    this.workerPool.on('task_failed', ({ taskId, error }) => {
+      console.log(`[Brain] ❌ Tâche worker échouée: ${taskId.slice(0, 8)} - ${error.message}`);
+    });
+
+    // Détecter les modèles disponibles
+    const models = await this.modelRouter.detectAvailableModels();
+    console.log(`[Brain] 📦 ${models.length} modèles disponibles`);
+
+    // Afficher par tier
+    const byTier = {
+      free: models.filter(m => m.tier === 'free'),
+      cheap: models.filter(m => m.tier === 'cheap'),
+      standard: models.filter(m => m.tier === 'standard'),
+      premium: models.filter(m => m.tier === 'premium'),
+    };
+
+    if (byTier.free.length > 0) {
+      console.log(`[Brain]   🆓 Gratuits: ${byTier.free.map(m => m.name).join(', ')}`);
+    }
+    if (byTier.cheap.length > 0) {
+      console.log(`[Brain]   💰 Pas chers: ${byTier.cheap.map(m => m.name).join(', ')}`);
+    }
+
+    // Vérifier la recherche web
+    const webHealth = await this.webSearch.healthCheck();
+    if (webHealth.status === 'ok') {
+      console.log(`[Brain] 🌐 Recherche web: ${webHealth.provider}`);
+    } else {
+      console.log(`[Brain] ⚠️ Recherche web: ${webHealth.message}`);
+    }
+  }
+
+  // ===========================================================================
+  // RECHERCHE WEB
+  // ===========================================================================
+
+  /**
+   * Rechercher sur internet quand l'info n'est pas en mémoire
+   */
+  async searchWeb(query: string, maxResults: number = 5): Promise<SearchResult[]> {
+    console.log(`[Brain] 🌐 Recherche web: "${query}"`);
+    this.state.metrics.webSearches++;
+
+    try {
+      const results = await this.webSearch.search(query, { maxResults });
+      console.log(`[Brain] ✅ ${results.length} résultats trouvés`);
+      return results;
+    } catch (error) {
+      console.error('[Brain] ❌ Erreur recherche web:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Déterminer si une question nécessite une recherche web
+   */
+  private needsWebSearch(input: EnrichedInput, memoryConfidence: number): boolean {
+    // Si confiance mémoire basse et question factuelle
+    if (memoryConfidence < 0.5) {
+      const factualKeywords = [
+        'qui est', 'qu\'est-ce que', 'quand', 'où', 'combien',
+        'actualité', 'news', 'dernier', 'récent', 'aujourd\'hui',
+        'prix', 'météo', 'définition', 'histoire de',
+      ];
+
+      const lowerInput = input.originalInput.toLowerCase();
+      return factualKeywords.some(kw => lowerInput.includes(kw));
+    }
+    return false;
+  }
+
+  // ===========================================================================
+  // SÉLECTION DE MODÈLE INTELLIGENT
+  // ===========================================================================
+
+  /**
+   * Choisir le meilleur modèle pour une tâche
+   * Privilégie les modèles gratuits quand possible
+   */
+  selectModelForTask(task: 'simple_chat' | 'code' | 'reasoning' | 'creative' | 'factual'): ModelInfo | null {
+    // Essayer d'abord gratuit, puis cheap, puis standard
+    for (const maxTier of ['free', 'cheap', 'standard'] as const) {
+      const model = this.modelRouter.selectModel({
+        task,
+        maxTier,
+        preferSpeed: task === 'simple_chat',
+      });
+
+      if (model) {
+        console.log(`[Brain] 🎯 Modèle sélectionné: ${model.name} (${model.tier})`);
+        return model;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Appeler un modèle avec sélection automatique
+   */
+  async callModel(
+    task: 'simple_chat' | 'code' | 'reasoning' | 'creative' | 'factual',
+    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    systemPrompt?: string
+  ): Promise<string> {
+    const model = this.selectModelForTask(task);
+
+    if (!model) {
+      // Fallback vers Claude via la méthode think() existante
+      console.log('[Brain] ⚠️ Aucun modèle dispo, utilisation de Claude par défaut');
+      return this.think(messages.map(m => m.content).join('\n'));
+    }
+
+    try {
+      const response = await this.modelRouter.complete(model.id, {
+        messages,
+        systemPrompt,
+        maxTokens: 2048,
+        temperature: 0.7,
+      });
+
+      this.state.metrics.modelCosts += response.cost;
+
+      return response.content;
+    } catch (error) {
+      console.error(`[Brain] Erreur modèle ${model.name}:`, error);
+      // Fallback
+      return this.think(messages.map(m => m.content).join('\n'));
+    }
+  }
+
+  // ===========================================================================
+  // INTERACTION DIRECTE AVEC MEMORY
+  // ===========================================================================
+
+  /**
+   * Demander plus de contexte à Memory
+   * Brain peut appeler Memory directement pour obtenir plus d'informations
+   */
+  async queryMemory(
+    query: string,
+    options: {
+      type?: string;
+      tags?: string[];
+      limit?: number;
+    } = {}
+  ): Promise<MemoryEntry[]> {
+    return new Promise((resolve) => {
+      const requestId = `brain_query_${Date.now()}`;
+
+      this.state.pendingMemoryRequests.set(requestId, resolve);
+
+      // Timeout
+      setTimeout(() => {
+        if (this.state.pendingMemoryRequests.has(requestId)) {
+          this.state.pendingMemoryRequests.delete(requestId);
+          console.log('[Brain] ⚠️ Timeout requête Memory');
+          resolve([]);
+        }
+      }, 5000);
+
+      this.send('memory', 'memory_query', {
+        query,
+        options,
+        requestId,
+      });
+    });
+  }
+
+  /**
+   * Demander une vérification de cohérence à Memory
+   * Vérifie que la réponse ne contredit pas les faits stockés
+   */
+  async checkFactConsistency(
+    proposedResponse: string,
+    userInput: string
+  ): Promise<FactCheckResult> {
+    return new Promise((resolve) => {
+      const requestId = `fact_check_${Date.now()}`;
+
+      this.state.pendingFactChecks.set(requestId, resolve);
+
+      // Timeout - retourner cohérent par défaut si pas de réponse
+      setTimeout(() => {
+        if (this.state.pendingFactChecks.has(requestId)) {
+          this.state.pendingFactChecks.delete(requestId);
+          console.log('[Brain] ⚠️ Timeout fact-check, assumant cohérent');
+          resolve({
+            isConsistent: true,
+            contradictions: [],
+            supportedBy: [],
+            confidence: 0.5,
+            warnings: ['Vérification timeout'],
+          });
+        }
+      }, 8000);
+
+      this.send('memory', 'fact_check_request', {
+        proposedResponse,
+        userInput,
+        requestId,
+      });
+    });
+  }
+
+  // ===========================================================================
+  // TRAITEMENT DES REQUÊTES
+  // ===========================================================================
+
+  /**
+   * Traiter une requête utilisateur enrichie (nouveau format de Vox)
+   */
+  private async processEnrichedRequest(input: EnrichedInput): Promise<void> {
+    this.state.metrics.totalRequests++;
+
+    console.log(`[Brain] 🧠 Traitement: "${input.originalInput.substring(0, 50)}..."`);
+    console.log(`[Brain] 📋 Contexte: ${input.contextReport.contextUsed.length} éléments, confiance ${input.contextReport.confidence}`);
+
+    // Vérifier si on a besoin d'une recherche web
+    let webResults: SearchResult[] = [];
+    if (this.needsWebSearch(input, input.contextReport.confidence)) {
+      console.log('[Brain] 🌐 Confiance basse, recherche web...');
+      webResults = await this.searchWeb(input.originalInput, 3);
+
+      if (webResults.length > 0) {
+        // Enrichir le contexte avec les résultats web
+        const webContext = webResults
+          .map(r => `[Web: ${r.title}] ${r.snippet}`)
+          .join('\n');
+
+        input.enrichedInput = `${input.enrichedInput}\n\nRÉSULTATS WEB RÉCENTS:\n${webContext}`;
+        input.contextReport.contextUsed.push('web_search');
+        console.log(`[Brain] ✅ ${webResults.length} résultats web ajoutés au contexte`);
+      }
+    }
+
+    // Avertissements du contexte
+    if (input.contextReport.warnings.length > 0) {
+      console.log(`[Brain] ⚠️ Warnings: ${input.contextReport.warnings.join(', ')}`);
+    }
+
+    // Décider de l'approche avec le prompt enrichi
+    const decision = await this.decideApproach(input);
+
+    // Si besoin de plus de contexte, le demander
+    if (decision.needsMoreContext && decision.contextQuery) {
+      console.log(`[Brain] 🔍 Demande de contexte additionnel: "${decision.contextQuery}"`);
+      const additionalContext = await this.queryMemory(decision.contextQuery, { limit: 10 });
+
+      if (additionalContext.length > 0) {
+        // Ré-évaluer avec le contexte additionnel
+        const enrichedDecision = await this.refineDecisionWithContext(
+          input,
+          decision,
+          additionalContext
+        );
+        decision.directResponse = enrichedDecision.directResponse;
+        decision.plan = enrichedDecision.plan;
+        decision.requiresPlan = enrichedDecision.requiresPlan;
+      }
+    }
+
+    // Exécuter selon la décision
+    if (decision.requiresPlan && decision.plan) {
+      await this.executePlan(decision.plan, input);
+    } else if (decision.directResponse) {
+      await this.executeDirectResponse(decision.directResponse, input);
+    }
+  }
+
+  /**
+   * Décider de l'approche à adopter
+   */
+  private async decideApproach(input: EnrichedInput): Promise<{
+    requiresPlan: boolean;
+    needsMoreContext: boolean;
+    contextQuery?: string;
+    plan?: ExecutionPlan;
+    directResponse?: {
+      response: string;
+      confidence: number;
+      sources: string[];
+    };
+    reasoning: string;
+  }> {
+    const decisionPrompt = `
+REQUÊTE UTILISATEUR ORIGINALE:
+"${input.originalInput}"
+
+REQUÊTE ENRICHIE (avec contexte Memory):
+"${input.enrichedInput}"
+
+ANALYSE VOX:
+- Intent: ${input.analysis.intent}
+- Confiance: ${input.analysis.confidence}
+- Ton émotionnel: ${input.analysis.emotionalTone}
+
+CONTEXTE FOURNI:
+- Éléments utilisés: ${input.contextReport.contextUsed.join(', ') || 'aucun'}
+- Confiance contexte: ${input.contextReport.confidence}
+- Avertissements: ${input.contextReport.warnings.join(', ') || 'aucun'}
+
+CONVERSATION RÉCENTE:
+${input.conversationContext.slice(-5).map(c => `${c.role}: ${c.content.substring(0, 100)}...`).join('\n')}
+
+DÉCIDE:
+1. As-tu besoin de PLUS de contexte de Memory? Si oui, que cherches-tu?
+2. Cette requête nécessite-t-elle un plan multi-étapes avec des agents spécialisés?
+3. Ou peut-elle être répondue directement?
+
+Réponds en JSON avec:
+- needsMoreContext: boolean
+- contextQuery: "ce qu'on cherche" ou null
+- Puis soit steps[] pour un plan, soit response pour une réponse directe
+`;
+
+    const response = await this.think(decisionPrompt);
+
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('No JSON found');
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      this.recordDecision(input.originalInput, parsed);
+
+      // Déterminer le type de réponse
+      if (parsed.steps && parsed.steps.length > 0) {
+        return {
+          requiresPlan: true,
+          needsMoreContext: parsed.needsMoreContext || false,
+          contextQuery: parsed.contextQuery || parsed.moreInfoQuery,
+          plan: this.createPlan(parsed),
+          reasoning: parsed.analysis || parsed.approach,
+        };
+      } else {
+        return {
+          requiresPlan: false,
+          needsMoreContext: parsed.needsMoreInfo || parsed.needsMoreContext || false,
+          contextQuery: parsed.contextQuery || parsed.moreInfoQuery,
+          directResponse: {
+            response: parsed.response,
+            confidence: parsed.confidence || 0.8,
+            sources: parsed.sources || [],
+          },
+          reasoning: parsed.analysis || 'Réponse directe',
+        };
+      }
+    } catch {
+      return {
+        requiresPlan: false,
+        needsMoreContext: false,
+        directResponse: {
+          response: response,
+          confidence: 0.7,
+          sources: [],
+        },
+        reasoning: 'Fallback - réponse directe',
+      };
+    }
+  }
+
+  /**
+   * Affiner la décision avec du contexte additionnel de Memory
+   */
+  private async refineDecisionWithContext(
+    input: EnrichedInput,
+    originalDecision: { reasoning: string },
+    additionalContext: MemoryEntry[]
+  ): Promise<{
+    requiresPlan: boolean;
+    plan?: ExecutionPlan;
+    directResponse?: {
+      response: string;
+      confidence: number;
+      sources: string[];
+    };
+  }> {
+    const refinePrompt = `
+REQUÊTE: "${input.enrichedInput}"
+
+ANALYSE INITIALE: ${originalDecision.reasoning}
+
+CONTEXTE ADDITIONNEL TROUVÉ:
+${additionalContext.map(m => `[${m.type}] ${m.content}`).join('\n')}
+
+Avec ce contexte additionnel, génère une réponse améliorée.
+Réponds en JSON:
+{
+  "response": "Réponse améliorée avec le nouveau contexte",
+  "confidence": 0.0-1.0,
+  "sources": ["éléments de contexte utilisés"],
+  "improvements": ["ce qui a été ajouté grâce au contexte"]
+}
+`;
+
+    const response = await this.think(refinePrompt);
+
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          requiresPlan: false,
+          directResponse: {
+            response: parsed.response,
+            confidence: parsed.confidence || 0.85,
+            sources: parsed.sources || [],
+          },
+        };
+      }
+    } catch {
+      // Ignorer
+    }
+
+    return {
+      requiresPlan: false,
+      directResponse: {
+        response: response,
+        confidence: 0.7,
+        sources: [],
+      },
+    };
+  }
+
+  // ===========================================================================
+  // EXÉCUTION
+  // ===========================================================================
+
+  /**
+   * Exécuter un plan multi-étapes
+   */
+  private async executePlan(
+    plan: ExecutionPlan,
+    input: EnrichedInput
+  ): Promise<void> {
+    this.state.currentPlan = plan;
+    console.log(`[Brain] 📋 Exécution du plan: ${plan.goal}`);
+
+    const results: unknown[] = [];
+
+    for (let i = 0; i < plan.steps.length; i++) {
+      const step = plan.steps[i];
+      plan.currentStepIndex = i;
+      step.status = 'in_progress';
+
+      console.log(`[Brain] ▶️ Étape ${i + 1}/${plan.steps.length}: ${step.action}`);
+
+      try {
+        const result = await this.executeStep(step, input, results);
+        step.result = result;
+        step.status = 'completed';
+        results.push(result);
+
+        // Stocker en mémoire
+        this.send('memory', 'memory_store', {
+          type: 'task_result',
+          content: JSON.stringify({ step: step.action, result }),
+          metadata: { tags: ['plan_execution', plan.id] },
+        });
+      } catch (error) {
+        step.status = 'failed';
+        console.error(`[Brain] ❌ Étape échouée:`, error);
+
+        // Demander à Memory si elle a des infos sur des échecs similaires
+        const failureContext = await this.queryMemory(
+          `échec ${step.action} erreur`,
+          { type: 'correction', limit: 5 }
+        );
+
+        if (failureContext.length > 0) {
+          console.log(`[Brain] 📚 Contexte d'échecs similaires trouvé, tentative de récupération...`);
+        }
+
+        this.send('memory', 'memory_store', {
+          type: 'correction',
+          content: JSON.stringify({
+            step: step.action,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+          metadata: { tags: ['plan_failure', plan.id] },
+        });
+      }
+    }
+
+    const synthesis = await this.synthesizeResults(plan, results);
+    this.state.currentPlan = null;
+
+    this.send('vox', 'response_ready', synthesis);
+  }
+
+  /**
+   * Exécuter une étape du plan
+   */
+  private async executeStep(
+    step: PlanStep,
+    input: EnrichedInput,
+    previousResults: unknown[]
+  ): Promise<unknown> {
+    // Si l'étape nécessite plus de contexte, le demander à Memory
+    const contextForStep = await this.queryMemory(step.action, { limit: 5 });
+
+    const stepPrompt = `
+ÉTAPE À EXÉCUTER: ${step.action}
+
+TYPE D'AGENT: ${step.agentType}
+
+PARAMÈTRES: ${JSON.stringify(step.parameters)}
+
+RÉSULTATS PRÉCÉDENTS: ${JSON.stringify(previousResults)}
+
+CONTEXTE MEMORY POUR CETTE ÉTAPE:
+${contextForStep.map(m => `[${m.type}] ${m.content}`).join('\n') || 'Aucun contexte spécifique'}
+
+REQUÊTE ORIGINALE: "${input.originalInput}"
+
+Exécute cette étape et retourne le résultat en JSON.
+`;
+
+    const response = await this.think(stepPrompt);
+
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      return jsonMatch ? JSON.parse(jsonMatch[0]) : { result: response };
+    } catch {
+      return { result: response };
+    }
+  }
+
+  /**
+   * Exécuter une réponse directe
+   * Vérifie la cohérence avec les faits stockés AVANT d'envoyer
+   */
+  private async executeDirectResponse(
+    response: {
+      response: string;
+      confidence: number;
+      sources: string[];
+    },
+    input: EnrichedInput
+  ): Promise<void> {
+    let finalResponse = response.response;
+    let finalConfidence = response.confidence;
+
+    // 1. FACT-CHECK: Vérifier que la réponse ne contredit pas les faits stockés
+    console.log('[Brain] 🔍 Vérification de cohérence...');
+    const factCheck = await this.checkFactConsistency(finalResponse, input.originalInput);
+
+    if (!factCheck.isConsistent) {
+      console.log(`[Brain] ⚠️ ${factCheck.contradictions.length} contradiction(s) détectée(s)!`);
+
+      // Corriger la réponse pour éviter les contradictions
+      const correctionPrompt = `
+RÉPONSE PROPOSÉE: ${finalResponse}
+
+CONTRADICTIONS DÉTECTÉES:
+${factCheck.contradictions.map(c => `- "${c.claim}" CONTREDIT le fait stocké: "${c.storedFact}" (sévérité: ${c.severity})`).join('\n')}
+
+AVERTISSEMENTS: ${factCheck.warnings.join(', ') || 'aucun'}
+
+Corrige la réponse pour qu'elle soit COHÉRENTE avec les faits stockés.
+Ne contredis JAMAIS les informations que l'utilisateur a données précédemment.
+
+Réponds en JSON:
+{
+  "correctedResponse": "Réponse corrigée et cohérente",
+  "confidence": 0.0-1.0,
+  "corrections": ["ce qui a été corrigé"]
+}
+`;
+
+      try {
+        const corrected = await this.think(correctionPrompt);
+        const jsonMatch = corrected.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          finalResponse = parsed.correctedResponse;
+          finalConfidence = Math.min(parsed.confidence || 0.7, factCheck.confidence);
+          this.state.metrics.contradictionsAvoided++;
+          console.log(`[Brain] ✅ Réponse corrigée, ${factCheck.contradictions.length} contradiction(s) évitée(s)`);
+        }
+      } catch {
+        // Si échec, réduire la confiance
+        finalConfidence *= 0.7;
+        console.log('[Brain] ⚠️ Échec correction, confiance réduite');
+      }
+    } else {
+      // Utiliser la confiance calculée par Memory basée sur les mémoires
+      finalConfidence = Math.max(finalConfidence, factCheck.confidence);
+      console.log(`[Brain] ✅ Réponse cohérente (confiance: ${finalConfidence.toFixed(2)})`);
+    }
+
+    // 2. Si confiance basse, essayer d'améliorer avec Memory
+    if (finalConfidence < 0.7) {
+      console.log('[Brain] 🔍 Confiance basse, recherche de contexte supplémentaire...');
+
+      const additionalContext = await this.queryMemory(input.originalInput, { limit: 10 });
+
+      if (additionalContext.length > 0) {
+        const improvedPrompt = `
+RÉPONSE INITIALE: ${finalResponse}
+CONFIANCE: ${finalConfidence}
+
+CONTEXTE ADDITIONNEL DE MEMORY:
+${additionalContext.map(m => `[${m.type}] ${m.content}`).join('\n')}
+
+Améliore cette réponse avec le contexte. Réponds en JSON:
+{
+  "improvedResponse": "...",
+  "newConfidence": 0.0-1.0,
+  "improvements": ["ce qui a été amélioré"]
+}
+`;
+
+        try {
+          const improved = await this.think(improvedPrompt);
+          const jsonMatch = improved.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            finalResponse = parsed.improvedResponse;
+            finalConfidence = parsed.newConfidence;
+            console.log(`[Brain] ✅ Réponse améliorée, confiance: ${finalConfidence}`);
+          }
+        } catch {
+          // Garder la réponse originale
+        }
+      }
+    }
+
+    // 3. RÈGLE "NE MENT JAMAIS": Si confiance toujours trop basse, admettre l'incertitude
+    if (finalConfidence < 0.4) {
+      console.log('[Brain] ⚠️ Confiance très basse - admission d\'incertitude');
+      finalResponse = this.generateUncertaintyResponse(finalResponse, finalConfidence, input);
+    }
+
+    // 3. Mettre à jour les métriques
+    this.state.metrics.successfulResponses++;
+    this.updateAverageConfidence(finalConfidence);
+
+    // 4. Envoyer à Vox
+    this.send('vox', 'response_ready', {
+      response: finalResponse,
+      confidence: finalConfidence,
+      sources: response.sources,
+      factChecked: true,
+    });
+  }
+
+  /**
+   * Synthétiser les résultats d'un plan
+   */
+  private async synthesizeResults(
+    plan: ExecutionPlan,
+    results: unknown[]
+  ): Promise<{
+    response: string;
+    confidence: number;
+    sources: string[];
+  }> {
+    const synthesisPrompt = `
+OBJECTIF DU PLAN: ${plan.goal}
+
+ÉTAPES EXÉCUTÉES:
+${plan.steps.map((s, i) => `${i + 1}. ${s.action} - ${s.status}`).join('\n')}
+
+RÉSULTATS:
+${results.map((r, i) => `${i + 1}. ${JSON.stringify(r)}`).join('\n')}
+
+Synthétise ces résultats en une réponse cohérente et utile pour l'utilisateur.
+Réponds en JSON:
+{
+  "response": "Synthèse claire et utile",
+  "confidence": 0.0-1.0,
+  "keyPoints": ["point1", "point2"],
+  "limitations": ["limitation éventuelle"]
+}
+`;
+
+    const response = await this.think(synthesisPrompt);
+
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          response: parsed.response,
+          confidence: parsed.confidence || 0.8,
+          sources: parsed.keyPoints || [],
+        };
+      }
+    } catch {
+      // Fallback
+    }
+
+    return {
+      response: 'J\'ai traité votre demande mais je n\'ai pas pu synthétiser les résultats clairement.',
+      confidence: 0.5,
+      sources: [],
+    };
+  }
+
+  // ===========================================================================
+  // HELPERS
+  // ===========================================================================
+
+  private createPlan(parsed: {
+    analysis?: string;
+    approach?: string;
+    steps: Array<{
+      action: string;
+      agentType: string;
+      parameters?: Record<string, unknown>;
+    }>;
+  }): ExecutionPlan {
+    return {
+      id: randomUUID(),
+      goal: parsed.analysis || parsed.approach || 'Objectif non spécifié',
+      steps: parsed.steps.map((s) => ({
+        id: randomUUID(),
+        action: s.action,
+        agentType: s.agentType,
+        parameters: s.parameters || {},
+        status: 'pending' as const,
+      })),
+      currentStepIndex: 0,
+      createdAt: new Date(),
+    };
+  }
+
+  private recordDecision(context: string, decision: unknown): void {
+    this.state.decisionHistory.push({
+      id: randomUUID(),
+      context,
+      options: [],
+      chosen: JSON.stringify(decision),
+      reasoning: 'Auto-décision',
+      timestamp: new Date(),
+    });
+
+    if (this.state.decisionHistory.length > 100) {
+      this.state.decisionHistory = this.state.decisionHistory.slice(-50);
+    }
+  }
+
+  private updateAverageConfidence(newConfidence: number): void {
+    const total = this.state.metrics.successfulResponses;
+    const current = this.state.metrics.averageConfidence;
+    this.state.metrics.averageConfidence =
+      (current * (total - 1) + newConfidence) / total;
+  }
+
+  /**
+   * RÈGLE "NE MENT JAMAIS": Générer une réponse d'incertitude honnête
+   * Quand la confiance est trop basse, admettre qu'on ne sait pas
+   */
+  private generateUncertaintyResponse(
+    originalResponse: string,
+    confidence: number,
+    _input: EnrichedInput
+  ): string {
+    const uncertaintyLevel = confidence < 0.2 ? 'very_low' : 'low';
+
+    if (uncertaintyLevel === 'very_low') {
+      // Confiance < 20% : Refus poli de répondre
+      return `Je dois être honnête : je n'ai pas assez d'informations fiables pour répondre à cette question avec certitude.
+
+Ce que je peux dire :
+- Je n'ai trouvé aucune information pertinente dans ma mémoire
+- Une recherche web n'a pas donné de résultats concluants
+
+Je préfère admettre mon ignorance plutôt que de risquer de vous induire en erreur.
+
+Pourriez-vous :
+1. Reformuler votre question différemment ?
+2. Me donner plus de contexte ?
+3. Me préciser ce que vous savez déjà sur le sujet ?`;
+    } else {
+      // Confiance 20-40% : Réponse avec avertissement clair
+      return `⚠️ **Attention : réponse à faible confiance (${Math.round(confidence * 100)}%)**
+
+${originalResponse}
+
+---
+*Je ne suis pas certain de cette réponse. Les informations ci-dessus pourraient être incomplètes ou partiellement incorrectes. Je vous recommande de vérifier ces informations auprès d'une source fiable avant de vous y fier.*`;
+    }
+  }
+
+  // ===========================================================================
+  // HANDLER DE MESSAGES
+  // ===========================================================================
+
+  protected async handleMessage(message: AgentMessage): Promise<void> {
+    switch (message.type) {
+      case 'user_input':
+        await this.handleUserInput(message);
+        break;
+
+      case 'context_response':
+        this.handleMemoryResponse(message);
+        break;
+
+      case 'fact_check_response':
+        this.handleFactCheckResponse(message);
+        break;
+
+      case 'task_result':
+        await this.handleTaskResult(message);
+        break;
+
+      case 'skill_detected':
+        this.handleSkillDetected(message);
+        break;
+
+      case 'learning_update':
+        this.handleLearningUpdate(message);
+        break;
+
+      default:
+        console.log(`[Brain] Message non géré: ${message.type}`);
+    }
+  }
+
+  private async handleUserInput(message: AgentMessage): Promise<void> {
+    const payload = message.payload as EnrichedInput;
+
+    // Vérifier si c'est le nouveau format enrichi ou l'ancien format
+    if (payload.enrichedInput) {
+      await this.processEnrichedRequest(payload);
+    } else {
+      // Ancien format - fallback
+      const legacyPayload = payload as unknown as {
+        originalInput: string;
+        analysis: {
+          intent: string;
+          confidence: number;
+          processedInput: string;
+          emotionalTone: string;
+        };
+        conversationContext: Array<{ role: 'user' | 'assistant'; content: string }>;
+      };
+
+      // Convertir en nouveau format
+      const enrichedInput: EnrichedInput = {
+        originalInput: legacyPayload.originalInput,
+        enrichedInput: legacyPayload.originalInput,
+        analysis: legacyPayload.analysis,
+        contextReport: {
+          confidence: 0.5,
+          warnings: [],
+          contextUsed: [],
+        },
+        conversationContext: legacyPayload.conversationContext,
+      };
+
+      await this.processEnrichedRequest(enrichedInput);
+    }
+  }
+
+  private handleMemoryResponse(message: AgentMessage): void {
+    const payload = message.payload as {
+      results?: MemoryEntry[];
+      requestId?: string;
+    };
+
+    if (payload.requestId && payload.results) {
+      const callback = this.state.pendingMemoryRequests.get(payload.requestId);
+      if (callback) {
+        this.state.pendingMemoryRequests.delete(payload.requestId);
+        callback(payload.results);
+      }
+    }
+  }
+
+  private handleFactCheckResponse(message: AgentMessage): void {
+    const payload = message.payload as FactCheckResult & { requestId?: string };
+
+    if (payload.requestId) {
+      const callback = this.state.pendingFactChecks.get(payload.requestId);
+      if (callback) {
+        this.state.pendingFactChecks.delete(payload.requestId);
+        callback(payload);
+      }
+    }
+  }
+
+  private async handleTaskResult(message: AgentMessage): Promise<void> {
+    const payload = message.payload as {
+      workerId: string;
+      taskId: string;
+      result: unknown;
+      success: boolean;
+    };
+
+    const worker = this.state.activeWorkers.get(payload.workerId);
+    if (worker) {
+      worker.status = payload.success ? 'completed' : 'failed';
+
+      this.send('memory', 'memory_store', {
+        type: 'task_result',
+        content: JSON.stringify(payload),
+        metadata: { tags: ['worker_result'] },
+      });
+    }
+  }
+
+  private handleSkillDetected(message: AgentMessage): void {
+    const skill = message.payload as Skill;
+    console.log(`[Brain] 🎯 Nouveau skill disponible: ${skill.name}`);
+  }
+
+  private handleLearningUpdate(_message: AgentMessage): void {
+    console.log('[Brain] 📚 Learning reçu, mise à jour des stratégies');
+  }
+
+  // ===========================================================================
+  // WORKER DELEGATION - Brain ne fait JAMAIS le travail lui-même
+  // ===========================================================================
+
+  /**
+   * Déléguer un appel LLM à un worker
+   * Brain reste disponible pour d'autres tâches pendant l'exécution
+   */
+  async delegateLLMCall(
+    prompt: string,
+    options?: {
+      systemPrompt?: string;
+      model?: string;
+      priority?: 'low' | 'normal' | 'high' | 'critical';
+      timeout?: number;
+    }
+  ): Promise<WorkerResult> {
+    console.log(`[Brain] 📤 Délégation LLM call à un worker`);
+
+    return this.workerPool.submit('llm_call', {
+      prompt,
+      systemPrompt: options?.systemPrompt,
+      model: options?.model,
+    }, {
+      priority: options?.priority || 'normal',
+      timeout: options?.timeout,
+    });
+  }
+
+  /**
+   * Déléguer un raisonnement complexe à un worker
+   */
+  async delegateReasoning(
+    prompt: string,
+    context?: string,
+    options?: {
+      steps?: string[];
+      priority?: 'low' | 'normal' | 'high' | 'critical';
+      timeout?: number;
+    }
+  ): Promise<WorkerResult> {
+    console.log(`[Brain] 📤 Délégation raisonnement à un worker`);
+
+    return this.workerPool.submit('llm_reasoning', {
+      prompt,
+      context,
+      steps: options?.steps,
+    }, {
+      priority: options?.priority || 'high',
+      timeout: options?.timeout || 60000, // Plus de temps pour le raisonnement
+    });
+  }
+
+  /**
+   * Déléguer une recherche web à un worker
+   */
+  async delegateWebSearch(
+    query: string,
+    maxResults = 5
+  ): Promise<WorkerResult> {
+    console.log(`[Brain] 📤 Délégation recherche web à un worker`);
+
+    return this.workerPool.submit('web_search', {
+      query,
+      maxResults,
+      searchService: this.webSearch,
+    }, {
+      priority: 'normal',
+      timeout: 15000,
+    });
+  }
+
+  /**
+   * Déléguer une analyse de code à un worker
+   */
+  async delegateCodeAnalysis(
+    code: string,
+    language?: string,
+    analysisType?: 'security' | 'performance' | 'style' | 'bugs' | 'general'
+  ): Promise<WorkerResult> {
+    console.log(`[Brain] 📤 Délégation analyse code à un worker`);
+
+    return this.workerPool.submit('code_analysis', {
+      code,
+      language,
+      analysisType,
+    }, {
+      priority: 'normal',
+      timeout: 30000,
+    });
+  }
+
+  /**
+   * Déléguer une tâche personnalisée à un worker
+   */
+  async delegateCustomTask(
+    handler: (...args: unknown[]) => Promise<unknown>,
+    args?: unknown[],
+    options?: {
+      priority?: 'low' | 'normal' | 'high' | 'critical';
+      timeout?: number;
+    }
+  ): Promise<WorkerResult> {
+    console.log(`[Brain] 📤 Délégation tâche personnalisée à un worker`);
+
+    return this.workerPool.submit('custom', {
+      handler,
+      args,
+    }, {
+      priority: options?.priority || 'normal',
+      timeout: options?.timeout,
+    });
+  }
+
+  /**
+   * Exécuter plusieurs tâches en parallèle via les workers
+   * Brain dispatch et attend les résultats
+   */
+  async delegateParallel(
+    tasks: Array<{
+      type: 'llm_call' | 'llm_reasoning' | 'web_search' | 'code_analysis';
+      payload: unknown;
+      priority?: 'low' | 'normal' | 'high' | 'critical';
+    }>
+  ): Promise<WorkerResult[]> {
+    console.log(`[Brain] 📤 Délégation parallèle: ${tasks.length} tâches`);
+
+    return this.workerPool.submitBatch(tasks.map(t => ({
+      type: t.type,
+      payload: t.payload,
+      priority: t.priority,
+    })));
+  }
+
+  /**
+   * Obtenir le statut du pool de workers
+   */
+  getWorkerPoolStats() {
+    return this.workerPool.getStats();
+  }
+
+  // ===========================================================================
+  // SKILL INTEGRATION
+  // ===========================================================================
+
+  /**
+   * Configurer le SkillManager pour permettre l'exécution de skills
+   */
+  setSkillManager(skillManager: SkillManager): void {
+    this.skillManager = skillManager;
+    console.log('[Brain] 🔧 SkillManager configuré');
+  }
+
+  /**
+   * Vérifier si un skill peut répondre à cette requête
+   * Retourne le skill le plus pertinent ou null
+   */
+  shouldUseSkill(input: string): SkillDefinition | null {
+    if (!this.skillManager) {
+      return null;
+    }
+
+    const relevantSkills = this.skillManager.findRelevantSkills(input, 3);
+
+    if (relevantSkills.length === 0) {
+      return null;
+    }
+
+    // Prendre le skill avec le meilleur score et un bon taux de succès
+    const bestSkill = relevantSkills.find(s => s.successRate >= 0.7);
+
+    if (bestSkill) {
+      console.log(`[Brain] 🎯 Skill trouvé: ${bestSkill.name} (score: ${bestSkill.successRate.toFixed(2)})`);
+      return bestSkill;
+    }
+
+    return null;
+  }
+
+  /**
+   * Exécuter un skill et retourner le résultat
+   * Gère les erreurs et le logging pour l'apprentissage
+   */
+  async executeSkill(
+    skill: SkillDefinition,
+    input: Record<string, unknown>
+  ): Promise<SkillExecutionResult | null> {
+    if (!this.skillManager) {
+      console.error('[Brain] ❌ SkillManager non configuré');
+      return null;
+    }
+
+    console.log(`[Brain] ⚡ Exécution du skill: ${skill.name}`);
+
+    try {
+      const result = await this.skillManager.executeSkill({
+        skillId: skill.id,
+        input,
+      });
+
+      // Logger le résultat pour l'apprentissage
+      if (result.success) {
+        console.log(`[Brain] ✅ Skill ${skill.name} exécuté avec succès (${result.executionTimeMs}ms)`);
+
+        // Stocker le succès en mémoire
+        this.send('memory', 'memory_store', {
+          type: 'task_result',
+          content: JSON.stringify({
+            skillId: skill.id,
+            skillName: skill.name,
+            input,
+            output: result.output,
+            executionTimeMs: result.executionTimeMs,
+          }),
+          metadata: {
+            tags: ['skill_execution', 'success', skill.name],
+            importance: 0.6,
+          },
+        });
+      } else {
+        console.log(`[Brain] ⚠️ Skill ${skill.name} échoué: ${result.error?.message}`);
+
+        // Stocker l'échec pour apprendre
+        this.send('memory', 'memory_store', {
+          type: 'correction',
+          content: JSON.stringify({
+            skillId: skill.id,
+            skillName: skill.name,
+            input,
+            error: result.error,
+            shouldLearn: result.shouldLearn,
+            learningNotes: result.learningNotes,
+          }),
+          metadata: {
+            tags: ['skill_execution', 'failure', skill.name],
+            importance: 0.8, // Les échecs sont importants pour apprendre
+          },
+        });
+      }
+
+      return result;
+    } catch (error) {
+      console.error(`[Brain] ❌ Erreur exécution skill ${skill.name}:`, error);
+
+      // Logger l'erreur critique
+      this.send('memory', 'memory_store', {
+        type: 'correction',
+        content: JSON.stringify({
+          skillId: skill.id,
+          skillName: skill.name,
+          input,
+          criticalError: error instanceof Error ? error.message : String(error),
+        }),
+        metadata: {
+          tags: ['skill_execution', 'critical_error', skill.name],
+          importance: 0.9,
+        },
+      });
+
+      return null;
+    }
+  }
+
+  /**
+   * Tenter d'utiliser un skill pour répondre à une requête
+   * Si un skill pertinent existe, l'exécuter et retourner le résultat
+   */
+  async trySkillExecution(
+    input: EnrichedInput
+  ): Promise<{ used: boolean; result?: SkillExecutionResult }> {
+    const skill = this.shouldUseSkill(input.originalInput);
+
+    if (!skill) {
+      return { used: false };
+    }
+
+    // Préparer l'input pour le skill
+    const skillInput: Record<string, unknown> = {
+      query: input.originalInput,
+      context: input.enrichedInput,
+      intent: input.analysis.intent,
+    };
+
+    const result = await this.executeSkill(skill, skillInput);
+
+    if (result && result.success) {
+      return { used: true, result };
+    }
+
+    return { used: false };
+  }
+
+  // ===========================================================================
+  // API PUBLIQUE
+  // ===========================================================================
+
+  getMetrics(): typeof this.state.metrics {
+    return { ...this.state.metrics };
+  }
+
+  getCurrentPlan(): ExecutionPlan | null {
+    return this.state.currentPlan;
+  }
+
+  getDecisionHistory(): Decision[] {
+    return [...this.state.decisionHistory];
+  }
+
+  getSkillManager(): SkillManager | null {
+    return this.skillManager;
+  }
+}
