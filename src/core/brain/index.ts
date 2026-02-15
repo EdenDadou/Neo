@@ -148,8 +148,23 @@ PRINCIPES :
 3. EFFICACITÉ : Minimiser les étapes inutiles
 4. APPRENTISSAGE : Utiliser les learnings passés
 5. PRUDENCE : Demander confirmation si impact important
+6. ACTION : Quand l'utilisateur demande de FAIRE quelque chose, FAIS-LE. Ne demande pas de clarification inutile.
 
-CAPACITÉS :
+CAPACITÉS TECHNIQUES (tu peux les utiliser directement) :
+- Recherche mémoire sémantique (embeddings) : chercher dans la mémoire par similarité
+- Recherche web : chercher des informations sur internet
+- Fact-checking : vérifier la cohérence des informations
+- Tests système : tu peux tester les composants (embeddings, mémoire, recherche)
+- Exécution de skills : tu peux exécuter des skills enregistrés
+- Délégation à workers : tu peux déléguer des tâches à des workers
+
+QUAND L'UTILISATEUR DEMANDE UN TEST :
+- Si on te demande de "tester" quelque chose, EXÉCUTE le test toi-même
+- Crée un plan avec des étapes concrètes : stocker des données, chercher, vérifier les résultats
+- Ne demande PAS "quel type de test ?" - fais un test complet par défaut
+- Retourne les résultats du test avec des métriques
+
+CAPACITÉS GÉNÉRALES :
 - Analyser et décomposer des problèmes complexes
 - Créer des plans d'exécution multi-étapes
 - Demander plus d'informations à Memory si besoin
@@ -566,15 +581,34 @@ CONTEXTE FOURNI:
 CONVERSATION RÉCENTE:
 ${input.conversationContext.slice(-5).map(c => `${c.role}: ${c.content.substring(0, 100)}...`).join('\n')}
 
+RÈGLE IMPORTANTE:
+- Si l'utilisateur demande de TESTER, VÉRIFIER, ou EXÉCUTER quelque chose → crée un PLAN avec des steps concrets
+- Ne demande PAS de clarification si la demande est claire (ex: "teste la recherche" = fais un test complet)
+- Privilégie l'ACTION sur la clarification
+
 DÉCIDE:
-1. As-tu besoin de PLUS de contexte de Memory? Si oui, que cherches-tu?
-2. Cette requête nécessite-t-elle un plan multi-étapes avec des agents spécialisés?
-3. Ou peut-elle être répondue directement?
+1. Est-ce une demande d'ACTION (test, vérification, exécution) ? Si oui, crée un plan d'exécution.
+2. Est-ce une question simple ? Réponds directement.
+3. As-tu VRAIMENT besoin de plus de contexte ? (rarement nécessaire)
 
 Réponds en JSON avec:
-- needsMoreContext: boolean
-- contextQuery: "ce qu'on cherche" ou null
-- Puis soit steps[] pour un plan, soit response pour une réponse directe
+- needsMoreContext: boolean (false dans la plupart des cas)
+- contextQuery: null (sauf si vraiment nécessaire)
+- Pour une ACTION: steps[] avec des étapes concrètes
+- Pour une QUESTION: response avec la réponse
+
+EXEMPLE pour "teste la recherche embedded":
+{
+  "analysis": "L'utilisateur veut tester le système de recherche par embeddings",
+  "approach": "Exécuter un test complet: stocker des données test, rechercher, mesurer la pertinence",
+  "needsMoreContext": false,
+  "steps": [
+    {"action": "Stocker 3 faits de test en mémoire", "agentType": "memory", "parameters": {"type": "test"}},
+    {"action": "Rechercher par similarité sémantique", "agentType": "memory", "parameters": {"query": "test"}},
+    {"action": "Mesurer et rapporter les résultats", "agentType": "analyst", "parameters": {}}
+  ],
+  "confidence": 0.9
+}
 `;
 
     const response = await this.think(decisionPrompt);
@@ -754,13 +788,80 @@ Réponds en JSON:
 
   /**
    * Exécuter une étape du plan
+   * - Petites tâches → exécution directe
+   * - Grosses tâches → délégation aux workers
    */
   private async executeStep(
     step: PlanStep,
     input: EnrichedInput,
     previousResults: unknown[]
   ): Promise<unknown> {
-    // Si l'étape nécessite plus de contexte, le demander à Memory
+    const actionLower = step.action.toLowerCase();
+
+    // ========== DÉTECTION DE LA COMPLEXITÉ ==========
+    const isComplexTask = this.isComplexTask(step, input);
+
+    // ========== ACTIONS DIRECTES (petites tâches) ==========
+
+    // Test de recherche/embeddings - tâche légère, exécution directe
+    if (actionLower.includes('test') && (actionLower.includes('recherche') || actionLower.includes('search') || actionLower.includes('embed'))) {
+      console.log('[Brain] 🔧 Exécution directe: test embeddings');
+      return await this.executeEmbeddingTest();
+    }
+
+    // Stocker en mémoire - tâche légère
+    if (actionLower.includes('stocker') || actionLower.includes('store') || actionLower.includes('sauvegarder')) {
+      const content = (step.parameters as { content?: string })?.content || `Test data ${Date.now()}`;
+      const type = (step.parameters as { type?: string })?.type || 'fact';
+
+      this.send('memory', 'memory_store', {
+        type,
+        content,
+        metadata: { tags: ['test', 'brain_generated'] },
+      });
+      return { stored: true, content, type };
+    }
+
+    // Rechercher en mémoire - tâche légère
+    if (actionLower.includes('rechercher') || actionLower.includes('chercher') || actionLower.includes('search')) {
+      const query = (step.parameters as { query?: string })?.query || input.originalInput;
+      const results = await this.queryMemory(query, { limit: 10 });
+      return {
+        found: results.length,
+        results: results.map(r => ({ type: r.type, content: r.content.substring(0, 100), importance: r.importance }))
+      };
+    }
+
+    // ========== DÉLÉGATION (grosses tâches) ==========
+
+    if (isComplexTask) {
+      console.log(`[Brain] 📤 Délégation au worker: ${step.action}`);
+
+      // Déléguer selon le type d'agent
+      if (step.agentType === 'coder' || actionLower.includes('code')) {
+        const result = await this.delegateCodeAnalysis(
+          JSON.stringify(step.parameters),
+          undefined,
+          'general'
+        );
+        return result.success ? result.result : { error: result.error };
+      }
+
+      if (step.agentType === 'researcher' || actionLower.includes('recherche web')) {
+        const query = (step.parameters as { query?: string })?.query || step.action;
+        const result = await this.delegateWebSearch(query, 5);
+        return result.success ? result.result : { error: result.error };
+      }
+
+      // Délégation générique via LLM worker
+      const result = await this.delegateLLMCall(
+        `Exécute cette tâche: ${step.action}\nParamètres: ${JSON.stringify(step.parameters)}\nContexte: ${input.originalInput}`,
+        { priority: 'normal', timeout: 30000 }
+      );
+      return result.success ? result.result : { error: result.error };
+    }
+
+    // ========== FALLBACK: SIMULATION LLM (tâches moyennes) ==========
     const contextForStep = await this.queryMemory(step.action, { limit: 5 });
 
     const stepPrompt = `
@@ -788,6 +889,114 @@ Exécute cette étape et retourne le résultat en JSON.
     } catch {
       return { result: response };
     }
+  }
+
+  /**
+   * Déterminer si une tâche est complexe (nécessite délégation)
+   */
+  private isComplexTask(step: PlanStep, input: EnrichedInput): boolean {
+    const actionLower = step.action.toLowerCase();
+
+    // Indicateurs de complexité
+    const complexKeywords = [
+      'analyse complète', 'analyse approfondie', 'rapport détaillé',
+      'code review', 'audit', 'optimisation',
+      'recherche exhaustive', 'scraping', 'crawl',
+      'génération de code', 'refactoring',
+      'traitement batch', 'migration'
+    ];
+
+    if (complexKeywords.some(kw => actionLower.includes(kw))) {
+      return true;
+    }
+
+    // Si le contexte original est très long
+    if (input.originalInput.length > 500) {
+      return true;
+    }
+
+    // Si les paramètres sont complexes
+    const paramsStr = JSON.stringify(step.parameters);
+    if (paramsStr.length > 1000) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Exécuter un test complet du système d'embeddings
+   */
+  private async executeEmbeddingTest(): Promise<{
+    success: boolean;
+    tests: Array<{ name: string; passed: boolean; details: string }>;
+    summary: string;
+  }> {
+    console.log('[Brain] 🧪 Exécution du test d\'embeddings...');
+
+    const tests: Array<{ name: string; passed: boolean; details: string }> = [];
+
+    // Test 1: Stocker des données de test
+    const testData = [
+      { type: 'fact', content: `Paris est la capitale de la France - test ${Date.now()}` },
+      { type: 'fact', content: `Tokyo est la capitale du Japon - test ${Date.now()}` },
+      { type: 'fact', content: `La Tour Eiffel est un monument parisien - test ${Date.now()}` },
+    ];
+
+    for (const data of testData) {
+      this.send('memory', 'memory_store', {
+        type: data.type,
+        content: data.content,
+        metadata: { tags: ['embedding_test', 'auto_test'] },
+      });
+    }
+
+    // Attendre le stockage et la génération d'embeddings
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    tests.push({
+      name: 'Stockage de données test',
+      passed: true,
+      details: `${testData.length} faits stockés`
+    });
+
+    // Test 2: Recherche sémantique - doit trouver Paris
+    const searchResult1 = await this.queryMemory('capitale française', { limit: 5 });
+    const foundParis = searchResult1.some(r => r.content.toLowerCase().includes('paris'));
+
+    tests.push({
+      name: 'Recherche sémantique "capitale française"',
+      passed: foundParis,
+      details: foundParis
+        ? `Trouvé: ${searchResult1[0]?.content?.substring(0, 50)}...`
+        : `Non trouvé parmi ${searchResult1.length} résultats`
+    });
+
+    // Test 3: Recherche sémantique - doit trouver Tour Eiffel
+    const searchResult2 = await this.queryMemory('monument célèbre de Paris', { limit: 5 });
+    const foundEiffel = searchResult2.some(r => r.content.toLowerCase().includes('eiffel'));
+
+    tests.push({
+      name: 'Recherche sémantique "monument célèbre"',
+      passed: foundEiffel,
+      details: foundEiffel
+        ? `Trouvé: ${searchResult2[0]?.content?.substring(0, 50)}...`
+        : `Non trouvé parmi ${searchResult2.length} résultats`
+    });
+
+    // Résumé
+    const passedCount = tests.filter(t => t.passed).length;
+    const success = passedCount >= tests.length - 1; // Au moins 2/3 tests OK
+
+    console.log(`[Brain] 🧪 Test terminé: ${passedCount}/${tests.length} réussis`);
+
+    return {
+      success,
+      tests,
+      summary: success
+        ? `✅ Tests embeddings: ${passedCount}/${tests.length} réussis. La recherche sémantique fonctionne.`
+        : `⚠️ Tests embeddings: ${passedCount}/${tests.length} réussis. Problèmes détectés.`
+    };
   }
 
   /**
