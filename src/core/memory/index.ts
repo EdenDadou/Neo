@@ -1329,33 +1329,39 @@ Réponds en JSON:
   // ===========================================================================
 
   protected async handleMessage(message: AgentMessage): Promise<void> {
-    switch (message.type) {
-      case 'context_request':
-        await this.handleContextRequest(message);
-        break;
+    try {
+      switch (message.type) {
+        case 'context_request':
+          await this.handleContextRequest(message);
+          break;
 
-      case 'context_report_request':
-        await this.handleContextReportRequest(message);
-        break;
+        case 'context_report_request':
+          await this.handleContextReportRequest(message);
+          break;
 
-      case 'memory_store':
-        await this.handleMemoryStore(message);
-        break;
+        case 'memory_store':
+          await this.handleMemoryStore(message);
+          break;
 
-      case 'memory_query':
-        await this.handleMemoryQuery(message);
-        break;
+        case 'memory_query':
+          await this.handleMemoryQuery(message);
+          break;
 
-      case 'store_conversation':
-        await this.handleStoreConversation(message);
-        break;
+        case 'store_conversation':
+          await this.handleStoreConversation(message);
+          break;
 
-      case 'fact_check_request':
-        await this.handleFactCheckRequest(message);
-        break;
+        case 'fact_check_request':
+          await this.handleFactCheckRequest(message);
+          break;
 
-      default:
-        console.log(`[Memory] Message non géré: ${message.type}`);
+        default:
+          console.log(`[Memory] Message non géré: ${message.type}`);
+      }
+    } catch (error) {
+      console.error(`[Memory] Erreur dans handleMessage (${message.type}):`, error);
+      // Reply with error to prevent caller from hanging
+      this.reply(message, { error: true, message: String(error) });
     }
   }
 
@@ -1366,10 +1372,22 @@ Réponds en JSON:
       requestId?: string;
     };
 
-    const result = await this.checkResponseConsistency(
-      payload.proposedResponse,
-      payload.userInput
-    );
+    let result;
+    try {
+      result = await this.checkResponseConsistency(
+        payload.proposedResponse,
+        payload.userInput
+      );
+    } catch (error) {
+      console.error('[Memory] Erreur fact check:', error);
+      // Return a safe default when fact check fails
+      result = {
+        isConsistent: true,
+        confidence: 0,
+        issues: [],
+        error: String(error)
+      };
+    }
 
     // Envoyer la réponse avec le requestId pour le callback
     this.send('brain', 'fact_check_response', {
@@ -1394,7 +1412,20 @@ Réponds en JSON:
 
   private async handleContextReportRequest(message: AgentMessage): Promise<void> {
     const payload = message.payload as { userInput: string };
-    const report = await this.generateContextReport(payload.userInput);
+    let report;
+    try {
+      report = await this.generateContextReport(payload.userInput);
+    } catch (error) {
+      console.error('[Memory] Erreur génération context report:', error);
+      // Return empty report on error
+      report = {
+        relevantMemories: [],
+        summary: '',
+        suggestedTopics: [],
+        emotionalContext: null,
+        error: String(error)
+      };
+    }
     this.reply(message, report);
   }
 

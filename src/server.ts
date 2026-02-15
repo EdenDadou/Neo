@@ -4,6 +4,10 @@
  * Point d'entrée pour le mode serveur (API + WebSocket)
  */
 
+// Load environment variables first
+import { config as loadEnv } from './utils/env';
+loadEnv();
+
 import { Core } from './core';
 import { Gateway } from './interfaces/gateway';
 

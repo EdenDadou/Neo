@@ -22,6 +22,7 @@ export class EmbeddingsService {
   private cache: Map<string, number[]> = new Map();
   private initPromise: Promise<void> | null = null;
   private isInitializing = false;
+  private initFailed = false; // Track if init failed to use fallback
 
   readonly embeddingDimension = 384; // Dimension de all-MiniLM-L6-v2
   readonly modelName = 'Xenova/all-MiniLM-L6-v2';
@@ -65,7 +66,9 @@ export class EmbeddingsService {
         console.log(`[Embeddings] Dimension: ${this.embeddingDimension}`);
       } catch (error) {
         console.error('[Embeddings] ❌ Erreur chargement modèle:', error);
-        throw error;
+        // Mark as failed so embed() uses fallback instead of retrying
+        this.initFailed = true;
+        // Don't throw - let embed() use the fallback
       } finally {
         this.isInitializing = false;
       }
@@ -84,11 +87,17 @@ export class EmbeddingsService {
       return this.cache.get(cacheKey)!;
     }
 
+    // If init previously failed, use fallback directly
+    if (this.initFailed) {
+      return this.localFallbackEmbed(text);
+    }
+
     // S'assurer que le modèle est chargé
     await this.initialize();
 
+    // If extractor failed to load, use fallback
     if (!this.extractor) {
-      throw new Error('Embedding model not initialized');
+      return this.localFallbackEmbed(text);
     }
 
     try {
@@ -124,10 +133,9 @@ export class EmbeddingsService {
    * Générer des embeddings pour plusieurs textes (batch)
    */
   async embedBatch(texts: string[]): Promise<number[][]> {
-    await this.initialize();
-
-    if (!this.extractor) {
-      throw new Error('Embedding model not initialized');
+    // If init failed, process each text with fallback via embed()
+    if (!this.initFailed) {
+      await this.initialize();
     }
 
     const results: number[][] = [];
@@ -396,7 +404,16 @@ export class EmbeddingsService {
    */
   async warmup(): Promise<void> {
     console.log('[Embeddings] 🔥 Préchauffage du modèle...');
-    await this.embed('Test de préchauffage du modèle d\'embedding');
-    console.log('[Embeddings] ✅ Modèle prêt');
+    try {
+      await this.embed('Test de préchauffage du modèle d\'embedding');
+      if (this.initFailed) {
+        console.log('[Embeddings] ⚠️ Modèle non chargé, fallback local actif');
+      } else {
+        console.log('[Embeddings] ✅ Modèle prêt');
+      }
+    } catch (error) {
+      console.error('[Embeddings] ⚠️ Warmup échoué, fallback actif:', error);
+      this.initFailed = true;
+    }
   }
 }

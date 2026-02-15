@@ -335,9 +335,12 @@ export class ModelRouter {
       console.log('[ModelRouter] Together: disponible');
     }
 
-    if (this.config.anthropicApiKey) {
+    // Anthropic Claude - PRIORITAIRE si configuré
+    if (this.config.anthropicApiKey &&
+        this.config.anthropicApiKey !== 'test-key-for-structure-check' &&
+        this.config.anthropicApiKey !== 'your_api_key_here') {
       this.availableModels.push(...MODELS.filter(m => m.provider === 'anthropic'));
-      console.log('[ModelRouter] Anthropic: disponible');
+      console.log('[ModelRouter] Anthropic Claude: disponible (PRIORITAIRE)');
     }
 
     if (this.config.huggingfaceApiKey) {
@@ -345,8 +348,20 @@ export class ModelRouter {
       console.log('[ModelRouter] HuggingFace: disponible (gratuit)');
     }
 
-    // Trier par tier (gratuit d'abord) puis par qualité
+    // Trier: Claude en premier (qualité), puis par tier et qualité
+    // Neo préfère Claude quand disponible, les modèles locaux sont des fallbacks
     this.availableModels.sort((a, b) => {
+      // Anthropic toujours en premier (c'est le modèle principal)
+      if (a.provider === 'anthropic' && b.provider !== 'anthropic') return -1;
+      if (b.provider === 'anthropic' && a.provider !== 'anthropic') return 1;
+
+      // Pour les modèles Anthropic, trier par qualité (Sonnet > Haiku)
+      if (a.provider === 'anthropic' && b.provider === 'anthropic') {
+        const qualityOrder = { basic: 0, good: 1, excellent: 2 };
+        return qualityOrder[b.quality] - qualityOrder[a.quality];
+      }
+
+      // Pour les autres, trier par tier (gratuit d'abord) puis qualité
       const tierOrder = { free: 0, cheap: 1, standard: 2, premium: 3 };
       if (tierOrder[a.tier] !== tierOrder[b.tier]) {
         return tierOrder[a.tier] - tierOrder[b.tier];
@@ -361,14 +376,16 @@ export class ModelRouter {
 
   /**
    * Sélectionner le meilleur modèle pour une tâche
+   * PRIORITÉ: Claude (Anthropic) quand disponible, sinon fallback vers modèles locaux/gratuits
    */
   selectModel(options: {
     task: 'simple_chat' | 'code' | 'reasoning' | 'creative' | 'factual';
     maxTier?: ModelTier;
     requiredCapabilities?: ModelCapability[];
     preferSpeed?: boolean;
+    preferClaude?: boolean; // Default true - prefer Claude when available
   }): ModelInfo | null {
-    const { task, maxTier = 'standard', requiredCapabilities = [], preferSpeed = true } = options;
+    const { task, maxTier = 'premium', requiredCapabilities = [], preferSpeed = false, preferClaude = true } = options;
 
     // Mapping tâche → capacités requises
     const taskCapabilities: Record<string, ModelCapability[]> = {
@@ -384,7 +401,7 @@ export class ModelRouter {
     const maxTierValue = tierOrder[maxTier];
 
     // Filtrer les modèles compatibles
-    const candidates = this.availableModels.filter(model => {
+    let candidates = this.availableModels.filter(model => {
       // Vérifier le tier
       if (tierOrder[model.tier] > maxTierValue) return false;
 
@@ -401,7 +418,24 @@ export class ModelRouter {
       return this.availableModels[0] || null;  // Fallback
     }
 
-    // Trier selon préférence
+    // Si on préfère Claude et qu'il est disponible, le mettre en premier
+    if (preferClaude) {
+      const claudeModels = candidates.filter(m => m.provider === 'anthropic');
+      if (claudeModels.length > 0) {
+        // Préférer Haiku pour simple_chat (rapide et pas cher), Sonnet pour le reste
+        if (task === 'simple_chat') {
+          const haiku = claudeModels.find(m => m.id.includes('haiku'));
+          if (haiku) return haiku;
+        }
+        // Pour les autres tâches, préférer Sonnet
+        const sonnet = claudeModels.find(m => m.id.includes('sonnet'));
+        if (sonnet) return sonnet;
+        // Fallback vers n'importe quel Claude
+        return claudeModels[0];
+      }
+    }
+
+    // Pas de Claude disponible, trier selon préférence
     if (preferSpeed) {
       const speedOrder = { fast: 0, medium: 1, slow: 2 };
       candidates.sort((a, b) => speedOrder[a.speed] - speedOrder[b.speed]);

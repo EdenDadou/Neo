@@ -43,10 +43,17 @@ const CORRECTION_TRIGGERS = [
 ];
 
 export class FactChecker {
-  private client: Anthropic;
+  private client: Anthropic | null;
 
   constructor() {
-    this.client = new Anthropic();
+    // Initialize Anthropic client with API key from environment
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (apiKey && apiKey !== 'test-key-for-structure-check' && apiKey !== 'your_api_key_here') {
+      this.client = new Anthropic({ apiKey });
+    } else {
+      this.client = null;
+      console.warn('[FactChecker] ⚠️ No valid ANTHROPIC_API_KEY - fact checking will use fallback');
+    }
   }
 
   /**
@@ -73,6 +80,21 @@ export class FactChecker {
     }
 
     // Analyse approfondie avec Claude
+    if (!this.client) {
+      // Fallback without API
+      return {
+        isCorrection: hasQuickTrigger,
+        confidence: hasQuickTrigger ? 0.6 : 0.3,
+        details: hasQuickTrigger ? {
+          originalError: 'Non déterminé (no API)',
+          correction: userMessage,
+          feedback: 'Correction détectée par mots-clés',
+          correctionType: 'factual' as const,
+        } : null,
+        triggerWords: foundTriggers,
+      };
+    }
+
     try {
       const response = await this.client.messages.create({
         model: 'claude-sonnet-4-20250514',
@@ -173,6 +195,17 @@ Analyse: est-ce une correction?`
         supportedBy: [],
         confidence: 0.6,
         warnings: ['Pas de faits vérifiables dans les mémoires'],
+      };
+    }
+
+    // Check if client is available
+    if (!this.client) {
+      return {
+        isConsistent: true,
+        contradictions: [],
+        supportedBy: [],
+        confidence: 0.5,
+        warnings: ['Vérification API non disponible (no API key)'],
       };
     }
 

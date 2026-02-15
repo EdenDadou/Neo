@@ -30,7 +30,16 @@ export abstract class BaseAgent {
 
   constructor(config: AgentConfig) {
     this.config = config;
-    this.client = new Anthropic();
+    // Initialize Anthropic client with API key from environment
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (apiKey && apiKey !== 'test-key-for-structure-check' && apiKey !== 'your_api_key_here') {
+      this.client = new Anthropic({ apiKey });
+    } else {
+      // Create a placeholder client - will fail on use but won't crash on init
+      // The modelRouter will handle fallbacks
+      this.client = null as unknown as Anthropic;
+      console.warn(`[${config.name}] ⚠️ No valid ANTHROPIC_API_KEY - Claude direct calls will fail`);
+    }
     this.tokenManager = getTokenManager();
     this.modelRouter = getModelRouter();
   }
@@ -174,33 +183,43 @@ export abstract class BaseAgent {
     userMessage: string,
     additionalContext?: string
   ): Promise<string> {
+    // If no Anthropic client, try to use modelRouter
+    if (!this.client) {
+      return this.thinkOptimized(userMessage, 'simple_chat', additionalContext);
+    }
+
     const systemPrompt = additionalContext
       ? `${this.config.systemPrompt}\n\n--- CONTEXTE ADDITIONNEL ---\n${additionalContext}`
       : this.config.systemPrompt;
 
-    const response = await this.client.messages.create({
-      model: this.config.model,
-      max_tokens: this.config.maxTokens,
-      temperature: this.config.temperature,
-      system: systemPrompt,
-      messages: [
-        {
-          role: 'user',
-          content: userMessage,
-        },
-      ],
-    });
+    try {
+      const response = await this.client.messages.create({
+        model: this.config.model,
+        max_tokens: this.config.maxTokens,
+        temperature: this.config.temperature,
+        system: systemPrompt,
+        messages: [
+          {
+            role: 'user',
+            content: userMessage,
+          },
+        ],
+      });
 
-    // Track token usage
-    this.tokenManager.recordUsage(this.config.name, {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      model: this.config.model,
-      provider: 'anthropic',
-    });
+      // Track token usage
+      this.tokenManager.recordUsage(this.config.name, {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        model: this.config.model,
+        provider: 'anthropic',
+      });
 
-    const textBlock = response.content.find((block) => block.type === 'text');
-    return textBlock ? textBlock.text : '';
+      const textBlock = response.content.find((block) => block.type === 'text');
+      return textBlock ? textBlock.text : '';
+    } catch (error) {
+      console.error(`[${this.config.name}] Erreur think:`, error);
+      throw error;
+    }
   }
 
   /**

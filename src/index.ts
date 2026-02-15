@@ -2,6 +2,10 @@
  * Point d'entrée principal de l'application
  */
 
+// Load environment variables first
+import { config as loadEnv } from './utils/env';
+loadEnv();
+
 import { Core } from './core';
 import * as readline from 'readline';
 

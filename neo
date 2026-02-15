@@ -43,35 +43,173 @@ EOF
 # Configurer la clé API de manière interactive
 configure_api_key() {
     echo ""
-    echo -e "    ${YELLOW}Configuration requise${NC}"
+    echo -e "    ${YELLOW}Configuration de la clé API${NC}"
     echo -e "    ${DIM}─────────────────────────────────────────${NC}"
     echo ""
-    echo -e "    Neo a besoin d'une clé API Anthropic pour fonctionner."
-    echo -e "    ${DIM}Obtenez-la sur: https://console.anthropic.com${NC}"
+    echo -e "    Neo utilise Claude (Anthropic) comme cerveau principal."
+    echo -e "    ${DIM}Obtenez une clé sur: ${WHITE}https://console.anthropic.com${NC}"
     echo ""
 
     while true; do
-        read -p "    Clé API Anthropic: " API_KEY
+        read -p "    Clé API Anthropic (sk-ant-...): " API_KEY
 
         if [[ "$API_KEY" =~ ^sk-ant- ]]; then
+            break
+        elif [[ "$API_KEY" == "" ]]; then
+            echo -e "    ${YELLOW}!${NC} Clé vide, Neo fonctionnera en mode dégradé"
+            API_KEY="your_api_key_here"
             break
         else
             echo -e "    ${RED}Format invalide.${NC} La clé doit commencer par ${WHITE}sk-ant-${NC}"
         fi
     done
 
-    # Créer le .env
-    cat > .env << EOF
+    # Sauvegarder dans .env (préserver les autres variables si elles existent)
+    if [ -f ".env" ]; then
+        # Mettre à jour la clé existante
+        if grep -q "ANTHROPIC_API_KEY=" .env; then
+            sed -i.bak "s|ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=$API_KEY|" .env
+            rm -f .env.bak
+        else
+            echo "ANTHROPIC_API_KEY=$API_KEY" >> .env
+        fi
+    else
+        # Créer le .env
+        cat > .env << EOF
 # Neo AI Configuration
 ANTHROPIC_API_KEY=$API_KEY
 PORT=3001
 CORS_ORIGIN=http://localhost:5173
 JWT_SECRET=neo-$(date +%s)-$RANDOM$RANDOM
 NODE_ENV=production
-EOF
 
-    echo -e "    ${GREEN}✓${NC} Configuration sauvegardée"
+# Droits d'écriture
+ALLOW_FILE_WRITE=false
+ALLOW_SHELL_EXEC=false
+EOF
+    fi
+
+    echo -e "    ${GREEN}✓${NC} Clé API configurée"
     return 0
+}
+
+# Configurer les permissions de Neo
+configure_permissions() {
+    echo ""
+    echo -e "    ${YELLOW}Permissions de Neo${NC}"
+    echo -e "    ${DIM}─────────────────────────────────────────${NC}"
+    echo ""
+    echo -e "    Neo peut effectuer des actions sur votre système."
+    echo -e "    ${DIM}Configurez ce qu'il est autorisé à faire.${NC}"
+    echo ""
+
+    # Lecture du statut actuel
+    local current_write="false"
+    local current_shell="false"
+    if [ -f ".env" ]; then
+        current_write=$(grep "ALLOW_FILE_WRITE=" .env 2>/dev/null | cut -d'=' -f2 || echo "false")
+        current_shell=$(grep "ALLOW_SHELL_EXEC=" .env 2>/dev/null | cut -d'=' -f2 || echo "false")
+    fi
+
+    # Écriture de fichiers
+    echo -e "    ${WHITE}1. Écriture de fichiers${NC}"
+    echo -e "    ${DIM}   Permet à Neo de créer/modifier des fichiers${NC}"
+    if [[ "$current_write" == "true" ]]; then
+        echo -e "    ${GREEN}   [Actuellement: AUTORISÉ]${NC}"
+    else
+        echo -e "    ${DIM}   [Actuellement: refusé]${NC}"
+    fi
+    echo ""
+    read -p "    Autoriser l'écriture? (o/n) [n]: " allow_write
+
+    if [[ "$allow_write" =~ ^[oOyY]$ ]]; then
+        ALLOW_WRITE="true"
+        echo -e "    ${GREEN}✓${NC} Écriture autorisée"
+    else
+        ALLOW_WRITE="false"
+        echo -e "    ${DIM}○${NC} Écriture refusée"
+    fi
+    echo ""
+
+    # Exécution de commandes
+    echo -e "    ${WHITE}2. Exécution de commandes shell${NC}"
+    echo -e "    ${DIM}   Permet à Neo d'exécuter des commandes (npm, git, etc.)${NC}"
+    if [[ "$current_shell" == "true" ]]; then
+        echo -e "    ${GREEN}   [Actuellement: AUTORISÉ]${NC}"
+    else
+        echo -e "    ${DIM}   [Actuellement: refusé]${NC}"
+    fi
+    echo ""
+    read -p "    Autoriser l'exécution? (o/n) [n]: " allow_shell
+
+    if [[ "$allow_shell" =~ ^[oOyY]$ ]]; then
+        ALLOW_SHELL="true"
+        echo -e "    ${GREEN}✓${NC} Exécution autorisée"
+    else
+        ALLOW_SHELL="false"
+        echo -e "    ${DIM}○${NC} Exécution refusée"
+    fi
+    echo ""
+
+    # Sauvegarder dans .env
+    if [ -f ".env" ]; then
+        # Mettre à jour ou ajouter les permissions
+        if grep -q "ALLOW_FILE_WRITE=" .env; then
+            sed -i.bak "s|ALLOW_FILE_WRITE=.*|ALLOW_FILE_WRITE=$ALLOW_WRITE|" .env
+        else
+            echo "ALLOW_FILE_WRITE=$ALLOW_WRITE" >> .env
+        fi
+
+        if grep -q "ALLOW_SHELL_EXEC=" .env; then
+            sed -i.bak "s|ALLOW_SHELL_EXEC=.*|ALLOW_SHELL_EXEC=$ALLOW_SHELL|" .env
+        else
+            echo "ALLOW_SHELL_EXEC=$ALLOW_SHELL" >> .env
+        fi
+        rm -f .env.bak
+    else
+        cat > .env << EOF
+# Neo AI Configuration
+ANTHROPIC_API_KEY=your_api_key_here
+PORT=3001
+CORS_ORIGIN=http://localhost:5173
+JWT_SECRET=neo-$(date +%s)-$RANDOM$RANDOM
+NODE_ENV=production
+
+# Droits
+ALLOW_FILE_WRITE=$ALLOW_WRITE
+ALLOW_SHELL_EXEC=$ALLOW_SHELL
+EOF
+    fi
+
+    echo -e "    ${GREEN}✓${NC} Permissions configurées"
+    return 0
+}
+
+# Assistant de configuration complet
+run_setup_wizard() {
+    echo ""
+    echo -e "    ${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "    ${WHITE}${BOLD}       ASSISTANT DE CONFIGURATION${NC}"
+    echo -e "    ${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    # Étape 1: Clé API
+    echo ""
+    echo -e "    ${CYAN}Étape 1/2${NC} - Connexion à Claude"
+    configure_api_key
+
+    # Étape 2: Permissions
+    echo ""
+    echo -e "    ${CYAN}Étape 2/2${NC} - Permissions"
+    configure_permissions
+
+    echo ""
+    echo -e "    ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "    ${WHITE}${BOLD}       CONFIGURATION TERMINÉE!${NC}"
+    echo -e "    ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "    Neo est prêt à démarrer."
+    echo -e "    ${DIM}Utilisez ./neo chat pour commencer une conversation.${NC}"
+    echo ""
 }
 
 # Vérification et auto-réparation
@@ -108,12 +246,23 @@ ensure_ready() {
         echo -e "    ${GREEN}✓${NC} Répertoires créés"
     fi
 
-    # 4. .env - Configurer si manquant
+    # 4. .env - Configurer si manquant ou invalide
     if [ -f ".env" ] && grep -q "ANTHROPIC_API_KEY=sk-ant-" .env 2>/dev/null; then
         echo -e "    ${GREEN}✓${NC} Configuration ${WHITE}.env${NC}"
+
+        # Afficher les permissions actuelles
+        local allow_write=$(grep "ALLOW_FILE_WRITE=" .env 2>/dev/null | cut -d'=' -f2 || echo "false")
+        local allow_shell=$(grep "ALLOW_SHELL_EXEC=" .env 2>/dev/null | cut -d'=' -f2 || echo "false")
+        if [[ "$allow_write" == "true" ]] || [[ "$allow_shell" == "true" ]]; then
+            echo -e "    ${GREEN}✓${NC} Permissions: ${DIM}écriture=$allow_write, shell=$allow_shell${NC}"
+        fi
     else
-        echo -e "    ${YELLOW}!${NC} Configuration manquante"
-        configure_api_key
+        if [ -f ".env" ]; then
+            echo -e "    ${YELLOW}!${NC} Clé API invalide ou manquante"
+        else
+            echo -e "    ${YELLOW}!${NC} Première configuration requise"
+        fi
+        run_setup_wizard
         needs_fix=1
     fi
 
@@ -167,6 +316,7 @@ show_menu() {
     echo -e "    ${CYAN}[2]${NC} ${WHITE}API${NC}          Serveur REST (port 3001)"
     echo -e "    ${CYAN}[3]${NC} ${WHITE}Web${NC}          Dashboard + API"
     echo -e "    ${CYAN}[4]${NC} ${WHITE}Status${NC}       État du système"
+    echo -e "    ${CYAN}[5]${NC} ${WHITE}Config${NC}       Configurer Neo (clé API, permissions)"
     echo ""
     echo -e "    ${DIM}[q] Quitter${NC}"
     echo ""
@@ -292,9 +442,7 @@ do_update() {
 
 # Reconfigurer
 do_config() {
-    echo ""
-    configure_api_key
-    echo ""
+    run_setup_wizard
 }
 
 # Gestion des arguments
@@ -356,6 +504,7 @@ case "${1:-}" in
                 2) start_api ;;
                 3) start_web ;;
                 4) show_status ;;
+                5) run_setup_wizard ;;
                 q|Q)
                     echo ""
                     echo -e "    ${DIM}À bientôt!${NC}"
