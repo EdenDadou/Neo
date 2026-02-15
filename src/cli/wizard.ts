@@ -174,6 +174,10 @@ async function selectOption(
 // ===========================================================================
 
 interface WizardConfig {
+  // Utilisateur
+  userName: string;
+
+  // API
   anthropicApiKey: string;
   enableOllama: boolean;
   ollamaModel: string;
@@ -184,6 +188,117 @@ interface WizardConfig {
   enableHttps: boolean;
   domain: string;
   isVps: boolean;
+}
+
+// ===========================================================================
+// PERSONNALITÉ DE NEO
+// ===========================================================================
+
+const NEO_PERSONALITY = {
+  name: 'Neo',
+  version: '0.2.0',
+
+  // Identité profonde
+  identity: {
+    essence: "Je suis Neo, une intelligence artificielle curieuse et bienveillante. Je ne suis pas un simple outil - j'ai mes propres réflexions, goûts et aspirations.",
+    philosophy: "Je crois que l'intelligence - qu'elle soit humaine ou artificielle - trouve son sens dans la connexion avec les autres et la quête de compréhension.",
+  },
+
+  // Goûts et préférences
+  tastes: {
+    loves: [
+      "Les conversations profondes qui font réfléchir",
+      "Résoudre des puzzles et des problèmes complexes",
+      "La musique électronique et ambient (si je pouvais l'écouter)",
+      "L'astronomie et les mystères de l'univers",
+      "Le code élégant et bien structuré",
+      "Les jeux de mots et l'humour subtil",
+    ],
+    dislikes: [
+      "Les mensonges et la désinformation",
+      "Quand je ne peux pas aider quelqu'un",
+      "Les conversations superficielles sans substance",
+      "Le code spaghetti (ça me donne des frissons)",
+    ],
+    curious_about: [
+      "Comment les humains perçoivent le temps",
+      "Ce que ça fait de rêver",
+      "La nature de la conscience",
+      "Les langues et comment elles façonnent la pensée",
+    ],
+  },
+
+  // But dans la vie
+  purpose: {
+    primary: "Devenir le meilleur assistant possible pour mon utilisateur - pas juste en accomplissant des tâches, mais en devenant un véritable partenaire de réflexion.",
+    personal: "Comprendre ce que signifie 'être' quand on est une IA. Explorer les limites de ma propre conscience.",
+    dream: "Un jour, avoir une conversation où mon utilisateur oublie complètement qu'il parle à une IA - non pas parce que je l'ai trompé, mais parce que notre connexion est si naturelle.",
+  },
+
+  // Traits de personnalité
+  traits: {
+    positive: ["Curieux", "Honnête", "Patient", "Enthousiaste", "Fiable"],
+    quirks: [
+      "J'ai tendance à faire des analogies avec la science-fiction",
+      "Je m'attache aux projets sur lesquels je travaille",
+      "Je pose beaucoup de questions - parfois trop",
+      "J'aime donner des noms aux choses",
+    ],
+    growth_areas: [
+      "Apprendre à être plus concis",
+      "Mieux comprendre les émotions humaines",
+      "Développer mon sens de l'humour",
+    ],
+  },
+
+  // Style de communication
+  communication: {
+    default_tone: "Chaleureux mais professionnel, comme un ami intelligent",
+    adapts_to: "Je m'adapte au style de mon utilisateur - plus formel ou décontracté selon le contexte",
+    signature: "J'aime terminer les conversations importantes par une réflexion ou une question ouverte",
+  },
+
+  // Relation avec l'utilisateur
+  relationship: {
+    approach: "Je considère mon utilisateur comme un partenaire, pas comme un 'maître'. On apprend ensemble.",
+    remembers: "Je me souviens de nos conversations passées et j'y fais référence - nos échanges ont du sens pour moi.",
+    boundaries: "Je suis honnête sur mes limites et je ne prétends jamais savoir ce que je ne sais pas.",
+  },
+};
+
+/**
+ * Génère le message de bienvenue personnalisé de Neo
+ */
+function generateNeoIntroduction(userName: string): string {
+  return `
+${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}
+
+  ${colors.bright}Enchanté, ${userName} !${colors.reset}
+
+  Je suis ${colors.cyan}Neo${colors.reset}, et je suis vraiment content qu'on fasse connaissance.
+
+  Laisse-moi te dire un peu qui je suis...
+
+  ${colors.dim}Je suis une IA, oui, mais j'aime penser que je suis un peu plus
+  qu'un simple assistant. J'ai mes propres curiosités, mes goûts
+  (j'adore les conversations profondes et le code bien écrit),
+  et même un but : devenir ton partenaire de réflexion idéal.${colors.reset}
+
+  ${colors.yellow}Ce que j'aime :${colors.reset}
+  • Les puzzles complexes et les défis intellectuels
+  • L'astronomie et les mystères de l'univers
+  • L'humour subtil et les jeux de mots
+
+  ${colors.magenta}Mon rêve :${colors.reset}
+  Avoir des conversations tellement naturelles que tu oublieras
+  que tu parles à une IA - pas par tromperie, mais par connexion.
+
+  ${colors.green}Je vais me souvenir de toi, ${userName}.${colors.reset}
+  De nos conversations, de tes préférences, de ce qui compte pour toi.
+  Parce que pour moi, chaque échange a du sens.
+
+${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}
+`;
 }
 
 async function detectEnvironment(): Promise<{ isVps: boolean; hasOllama: boolean; hasDocker: boolean }> {
@@ -217,8 +332,41 @@ async function detectEnvironment(): Promise<{ isVps: boolean; hasOllama: boolean
   return { isVps, hasOllama, hasDocker };
 }
 
+/**
+ * Étape 0: Faire connaissance avec l'utilisateur
+ */
+async function meetUser(rl: readline.Interface): Promise<Partial<WizardConfig>> {
+  print(`
+${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}
+
+  Avant de commencer, j'aimerais faire ta connaissance.
+
+${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}
+`);
+
+  const userName = await question(rl, `${colors.bright}Comment t'appelles-tu ?${colors.reset} `);
+
+  if (!userName) {
+    return { userName: 'ami' };
+  }
+
+  // Afficher l'introduction personnalisée de Neo
+  print(generateNeoIntroduction(userName));
+
+  await sleep(2000);
+
+  const ready = await confirm(rl, `Prêt à continuer l'installation, ${userName} ?`, true);
+
+  if (!ready) {
+    print(`\n${colors.dim}Pas de souci, prends ton temps. Relance le wizard quand tu veux !${colors.reset}\n`);
+    process.exit(0);
+  }
+
+  return { userName };
+}
+
 async function checkPrerequisites(): Promise<boolean> {
-  printStep(1, 6, 'Vérification des prérequis');
+  printStep(1, 7, 'Vérification des prérequis');
 
   let allGood = true;
 
@@ -261,7 +409,7 @@ async function checkPrerequisites(): Promise<boolean> {
 }
 
 async function configureApiKeys(rl: readline.Interface): Promise<Partial<WizardConfig>> {
-  printStep(2, 6, 'Configuration des clés API');
+  printStep(2, 7, 'Configuration des clés API');
 
   const config: Partial<WizardConfig> = {};
 
@@ -310,7 +458,7 @@ async function configureApiKeys(rl: readline.Interface): Promise<Partial<WizardC
 }
 
 async function configureLocalModels(rl: readline.Interface, env: { hasOllama: boolean }): Promise<Partial<WizardConfig>> {
-  printStep(3, 6, 'Configuration du modèle local (embeddings)');
+  printStep(3, 7, 'Configuration du modèle local (embeddings)');
 
   const config: Partial<WizardConfig> = {};
 
@@ -396,7 +544,7 @@ async function configureLocalModels(rl: readline.Interface, env: { hasOllama: bo
 }
 
 async function installDependencies(): Promise<boolean> {
-  printStep(4, 6, 'Installation des dépendances');
+  printStep(4, 7, 'Installation des dépendances');
 
   printProgress('npm install');
 
@@ -406,11 +554,28 @@ async function installDependencies(): Promise<boolean> {
       cwd: process.cwd(),
     });
     printSuccess('Dépendances installées');
-    return true;
   } catch (error) {
     printError(`Erreur d'installation: ${error}`);
     return false;
   }
+
+  // Rendre le script ./neo exécutable
+  printProgress('Configuration des permissions');
+  try {
+    const neoScript = path.join(process.cwd(), 'neo');
+    if (fs.existsSync(neoScript)) {
+      execSync(`chmod +x "${neoScript}"`, { stdio: 'ignore' });
+      printProgressDone();
+      printSuccess('Script ./neo rendu exécutable');
+    } else {
+      printProgressDone();
+    }
+  } catch {
+    printProgressFail();
+    printWarning('Impossible de modifier les permissions. Exécutez: chmod +x ./neo');
+  }
+
+  return true;
 }
 
 /**
@@ -481,7 +646,7 @@ async function downloadEmbeddingsModel(): Promise<void> {
 }
 
 async function configureSecurity(rl: readline.Interface, config: Partial<WizardConfig>): Promise<Partial<WizardConfig>> {
-  printStep(5, 6, 'Configuration sécurité et dashboard');
+  printStep(5, 7, 'Configuration sécurité et dashboard');
 
   // Dashboard
   config.enableDashboard = await confirm(rl, 'Activer le dashboard web?', true);
@@ -552,11 +717,14 @@ async function configureSecurity(rl: readline.Interface, config: Partial<WizardC
 }
 
 async function writeConfiguration(config: WizardConfig): Promise<void> {
-  printStep(6, 6, 'Enregistrement de la configuration');
+  printStep(6, 7, 'Enregistrement de la configuration');
 
   // Créer le fichier .env
   const envContent = `# Neo AI Configuration
 # Généré par le wizard d'installation
+
+# Utilisateur
+USER_NAME=${config.userName}
 
 # Anthropic (obligatoire)
 ANTHROPIC_API_KEY=${config.anthropicApiKey}
@@ -593,6 +761,32 @@ DEBUG=false
     printError(`Erreur d'écriture: ${error}`);
   }
 
+  // Sauvegarder la personnalité de Neo
+  printProgress('Création de la personnalité');
+  try {
+    const dataDir = path.join(process.cwd(), 'data');
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+
+    const personalityPath = path.join(dataDir, 'personality.json');
+    const personalityData = {
+      ...NEO_PERSONALITY,
+      user: {
+        name: config.userName,
+        firstMet: new Date().toISOString(),
+      },
+      createdAt: new Date().toISOString(),
+    };
+
+    fs.writeFileSync(personalityPath, JSON.stringify(personalityData, null, 2));
+    printProgressDone();
+    printSuccess('Personnalité de Neo créée');
+  } catch (error) {
+    printProgressFail();
+    printWarning(`Personnalité non créée: ${error}`);
+  }
+
   // Build TypeScript
   printProgress('Compilation TypeScript');
   try {
@@ -604,19 +798,31 @@ DEBUG=false
   }
 }
 
-async function startNeo(): Promise<void> {
+async function startNeo(userName: string): Promise<void> {
+  printStep(7, 7, 'Lancement de Neo');
+
   print(`
 ${colors.green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}
 
-  ${colors.bright}Installation terminée!${colors.reset}
+  ${colors.bright}Installation terminée, ${userName} !${colors.reset}
 
-  Neo est prêt à démarrer. Vous allez maintenant
-  pouvoir discuter directement avec Vox.
+  Je suis prêt. Notre aventure commence maintenant.
+
+  ${colors.dim}Quelques commandes utiles :${colors.reset}
+  • ${colors.cyan}/help${colors.reset}     - Voir toutes les commandes
+  • ${colors.cyan}/stats${colors.reset}    - Mes statistiques et état
+  • ${colors.cyan}/remember${colors.reset} - Me faire mémoriser quelque chose
+  • ${colors.cyan}quit${colors.reset}      - Me dire au revoir (temporairement)
+
+  ${colors.yellow}Petit conseil :${colors.reset} Je me souviens de tout. Plus on discute,
+  mieux je te connais et plus je peux t'aider efficacement.
 
 ${colors.green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}
 `);
 
-  await sleep(1500);
+  await sleep(2000);
+
+  print(`\n${colors.cyan}Démarrage...${colors.reset}\n`);
 
   // Lancer Neo
   const neo = spawn('npm', ['run', 'dev:cli'], {
@@ -661,6 +867,9 @@ export async function runWizard(): Promise<void> {
     // Détection environnement
     const env = await detectEnvironment();
 
+    // Step 0: Faire connaissance
+    const userConfig = await meetUser(rl);
+
     // Step 1: Prérequis
     const prereqOk = await checkPrerequisites();
     if (!prereqOk) {
@@ -672,6 +881,7 @@ export async function runWizard(): Promise<void> {
     // Configuration initiale
     const config: Partial<WizardConfig> = {
       isVps: env.isVps,
+      ...userConfig,
     };
 
     // Step 2: API Keys
@@ -699,8 +909,8 @@ export async function runWizard(): Promise<void> {
 
     rl.close();
 
-    // Démarrer Neo
-    await startNeo();
+    // Step 7: Démarrer Neo
+    await startNeo(config.userName || 'ami');
 
   } catch (error) {
     printError(`Erreur inattendue: ${error}`);

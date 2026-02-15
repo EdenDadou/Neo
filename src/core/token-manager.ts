@@ -175,7 +175,7 @@ export class TokenManager {
     // Sauvegarder périodiquement
     this.saveToPersistence();
 
-    console.log(`[TokenManager] ${agentName}: ${totalTokens} tokens ($${cost.toFixed(4)})`);
+    // console.log(`[TokenManager] ${agentName}: ${totalTokens} tokens ($${cost.toFixed(4)})`);
   }
 
   /**

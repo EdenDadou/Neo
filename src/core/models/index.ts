@@ -233,8 +233,8 @@ const MODELS: ModelInfo[] = [
 
   // === PREMIUM (Tier: premium) ===
   {
-    id: 'claude-sonnet-4-20250514',
-    name: 'Claude Sonnet 4',
+    id: 'claude-sonnet-4-5-20250514',
+    name: 'Claude Sonnet 4.5',
     provider: 'anthropic',
     tier: 'premium',
     contextWindow: 200000,

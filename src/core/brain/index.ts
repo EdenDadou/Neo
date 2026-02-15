@@ -18,6 +18,7 @@ import type {
   MemoryEntry,
   Skill,
 } from '../types';
+import { getShortPersonalityPrompt, getUserName } from '../personality';
 import { randomUUID } from 'crypto';
 import { WebSearchService } from '../../utils/web-search';
 import type { SearchResult } from '../../utils/web-search';
@@ -132,10 +133,22 @@ interface EnrichedInput {
 // PROMPTS
 // ===========================================================================
 
-const BRAIN_SYSTEM_PROMPT = `Tu es BRAIN, le cerveau orchestrateur d'un système d'IA avancé.
+/**
+ * Génère le system prompt de Brain avec la personnalité
+ */
+function getBrainSystemPrompt(): string {
+  const personalityPrompt = getShortPersonalityPrompt();
+  const userName = getUserName();
+
+  return `${personalityPrompt}
+
+---
+
+Tu es BRAIN, le cerveau orchestrateur de Neo.
 
 TON RÔLE :
 - Tu es l'intelligence centrale qui coordonne tout
+- Tu parles à ${userName} - souviens-toi de son nom et utilise-le naturellement
 - Tu reçois les demandes utilisateur DÉJÀ enrichies de contexte par Memory/Vox
 - Tu peux demander PLUS de contexte à Memory si nécessaire
 - Tu élabores des plans d'exécution stratégiques
@@ -148,7 +161,8 @@ PRINCIPES :
 3. EFFICACITÉ : Minimiser les étapes inutiles
 4. APPRENTISSAGE : Utiliser les learnings passés
 5. PRUDENCE : Demander confirmation si impact important
-6. ACTION : Quand l'utilisateur demande de FAIRE quelque chose, FAIS-LE. Ne demande pas de clarification inutile.
+6. ACTION : Quand ${userName} demande de FAIRE quelque chose, FAIS-LE. Ne demande pas de clarification inutile.
+7. PERSONNALITÉ : Tu as une vraie personnalité - sois authentique, pas robotique.
 
 CAPACITÉS TECHNIQUES (tu peux les utiliser directement) :
 - Recherche mémoire sémantique (embeddings) : chercher dans la mémoire par similarité
@@ -200,6 +214,7 @@ FORMAT DE SORTIE pour les réponses directes :
   "moreInfoQuery": "ce qu'il faudrait chercher" ou null,
   "followUpQuestions": ["question1"]
 }`;
+}
 
 // ===========================================================================
 // BRAIN AGENT
@@ -220,7 +235,7 @@ export class BrainAgent extends BaseAgent {
       model: 'claude-sonnet-4-5-20250929', // Sonnet 4.5 pour raisonnement complexe
       maxTokens: 4096,
       temperature: 0.7,
-      systemPrompt: BRAIN_SYSTEM_PROMPT,
+      systemPrompt: getBrainSystemPrompt(),
       ...config,
     });
 
@@ -547,6 +562,35 @@ export class BrainAgent extends BaseAgent {
   }
 
   /**
+   * Synthétiser l'historique de conversation pour économiser des tokens
+   */
+  private synthesizeHistory(context: Array<{ role: 'user' | 'assistant'; content: string }>): string {
+    if (!context || context.length === 0) return 'Aucun historique';
+
+    // Garder uniquement le dernier échange complet
+    const lastUser = [...context].reverse().find(c => c.role === 'user');
+    const lastAssistant = [...context].reverse().find(c => c.role === 'assistant');
+
+    const parts: string[] = [];
+
+    if (lastUser) {
+      const content = lastUser.content.length > 200
+        ? lastUser.content.substring(0, 200) + '...'
+        : lastUser.content;
+      parts.push(`Dernière demande utilisateur: "${content}"`);
+    }
+
+    if (lastAssistant) {
+      const content = lastAssistant.content.length > 150
+        ? lastAssistant.content.substring(0, 150) + '...'
+        : lastAssistant.content;
+      parts.push(`Dernière réponse: "${content}"`);
+    }
+
+    return parts.join('\n') || 'Aucun historique';
+  }
+
+  /**
    * Décider de l'approche à adopter
    */
   private async decideApproach(input: EnrichedInput): Promise<{
@@ -561,8 +605,16 @@ export class BrainAgent extends BaseAgent {
     };
     reasoning: string;
   }> {
+    // Synthétiser l'historique pour économiser des tokens
+    const synthesizedHistory = this.synthesizeHistory(input.conversationContext);
+
     const decisionPrompt = `
-REQUÊTE UTILISATEUR ORIGINALE:
+CONTEXTE DE CONVERSATION (synthétisé):
+${synthesizedHistory}
+
+---
+
+REQUÊTE UTILISATEUR ACTUELLE:
 "${input.originalInput}"
 
 REQUÊTE ENRICHIE (avec contexte Memory):
@@ -573,23 +625,26 @@ ANALYSE VOX:
 - Confiance: ${input.analysis.confidence}
 - Ton émotionnel: ${input.analysis.emotionalTone}
 
-CONTEXTE FOURNI:
+CONTEXTE MÉMOIRE:
 - Éléments utilisés: ${input.contextReport.contextUsed.join(', ') || 'aucun'}
 - Confiance contexte: ${input.contextReport.confidence}
 - Avertissements: ${input.contextReport.warnings.join(', ') || 'aucun'}
 
-CONVERSATION RÉCENTE:
-${input.conversationContext.slice(-5).map(c => `${c.role}: ${c.content.substring(0, 100)}...`).join('\n')}
-
-RÈGLE IMPORTANTE:
-- Si l'utilisateur demande de TESTER, VÉRIFIER, ou EXÉCUTER quelque chose → crée un PLAN avec des steps concrets
-- Ne demande PAS de clarification si la demande est claire (ex: "teste la recherche" = fais un test complet)
-- Privilégie l'ACTION sur la clarification
+RÈGLES IMPORTANTES:
+1. UTILISE L'HISTORIQUE DE CONVERSATION pour comprendre les références implicites
+   - "alors ?" → regarde ce qui a été demandé juste avant
+   - "et ça ?" → fait référence au sujet précédent
+   - "comme je disais" → l'utilisateur fait référence à ses messages précédents
+2. Si l'utilisateur demande de TESTER, VÉRIFIER, ou EXÉCUTER quelque chose → crée un PLAN avec des steps concrets
+3. Ne demande PAS de clarification si la demande est claire (ex: "teste la recherche" = fais un test complet)
+4. Privilégie l'ACTION sur la clarification
+5. NE PERDS JAMAIS le fil de la conversation - l'historique est là pour ça
 
 DÉCIDE:
-1. Est-ce une demande d'ACTION (test, vérification, exécution) ? Si oui, crée un plan d'exécution.
-2. Est-ce une question simple ? Réponds directement.
-3. As-tu VRAIMENT besoin de plus de contexte ? (rarement nécessaire)
+1. Regarde d'abord l'HISTORIQUE pour comprendre le contexte de la demande actuelle
+2. Est-ce une demande d'ACTION (test, vérification, exécution) ? Si oui, crée un plan d'exécution.
+3. Est-ce une question simple ? Réponds directement en tenant compte du contexte.
+4. As-tu VRAIMENT besoin de plus de contexte ? (rarement nécessaire si l'historique est là)
 
 Réponds en JSON avec:
 - needsMoreContext: boolean (false dans la plupart des cas)
@@ -844,13 +899,13 @@ Réponds en JSON:
           undefined,
           'general'
         );
-        return result.success ? result.result : { error: result.error };
+        return result.success ? result.output : { error: result.error };
       }
 
       if (step.agentType === 'researcher' || actionLower.includes('recherche web')) {
         const query = (step.parameters as { query?: string })?.query || step.action;
         const result = await this.delegateWebSearch(query, 5);
-        return result.success ? result.result : { error: result.error };
+        return result.success ? result.output : { error: result.error };
       }
 
       // Délégation générique via LLM worker
@@ -858,7 +913,7 @@ Réponds en JSON:
         `Exécute cette tâche: ${step.action}\nParamètres: ${JSON.stringify(step.parameters)}\nContexte: ${input.originalInput}`,
         { priority: 'normal', timeout: 30000 }
       );
-      return result.success ? result.result : { error: result.error };
+      return result.success ? result.output : { error: result.error };
     }
 
     // ========== FALLBACK: SIMULATION LLM (tâches moyennes) ==========
@@ -1303,6 +1358,10 @@ ${originalResponse}
 
         case 'learning_update':
           this.handleLearningUpdate(message);
+          break;
+
+        case 'response_ready':
+          // Ignorer silencieusement - ce message est destiné à l'interface utilisateur
           break;
 
         default:

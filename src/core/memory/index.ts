@@ -1377,6 +1377,10 @@ Réponds en JSON:
           await this.handleFactCheckRequest(message);
           break;
 
+        case 'response_ready':
+          // Ignorer silencieusement - ce message est destiné à l'interface utilisateur
+          break;
+
         default:
           console.log(`[Memory] Message non géré: ${message.type}`);
       }

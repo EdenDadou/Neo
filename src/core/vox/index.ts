@@ -88,9 +88,12 @@ Tu dois TOUJOURS répondre en JSON avec cette structure :
 
 IMPORTANT: Pour les commandes (test, vérifie, exécute...), needsClarification doit être FALSE.`;
 
-const PROMPT_REWRITE_TEMPLATE = `Tu dois réécrire ce prompt utilisateur en l'enrichissant avec le contexte fourni par la mémoire.
+const PROMPT_REWRITE_TEMPLATE = `Tu dois réécrire ce prompt utilisateur en l'enrichissant avec le contexte fourni par la mémoire ET l'historique de conversation.
 
 PROMPT ORIGINAL: "{originalInput}"
+
+HISTORIQUE DE CONVERSATION RÉCENT:
+{conversationHistory}
 
 CONTEXTE MÉMOIRE:
 {contextSummary}
@@ -109,15 +112,21 @@ APPRENTISSAGES RÉCENTS:
 
 ---
 
+RÈGLES IMPORTANTES:
+1. L'historique de conversation est CRITIQUE - il contient le contexte immédiat
+2. Si l'utilisateur fait référence à quelque chose dit précédemment ("alors ?", "et ça ?", "comme je disais"), utilise l'historique pour comprendre
+3. Ne perds JAMAIS le fil de la conversation
+
 Réécris le prompt en:
 1. Gardant l'intention originale de l'utilisateur
-2. Ajoutant le contexte pertinent
-3. Mentionnant les préférences si applicable
-4. Signalant les points d'attention
+2. INTÉGRANT le contexte de la conversation récente si pertinent
+3. Ajoutant le contexte mémoire pertinent
+4. Mentionnant les préférences si applicable
+5. Signalant les points d'attention
 
 Réponds en JSON:
 {
-  "enrichedPrompt": "Le prompt réécrit avec contexte",
+  "enrichedPrompt": "Le prompt réécrit avec contexte de conversation et mémoire",
   "contextUsed": ["liste des éléments de contexte utilisés"],
   "warnings": ["avertissements à transmettre à Brain"]
 }`;
@@ -226,14 +235,14 @@ export class VoxAgent extends BaseAgent {
       // Stocker le callback pour quand Memory répond
       this.pendingContextRequests.set(requestId, resolve);
 
-      // Timeout si Memory ne répond pas
+      // Timeout si Memory ne répond pas (augmenté à 10s pour laisser le temps aux embeddings)
       setTimeout(() => {
         if (this.pendingContextRequests.has(requestId)) {
           this.pendingContextRequests.delete(requestId);
           console.log('[Vox] ⚠️ Timeout contexte Memory - utilisation fallback');
           resolve(this.createEmptyContextReport());
         }
-      }, 5000);
+      }, 10000);
 
       // Envoyer la demande à Memory
       this.send('memory', 'context_report_request', {
@@ -263,7 +272,74 @@ export class VoxAgent extends BaseAgent {
   // ===========================================================================
 
   /**
-   * Réécrire le prompt utilisateur avec le contexte de Memory
+   * Synthétiser l'historique de conversation pour économiser des tokens
+   * Au lieu d'envoyer tout l'historique, on extrait le sujet actuel
+   */
+  private synthesizeConversationContext(history: ConversationTurn[]): string {
+    if (history.length === 0) return '';
+    if (history.length === 1) return history[0].content;
+
+    // Extraire le dernier échange complet (question + réponse)
+    const lastUserMsg = [...history].reverse().find(h => h.role === 'user');
+    const lastAssistantMsg = [...history].reverse().find(h => h.role === 'assistant');
+
+    // Construire un résumé compact
+    const parts: string[] = [];
+
+    if (lastUserMsg) {
+      // Tronquer si trop long
+      const userContent = lastUserMsg.content.length > 200
+        ? lastUserMsg.content.substring(0, 200) + '...'
+        : lastUserMsg.content;
+      parts.push(`Dernière demande: "${userContent}"`);
+    }
+
+    if (lastAssistantMsg) {
+      // Résumer la réponse (garder le début)
+      const assistantContent = lastAssistantMsg.content.length > 150
+        ? lastAssistantMsg.content.substring(0, 150) + '...'
+        : lastAssistantMsg.content;
+      parts.push(`Dernière réponse: "${assistantContent}"`);
+    }
+
+    // Ajouter le sujet général si détectable
+    const allUserMessages = history.filter(h => h.role === 'user').map(h => h.content).join(' ');
+    const topics = this.detectTopics(allUserMessages);
+    if (topics.length > 0) {
+      parts.push(`Sujets abordés: ${topics.join(', ')}`);
+    }
+
+    return parts.join('\n');
+  }
+
+  /**
+   * Détecter les sujets principaux d'une conversation
+   */
+  private detectTopics(text: string): string[] {
+    const topics: string[] = [];
+    const lowerText = text.toLowerCase();
+
+    // Patterns de sujets courants
+    const topicPatterns: [RegExp, string][] = [
+      [/\b(atp|tennis|match|tournoi)\b/i, 'tennis/ATP'],
+      [/\b(foot|football|ligue|champion)\b/i, 'football'],
+      [/\b(météo|temps|pluie|soleil)\b/i, 'météo'],
+      [/\b(code|bug|erreur|fonction)\b/i, 'programmation'],
+      [/\b(test|vérif|check)\b/i, 'tests'],
+      [/\b(mémoire|memory|embedding)\b/i, 'système mémoire'],
+    ];
+
+    for (const [pattern, topic] of topicPatterns) {
+      if (pattern.test(lowerText) && !topics.includes(topic)) {
+        topics.push(topic);
+      }
+    }
+
+    return topics.slice(0, 3); // Max 3 sujets
+  }
+
+  /**
+   * Réécrire le prompt utilisateur avec le contexte de Memory ET l'historique de conversation
    */
   private async rewritePromptWithContext(
     originalInput: string,
@@ -273,12 +349,17 @@ export class VoxAgent extends BaseAgent {
     contextUsed: string[];
     warnings: string[];
   }> {
-    // Si pas de contexte significatif, retourner le prompt original
-    if (
-      contextReport.relevantMemories.length === 0 &&
-      !contextReport.suggestedContext &&
-      contextReport.recentLearnings.length === 0
-    ) {
+    // Récupérer et SYNTHÉTISER l'historique (économie de tokens)
+    const recentHistory = this.getRecentContext(6);
+    const synthesizedHistory = this.synthesizeConversationContext(recentHistory);
+
+    // Si pas de contexte mémoire mais on a un historique, on enrichit quand même
+    const hasMemoryContext = contextReport.relevantMemories.length > 0 ||
+      contextReport.suggestedContext ||
+      contextReport.recentLearnings.length > 0;
+
+    // Si vraiment rien (pas d'historique et pas de contexte), retourner le prompt original
+    if (recentHistory.length <= 1 && !hasMemoryContext) {
       return {
         enrichedPrompt: originalInput,
         contextUsed: [],
@@ -289,6 +370,7 @@ export class VoxAgent extends BaseAgent {
     try {
       const prompt = PROMPT_REWRITE_TEMPLATE
         .replace('{originalInput}', originalInput)
+        .replace('{conversationHistory}', synthesizedHistory || 'Aucun historique')
         .replace('{contextSummary}', contextReport.suggestedContext || 'Aucun contexte spécifique')
         .replace('{relevantFacts}',
           contextReport.userProfile.knownFacts.length > 0
@@ -328,15 +410,24 @@ export class VoxAgent extends BaseAgent {
       console.error('[Vox] Erreur réécriture prompt:', error);
     }
 
-    // Fallback: prompt original avec contexte simple
+    // Fallback: prompt original avec historique de conversation et contexte simple
     let enriched = originalInput;
+    const contextUsed: string[] = [];
+
+    // TOUJOURS ajouter l'historique synthétisé en fallback
+    if (recentHistory.length > 1 && synthesizedHistory) {
+      enriched = `[Contexte conversation: ${synthesizedHistory}]\n\n${originalInput}`;
+      contextUsed.push('conversationHistory');
+    }
+
     if (contextReport.suggestedContext) {
-      enriched = `[Contexte: ${contextReport.suggestedContext}]\n\n${originalInput}`;
+      enriched = `[Contexte mémoire: ${contextReport.suggestedContext}]\n\n${enriched}`;
+      contextUsed.push('suggestedContext');
     }
 
     return {
       enrichedPrompt: enriched,
-      contextUsed: contextReport.suggestedContext ? ['suggestedContext'] : [],
+      contextUsed,
       warnings: contextReport.warnings,
     };
   }
@@ -468,17 +559,15 @@ export class VoxAgent extends BaseAgent {
       formattedResponse += `\n\n**Sources:** ${payload.sources.join(', ')}`;
     }
 
-    // Ajouter à l'historique
+    // Ajouter à l'historique AVANT d'émettre
     this.state.conversationHistory.push({
       role: 'assistant',
       content: formattedResponse,
       timestamp: new Date(),
     });
 
-    // Émettre vers l'utilisateur
-    this.emitToUser(formattedResponse);
-
-    // NOUVEAU: Envoyer l'échange à Memory pour stockage
+    // IMPORTANT: Stocker en mémoire AVANT d'émettre vers l'utilisateur
+    // Cela garantit que le contexte est disponible pour le prochain message
     if (this.state.lastUserMessage) {
       this.send('memory', 'store_conversation', {
         userMessage: this.state.lastUserMessage,
@@ -487,6 +576,9 @@ export class VoxAgent extends BaseAgent {
       });
       this.state.lastUserMessage = null;
     }
+
+    // Émettre vers l'utilisateur APRÈS le stockage
+    this.emitToUser(formattedResponse);
   }
 
   /**
@@ -518,6 +610,8 @@ export class VoxAgent extends BaseAgent {
       return;
     }
 
+    // Broadcast vers tous les agents - l'interface CLI écoute ce message
+    // Les autres agents (Memory, Brain) ignorent les messages 'response_ready' avec target: 'user'
     this.send('broadcast', 'response_ready', {
       target: 'user',
       message,

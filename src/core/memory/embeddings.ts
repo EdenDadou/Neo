@@ -250,7 +250,7 @@ export class EmbeddingsService {
    * Utilisé si le modèle ne charge pas
    */
   private localFallbackEmbed(text: string): number[] {
-    console.warn('[Embeddings] Utilisation du fallback local');
+    // console.warn('[Embeddings] Utilisation du fallback local');
 
     const vector = new Array(this.embeddingDimension).fill(0);
     const words = text.toLowerCase().split(/\s+/);
