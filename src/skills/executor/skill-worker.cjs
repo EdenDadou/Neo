@@ -12,107 +12,44 @@
  * - Exécuter du JavaScript pur
  * - Demander des capabilities au main thread via messages
  * - Utiliser les APIs fournies (capabilities)
+ *
+ * NOTE: Ce fichier utilise .cjs car les Worker Threads Node.js
+ * ne supportent pas nativement TypeScript/ESM avec tsx.
  */
 
-import { parentPort } from 'worker_threads';
-
-if (!parentPort) {
-  throw new Error('Ce fichier doit être exécuté comme worker thread');
-}
-
-// ===========================================================================
-// TYPES
-// ===========================================================================
-
-interface CapabilityRequest {
-  type: string;
-  method: string;
-  args: unknown[];
-  requestId: number;
-}
-
-interface WorkerMessage {
-  type: string;
-  executionId: string;
-  payload: {
-    code?: string;
-    input?: unknown;
-    capabilities?: {
-      allowed: string[];
-      config: Record<string, unknown>;
-    };
-    timeout?: number;
-    requestId?: number;
-    result?: unknown;
-    error?: { message: string };
-  };
-}
-
-interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-}
-
-interface CapabilityProxies {
-  webFetch?: (url: string, options?: unknown) => Promise<unknown>;
-  memory?: {
-    search?: (query: string, limit?: number) => Promise<unknown>;
-    get?: (id: string) => Promise<unknown>;
-    store?: (type: string, content: string, metadata?: unknown) => Promise<unknown>;
-  };
-  browser?: {
-    navigate: (url: string) => Promise<unknown>;
-    click: (selector: string) => Promise<unknown>;
-    type: (selector: string, text: string) => Promise<unknown>;
-    screenshot: () => Promise<unknown>;
-    getContent: () => Promise<unknown>;
-    waitFor: (selector: string, timeout?: number) => Promise<unknown>;
-  };
-  file?: {
-    read: (path: string) => Promise<unknown>;
-    exists: (path: string) => Promise<unknown>;
-  };
-  llm?: {
-    complete: (prompt: string, options?: unknown) => Promise<unknown>;
-  };
-  log: {
-    info: (message: string) => void;
-    warn: (message: string) => void;
-    error: (message: string) => void;
-  };
-}
+const { parentPort } = require('worker_threads');
 
 // ===========================================================================
 // SECURITY: Supprimer les accès dangereux
 // ===========================================================================
 
+// Bloquer require pour les skills (mais garder la référence pour ce fichier)
+const originalRequire = require;
+global.require = function blockedRequire() {
+  throw new Error('require() est bloqué dans les skills');
+};
+
 // Bloquer les variables globales dangereuses
-// @ts-expect-error - Suppression intentionnelle
-delete globalThis.process;
-// @ts-expect-error - Suppression intentionnelle
-delete globalThis.Buffer;
+delete global.process;
+delete global.Buffer;
+delete global.__dirname;
+delete global.__filename;
 
 // ===========================================================================
 // CAPABILITY PROXIES
 // ===========================================================================
 
-const port = parentPort;
-
 /**
  * Crée des proxies pour les capabilities
  * Chaque appel est envoyé au main thread et attend une réponse
  */
-function createCapabilityProxies(
-  executionId: string,
-  allowedCapabilities: string[],
-  _config: Record<string, unknown>
-): CapabilityProxies {
-  const proxies: Partial<CapabilityProxies> = {};
-  const pendingRequests = new Map<number, PendingRequest>();
+function createCapabilityProxies(executionId, allowedCapabilities, config) {
+  const proxies = {};
+  const pendingRequests = new Map();
   let requestId = 0;
 
   // Fonction pour appeler une capability
-  async function callCapability(type: string, method: string, args: unknown[]): Promise<unknown> {
+  async function callCapability(type, method, args) {
     if (!allowedCapabilities.includes(type)) {
       throw new Error(`Capability non autorisée: ${type}`);
     }
@@ -122,7 +59,7 @@ function createCapabilityProxies(
     return new Promise((resolve, reject) => {
       pendingRequests.set(reqId, { resolve, reject });
 
-      port.postMessage({
+      parentPort.postMessage({
         type: 'CAPABILITY_REQUEST',
         executionId,
         payload: {
@@ -146,11 +83,9 @@ function createCapabilityProxies(
   }
 
   // Gérer les réponses de capabilities
-  port.on('message', (msg: WorkerMessage) => {
+  parentPort.on('message', (msg) => {
     if (msg.type === 'CAPABILITY_RESPONSE' && msg.executionId === executionId) {
       const reqId = msg.payload.requestId;
-      if (reqId === undefined) return;
-
       const pending = pendingRequests.get(reqId);
       if (pending) {
         pendingRequests.delete(reqId);
@@ -166,37 +101,37 @@ function createCapabilityProxies(
   // Créer les proxies selon les capabilities autorisées
 
   if (allowedCapabilities.includes('web_fetch')) {
-    proxies.webFetch = async (url: string, options?: unknown) => {
+    proxies.webFetch = async (url, options) => {
       return callCapability('web_fetch', 'fetch', [url, options]);
     };
   }
 
   if (allowedCapabilities.includes('memory_read')) {
     proxies.memory = proxies.memory || {};
-    proxies.memory.search = async (query: string, limit?: number) => {
+    proxies.memory.search = async (query, limit) => {
       return callCapability('memory_read', 'search', [query, limit]);
     };
-    proxies.memory.get = async (id: string) => {
+    proxies.memory.get = async (id) => {
       return callCapability('memory_read', 'get', [id]);
     };
   }
 
   if (allowedCapabilities.includes('memory_write')) {
     proxies.memory = proxies.memory || {};
-    proxies.memory.store = async (type: string, content: string, metadata?: unknown) => {
+    proxies.memory.store = async (type, content, metadata) => {
       return callCapability('memory_write', 'store', [type, content, metadata]);
     };
   }
 
   if (allowedCapabilities.includes('browser')) {
     proxies.browser = {
-      navigate: async (url: string) => {
+      navigate: async (url) => {
         return callCapability('browser', 'navigate', [url]);
       },
-      click: async (selector: string) => {
+      click: async (selector) => {
         return callCapability('browser', 'click', [selector]);
       },
-      type: async (selector: string, text: string) => {
+      type: async (selector, text) => {
         return callCapability('browser', 'type', [selector, text]);
       },
       screenshot: async () => {
@@ -205,7 +140,7 @@ function createCapabilityProxies(
       getContent: async () => {
         return callCapability('browser', 'getContent', []);
       },
-      waitFor: async (selector: string, timeout?: number) => {
+      waitFor: async (selector, timeout) => {
         return callCapability('browser', 'waitFor', [selector, timeout]);
       },
     };
@@ -213,10 +148,10 @@ function createCapabilityProxies(
 
   if (allowedCapabilities.includes('file_read')) {
     proxies.file = {
-      read: async (path: string) => {
+      read: async (path) => {
         return callCapability('file_read', 'read', [path]);
       },
-      exists: async (path: string) => {
+      exists: async (path) => {
         return callCapability('file_read', 'exists', [path]);
       },
     };
@@ -224,7 +159,7 @@ function createCapabilityProxies(
 
   if (allowedCapabilities.includes('llm_call')) {
     proxies.llm = {
-      complete: async (prompt: string, options?: unknown) => {
+      complete: async (prompt, options) => {
         return callCapability('llm_call', 'complete', [prompt, options]);
       },
     };
@@ -232,22 +167,22 @@ function createCapabilityProxies(
 
   // Utilitaires toujours disponibles
   proxies.log = {
-    info: (message: string) => {
-      port.postMessage({
+    info: (message) => {
+      parentPort.postMessage({
         type: 'LOG',
         executionId,
         payload: { log: { level: 'info', message: String(message) } },
       });
     },
-    warn: (message: string) => {
-      port.postMessage({
+    warn: (message) => {
+      parentPort.postMessage({
         type: 'LOG',
         executionId,
         payload: { log: { level: 'warn', message: String(message) } },
       });
     },
-    error: (message: string) => {
-      port.postMessage({
+    error: (message) => {
+      parentPort.postMessage({
         type: 'LOG',
         executionId,
         payload: { log: { level: 'error', message: String(message) } },
@@ -255,7 +190,7 @@ function createCapabilityProxies(
     },
   };
 
-  return proxies as CapabilityProxies;
+  return proxies;
 }
 
 // ===========================================================================
@@ -265,12 +200,7 @@ function createCapabilityProxies(
 /**
  * Exécuter le code du skill
  */
-async function executeSkill(
-  executionId: string,
-  code: string,
-  input: unknown,
-  capabilities: { allowed: string[]; config: Record<string, unknown> }
-): Promise<unknown> {
+async function executeSkill(executionId, code, input, capabilities) {
   // Créer les proxies de capabilities
   const proxies = createCapabilityProxies(
     executionId,
@@ -278,48 +208,38 @@ async function executeSkill(
     capabilities.config
   );
 
-  // Wrapper le code dans une fonction async
-  // Le code reçoit: input (les données) et les capabilities (proxies)
-  const wrappedCode = `
-    return (async function(input, capabilities) {
-      const { webFetch, memory, browser, file, llm, log } = capabilities;
-      ${code}
-    })(input, capabilities);
-  `;
+  try {
+    // Wrapper le code dans une fonction async
+    // Le code reçoit: input (les données) et les capabilities (proxies)
+    const wrappedCode = `
+      return (async function(input, capabilities) {
+        const { webFetch, memory, browser, file, llm, log } = capabilities;
+        ${code}
+      })(input, capabilities);
+    `;
 
-  // Créer et exécuter la fonction
-  const fn = new Function('input', 'capabilities', wrappedCode);
-  const result = await fn(input, proxies);
+    // Créer et exécuter la fonction
+    const fn = new Function('input', 'capabilities', wrappedCode);
+    const result = await fn(input, proxies);
 
-  return result;
+    return result;
+  } catch (error) {
+    throw error;
+  }
 }
 
 // ===========================================================================
 // MESSAGE HANDLER
 // ===========================================================================
 
-port.on('message', async (message: WorkerMessage) => {
+parentPort.on('message', async (message) => {
   if (message.type === 'EXECUTE_SKILL') {
     const { executionId, payload } = message;
     const { code, input, capabilities, timeout } = payload;
 
-    if (!code || !capabilities || !timeout) {
-      port.postMessage({
-        type: 'ERROR',
-        executionId,
-        payload: {
-          error: {
-            message: 'Missing required fields: code, capabilities, or timeout',
-            code: 'INVALID_MESSAGE',
-          },
-        },
-      });
-      return;
-    }
-
     try {
       // Exécuter avec timeout
-      const timeoutPromise = new Promise<never>((_, reject) => {
+      const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => {
           reject(new Error(`Timeout après ${timeout}ms`));
         }, timeout);
@@ -331,28 +251,27 @@ port.on('message', async (message: WorkerMessage) => {
       ]);
 
       // Envoyer le résultat
-      port.postMessage({
+      parentPort.postMessage({
         type: 'RESULT',
         executionId,
         payload: { output: result },
       });
     } catch (error) {
       // Envoyer l'erreur
-      const err = error as Error;
-      port.postMessage({
+      parentPort.postMessage({
         type: 'ERROR',
         executionId,
         payload: {
           error: {
-            message: err.message || String(error),
-            code: (err as Error & { code?: string }).code || 'EXECUTION_ERROR',
-            stack: err.stack,
+            message: error.message || String(error),
+            code: error.code || 'EXECUTION_ERROR',
+            stack: error.stack,
           },
         },
       });
     }
   } else if (message.type === 'PING') {
-    port.postMessage({
+    parentPort.postMessage({
       type: 'PONG',
       executionId: message.executionId,
       payload: {},
@@ -364,7 +283,7 @@ port.on('message', async (message: WorkerMessage) => {
 });
 
 // Signaler que le worker est prêt
-port.postMessage({
+parentPort.postMessage({
   type: 'READY',
   executionId: 'init',
   payload: {},

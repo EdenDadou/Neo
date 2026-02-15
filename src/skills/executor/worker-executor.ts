@@ -195,11 +195,11 @@ export class WorkerExecutor extends EventEmitter {
    * Créer un nouveau worker
    */
   private createWorker(): PooledWorker {
-    const workerPath = path.join(__dirname, 'skill-worker.ts');
+    // NOTE: Le worker utilise .cjs car les Worker Threads Node.js
+    // ne supportent pas nativement TypeScript avec tsx
+    const workerPath = path.join(__dirname, 'skill-worker.cjs');
 
     const worker = new Worker(workerPath, {
-      // Utiliser tsx pour exécuter le TypeScript
-      execArgv: ['--import', 'tsx'],
       // Limiter les ressources
       resourceLimits: {
         maxOldGenerationSizeMb: SKILL_DEFAULTS.MEMORY_LIMIT_MB,
