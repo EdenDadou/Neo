@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Neo AI - Lanceur principal
+# Neo AI - Lanceur principal intelligent
+# S'auto-répare et configure tout automatiquement
 # Usage: ./neo [command]
 
 set -e
@@ -21,22 +22,7 @@ DIM='\033[2m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Animation de chargement
-spinner() {
-    local pid=$1
-    local delay=0.1
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " ${CYAN}%c${NC}  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b"
-    done
-    printf "    \b\b\b\b"
-}
-
-# Logo animé
+# Logo
 print_logo() {
     clear
     echo ""
@@ -54,93 +40,119 @@ EOF
     echo ""
 }
 
-# Barre de progression
-progress_bar() {
-    local current=$1
-    local total=$2
-    local width=40
-    local percent=$((current * 100 / total))
-    local filled=$((width * current / total))
-    local empty=$((width - filled))
+# Configurer la clé API de manière interactive
+configure_api_key() {
+    echo ""
+    echo -e "    ${YELLOW}Configuration requise${NC}"
+    echo -e "    ${DIM}─────────────────────────────────────────${NC}"
+    echo ""
+    echo -e "    Neo a besoin d'une clé API Anthropic pour fonctionner."
+    echo -e "    ${DIM}Obtenez-la sur: https://console.anthropic.com${NC}"
+    echo ""
 
-    printf "\r    ${DIM}[${NC}"
-    printf "${CYAN}%${filled}s${NC}" | tr ' ' '█'
-    printf "${DIM}%${empty}s${NC}" | tr ' ' '░'
-    printf "${DIM}]${NC} ${WHITE}%3d%%${NC}" $percent
+    while true; do
+        read -p "    Clé API Anthropic: " API_KEY
+
+        if [[ "$API_KEY" =~ ^sk-ant- ]]; then
+            break
+        else
+            echo -e "    ${RED}Format invalide.${NC} La clé doit commencer par ${WHITE}sk-ant-${NC}"
+        fi
+    done
+
+    # Créer le .env
+    cat > .env << EOF
+# Neo AI Configuration
+ANTHROPIC_API_KEY=$API_KEY
+PORT=3001
+CORS_ORIGIN=http://localhost:5173
+JWT_SECRET=neo-$(date +%s)-$RANDOM$RANDOM
+NODE_ENV=production
+EOF
+
+    echo -e "    ${GREEN}✓${NC} Configuration sauvegardée"
+    return 0
 }
 
-# Vérification des prérequis
-check_prerequisites() {
-    local errors=0
-
+# Vérification et auto-réparation
+ensure_ready() {
     echo -e "    ${DIM}Vérification du système...${NC}"
     echo ""
 
-    # Node.js
+    local needs_fix=0
+
+    # 1. Node.js
     if command -v node &> /dev/null; then
         local node_version=$(node -v)
         echo -e "    ${GREEN}✓${NC} Node.js ${WHITE}$node_version${NC}"
     else
         echo -e "    ${RED}✗${NC} Node.js non installé"
-        errors=$((errors + 1))
+        echo ""
+        echo -e "    ${YELLOW}Installez Node.js 20+:${NC}"
+        echo -e "    ${DIM}curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -${NC}"
+        echo -e "    ${DIM}sudo apt-get install -y nodejs${NC}"
+        exit 1
     fi
 
-    # npm
+    # 2. npm
     if command -v npm &> /dev/null; then
-        local npm_version=$(npm -v)
-        echo -e "    ${GREEN}✓${NC} npm ${WHITE}v$npm_version${NC}"
+        echo -e "    ${GREEN}✓${NC} npm ${WHITE}v$(npm -v)${NC}"
     else
         echo -e "    ${RED}✗${NC} npm non installé"
-        errors=$((errors + 1))
+        exit 1
     fi
 
-    # .env
-    if [ -f ".env" ]; then
+    # 3. Répertoires
+    if [ ! -d "data" ]; then
+        mkdir -p data/vectors data/logs data/sessions data/backups
+        echo -e "    ${GREEN}✓${NC} Répertoires créés"
+    fi
+
+    # 4. .env - Configurer si manquant
+    if [ -f ".env" ] && grep -q "ANTHROPIC_API_KEY=sk-ant-" .env 2>/dev/null; then
         echo -e "    ${GREEN}✓${NC} Configuration ${WHITE}.env${NC}"
     else
-        echo -e "    ${RED}✗${NC} Fichier .env manquant"
-        errors=$((errors + 1))
+        echo -e "    ${YELLOW}!${NC} Configuration manquante"
+        configure_api_key
+        needs_fix=1
     fi
 
-    # node_modules - vérifier si présent ET à jour
+    # 5. Dépendances - Installer/mettre à jour si nécessaire
     if [ -d "node_modules" ]; then
-        # Vérifier si package.json est plus récent que node_modules
-        if [ "package.json" -nt "node_modules" ] || [ "package-lock.json" -nt "node_modules" ] 2>/dev/null; then
+        if [ "package.json" -nt "node_modules" ] 2>/dev/null || [ "package-lock.json" -nt "node_modules" ] 2>/dev/null; then
             echo -e "    ${YELLOW}!${NC} Mise à jour des dépendances..."
-            npm install --silent 2>/dev/null
-            touch node_modules  # Mettre à jour le timestamp
+            npm install --silent 2>/dev/null || npm install
+            touch node_modules
             echo -e "    ${GREEN}✓${NC} Dépendances mises à jour"
         else
             echo -e "    ${GREEN}✓${NC} Dépendances installées"
         fi
     else
-        echo -e "    ${YELLOW}!${NC} Dépendances manquantes"
-        echo ""
-        echo -e "    ${DIM}Installation des dépendances...${NC}"
-        npm install --silent 2>/dev/null
+        echo -e "    ${YELLOW}!${NC} Installation des dépendances..."
+        npm install --silent 2>/dev/null || npm install
+        touch node_modules
         echo -e "    ${GREEN}✓${NC} Dépendances installées"
     fi
 
-    # Ollama (optionnel)
+    # 6. Ollama (optionnel)
     if command -v ollama &> /dev/null; then
         echo -e "    ${GREEN}✓${NC} Ollama ${DIM}(embeddings locaux)${NC}"
     else
-        echo -e "    ${DIM}○${NC} Ollama ${DIM}(non installé)${NC}"
+        echo -e "    ${DIM}○${NC} Ollama ${DIM}(optionnel)${NC}"
     fi
 
     echo ""
 
-    if [ $errors -gt 0 ]; then
-        echo -e "    ${RED}Erreurs détectées. Lancez ./setup.sh d'abord.${NC}"
-        exit 1
+    if [ $needs_fix -eq 1 ]; then
+        echo -e "    ${GREEN}✓${NC} ${WHITE}Configuration terminée!${NC}"
+        echo ""
     fi
 }
 
-# Démarrer Ollama si nécessaire
+# Démarrer Ollama si disponible
 start_ollama() {
     if command -v ollama &> /dev/null; then
-        if ! pgrep -x "ollama" > /dev/null; then
-            echo -e "    ${DIM}Démarrage d'Ollama...${NC}"
+        if ! pgrep -x "ollama" > /dev/null 2>&1; then
             ollama serve > /dev/null 2>&1 &
             sleep 2
         fi
@@ -168,17 +180,21 @@ show_status() {
     echo -e "    ${DIM}─────────────────────────────────${NC}"
     echo ""
 
-    # Mémoire
-    if [ -f "data/neo.db" ]; then
-        local db_size=$(du -h data/neo.db 2>/dev/null | cut -f1)
+    # Base de données
+    if [ -f "data/memory.db" ]; then
+        local db_size=$(du -h data/memory.db 2>/dev/null | cut -f1)
         echo -e "    ${GREEN}●${NC} Base de données  ${WHITE}$db_size${NC}"
     else
-        echo -e "    ${YELLOW}○${NC} Base de données  ${DIM}vide${NC}"
+        echo -e "    ${DIM}○${NC} Base de données  ${DIM}vide${NC}"
     fi
 
     # Sessions
     local sessions=$(ls data/sessions/*.json 2>/dev/null | wc -l | tr -d ' ')
-    echo -e "    ${GREEN}●${NC} Sessions         ${WHITE}$sessions${NC}"
+    if [ "$sessions" -gt 0 ] 2>/dev/null; then
+        echo -e "    ${GREEN}●${NC} Sessions         ${WHITE}$sessions${NC}"
+    else
+        echo -e "    ${DIM}○${NC} Sessions         ${DIM}aucune${NC}"
+    fi
 
     # API
     if curl -s http://localhost:3001/health > /dev/null 2>&1; then
@@ -187,11 +203,18 @@ show_status() {
         echo -e "    ${DIM}○${NC} API              ${DIM}hors ligne${NC}"
     fi
 
-    # Web
+    # Dashboard
     if curl -s http://localhost:5173 > /dev/null 2>&1; then
         echo -e "    ${GREEN}●${NC} Dashboard        ${WHITE}en ligne${NC} ${DIM}:5173${NC}"
     else
         echo -e "    ${DIM}○${NC} Dashboard        ${DIM}hors ligne${NC}"
+    fi
+
+    # Ollama
+    if pgrep -x "ollama" > /dev/null 2>&1; then
+        echo -e "    ${GREEN}●${NC} Ollama           ${WHITE}actif${NC}"
+    elif command -v ollama &> /dev/null; then
+        echo -e "    ${DIM}○${NC} Ollama           ${DIM}arrêté${NC}"
     fi
 
     echo ""
@@ -258,7 +281,7 @@ do_update() {
 
     # npm install
     echo -e "    ${DIM}Mise à jour des dépendances...${NC}"
-    npm install --silent 2>/dev/null
+    npm install --silent 2>/dev/null || npm install
     touch node_modules
     echo -e "    ${GREEN}✓${NC} Dépendances à jour"
 
@@ -267,21 +290,28 @@ do_update() {
     echo ""
 }
 
+# Reconfigurer
+do_config() {
+    echo ""
+    configure_api_key
+    echo ""
+}
+
 # Gestion des arguments
 case "${1:-}" in
     chat|c|cli)
         print_logo
-        check_prerequisites
+        ensure_ready
         start_chat
         ;;
     api|a|server)
         print_logo
-        check_prerequisites
+        ensure_ready
         start_api
         ;;
     web|w|dashboard)
         print_logo
-        check_prerequisites
+        ensure_ready
         start_web
         ;;
     status|s)
@@ -292,16 +322,21 @@ case "${1:-}" in
         print_logo
         do_update
         ;;
+    config|configure)
+        print_logo
+        do_config
+        ;;
     help|h|--help|-h)
         print_logo
         echo -e "    ${WHITE}${BOLD}Usage:${NC} ./neo ${DIM}[command]${NC}"
         echo ""
         echo -e "    ${WHITE}Commandes:${NC}"
-        echo -e "    ${CYAN}chat${NC}    ${DIM}(c)${NC}   Mode conversation interactif"
-        echo -e "    ${CYAN}api${NC}     ${DIM}(a)${NC}   Serveur REST uniquement"
-        echo -e "    ${CYAN}web${NC}     ${DIM}(w)${NC}   Dashboard + API"
-        echo -e "    ${CYAN}status${NC}  ${DIM}(s)${NC}   État du système"
-        echo -e "    ${CYAN}update${NC}  ${DIM}(u)${NC}   Mettre à jour Neo"
+        echo -e "    ${CYAN}chat${NC}      ${DIM}(c)${NC}   Mode conversation interactif"
+        echo -e "    ${CYAN}api${NC}       ${DIM}(a)${NC}   Serveur REST uniquement"
+        echo -e "    ${CYAN}web${NC}       ${DIM}(w)${NC}   Dashboard + API"
+        echo -e "    ${CYAN}status${NC}    ${DIM}(s)${NC}   État du système"
+        echo -e "    ${CYAN}update${NC}    ${DIM}(u)${NC}   Mettre à jour Neo"
+        echo -e "    ${CYAN}config${NC}          Reconfigurer les clés API"
         echo ""
         echo -e "    ${DIM}Sans argument: menu interactif${NC}"
         echo ""
@@ -309,7 +344,7 @@ case "${1:-}" in
     "")
         # Menu interactif
         print_logo
-        check_prerequisites
+        ensure_ready
 
         while true; do
             show_menu
