@@ -11,7 +11,7 @@ import asyncio
 from neo_core.config import NeoConfig, LLMConfig
 from neo_core.core.vox import Vox, AgentStatus
 from neo_core.core.brain import Brain, BrainDecision
-from neo_core.core.memory_agent import MemoryAgent, MemoryEntry
+from neo_core.core.memory_agent import MemoryAgent
 from neo_core.main import bootstrap
 
 
@@ -71,7 +71,7 @@ class TestMemoryAgent:
         assert memory.is_initialized is True
 
     def test_store_and_retrieve(self, memory):
-        memory.store("L'utilisateur s'appelle Eden.", source="conversation")
+        memory.store_memory("L'utilisateur s'appelle Eden.", source="conversation")
         context = memory.get_context("Comment s'appelle l'utilisateur ?")
         assert "Eden" in context
 
@@ -81,15 +81,16 @@ class TestMemoryAgent:
         assert "Aucun contexte" in context
 
     def test_stats(self, memory):
-        memory.store("info 1")
-        memory.store("info 2", source="system")
+        initial_count = memory.get_stats()["total_entries"]
+        memory.store_memory("info 1")
+        memory.store_memory("info 2", source="system")
         stats = memory.get_stats()
-        assert stats["total_entries"] == 2
+        assert stats["total_entries"] == initial_count + 2
         assert "conversation" in stats["sources"]
         assert "system" in stats["sources"]
 
     def test_clear(self, memory):
-        memory.store("data")
+        memory.store_memory("data")
         memory.clear()
         assert memory.get_stats()["total_entries"] == 0
 
@@ -118,7 +119,7 @@ class TestBrain:
         assert "simple" in response
 
     def test_memory_context(self, brain, memory):
-        memory.store("Le projet s'appelle Neo Core.")
+        memory.store_memory("Le projet s'appelle Neo Core.")
         context = brain.get_memory_context("Quel est le nom du projet ?")
         assert "Neo Core" in context
 

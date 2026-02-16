@@ -136,6 +136,12 @@ class Vox:
         # Enregistre la réponse dans l'historique
         self.conversation_history.append(AIMessage(content=brain_response))
 
+        # Stocke l'échange en mémoire persistante (Étape 2)
+        if self.memory and self.memory.is_initialized:
+            self.update_agent_status("Memory", active=True, task="stockage", progress=0.5)
+            self.memory.on_conversation_turn(human_message, brain_response)
+            self.update_agent_status("Memory", active=False, task=None, progress=0.0)
+
         return brain_response
 
     def get_prompt_template(self) -> ChatPromptTemplate:

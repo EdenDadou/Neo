@@ -1,0 +1,292 @@
+"""
+Memory Store — Stockage Persistant
+====================================
+Double système de stockage :
+- ChromaDB : stockage vectoriel pour la recherche sémantique
+- SQLite : métadonnées structurées (timestamps, tags, sources, importance)
+
+Les embeddings sont générés par ChromaDB (modèle par défaut all-MiniLM-L6-v2).
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from neo_core.config import MemoryConfig
+
+
+@dataclass
+class MemoryRecord:
+    """Un enregistrement complet en mémoire."""
+    id: str
+    content: str
+    source: str = "conversation"
+    tags: list[str] = field(default_factory=list)
+    importance: float = 0.5
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    metadata: dict = field(default_factory=dict)
+
+
+class MemoryStore:
+    """
+    Stockage persistant double couche : ChromaDB + SQLite.
+
+    ChromaDB gère les embeddings et la recherche sémantique.
+    SQLite gère les métadonnées structurées et les requêtes exactes.
+    """
+
+    def __init__(self, config: MemoryConfig):
+        self.config = config
+        self._chroma_client = None
+        self._collection = None
+        self._db_conn: Optional[sqlite3.Connection] = None
+        self._initialized = False
+
+    def initialize(self) -> None:
+        """Initialise les deux systèmes de stockage."""
+        # Crée le répertoire de stockage
+        self.config.storage_path.mkdir(parents=True, exist_ok=True)
+
+        self._init_sqlite()
+        self._init_chromadb()
+        self._initialized = True
+
+    def _init_sqlite(self) -> None:
+        """Initialise la base SQLite pour les métadonnées."""
+        db_path = self.config.storage_path / "memory_meta.db"
+        self._db_conn = sqlite3.connect(str(db_path))
+        self._db_conn.row_factory = sqlite3.Row
+
+        self._db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                source TEXT DEFAULT 'conversation',
+                tags TEXT DEFAULT '[]',
+                importance REAL DEFAULT 0.5,
+                timestamp TEXT NOT NULL,
+                metadata TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        self._db_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source)
+        """)
+        self._db_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance)
+        """)
+        self._db_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp)
+        """)
+
+        self._db_conn.commit()
+
+    def _init_chromadb(self) -> None:
+        """Initialise ChromaDB pour le stockage vectoriel."""
+        try:
+            import chromadb
+            chroma_path = self.config.storage_path / "chroma"
+            self._chroma_client = chromadb.PersistentClient(path=str(chroma_path))
+            self._collection = self._chroma_client.get_or_create_collection(
+                name="neo_memory",
+                metadata={"hnsw:space": "cosine"},
+            )
+        except ImportError:
+            # Fallback sans ChromaDB — utilise uniquement SQLite
+            self._chroma_client = None
+            self._collection = None
+
+    @property
+    def is_initialized(self) -> bool:
+        return self._initialized
+
+    @property
+    def has_vector_search(self) -> bool:
+        """Indique si la recherche vectorielle est disponible."""
+        return self._collection is not None
+
+    def store(self, content: str, source: str = "conversation",
+              tags: list[str] | None = None, importance: float = 0.5,
+              metadata: dict | None = None) -> str:
+        """
+        Stocke un souvenir dans les deux systèmes.
+        Retourne l'ID du souvenir créé.
+        """
+        record_id = str(uuid.uuid4())
+        timestamp = datetime.now().isoformat()
+        tags = tags or []
+        metadata = metadata or {}
+
+        # SQLite
+        self._db_conn.execute(
+            "INSERT INTO memories (id, content, source, tags, importance, timestamp, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (record_id, content, source, json.dumps(tags), importance, timestamp, json.dumps(metadata))
+        )
+        self._db_conn.commit()
+
+        # ChromaDB (si disponible)
+        if self._collection is not None:
+            self._collection.add(
+                ids=[record_id],
+                documents=[content],
+                metadatas=[{
+                    "source": source,
+                    "tags": json.dumps(tags),
+                    "importance": importance,
+                    "timestamp": timestamp,
+                }],
+            )
+
+        return record_id
+
+    def search_semantic(self, query: str, n_results: int = 5,
+                        min_importance: float = 0.0) -> list[MemoryRecord]:
+        """
+        Recherche sémantique via ChromaDB.
+        Retourne les souvenirs les plus pertinents pour la requête.
+        """
+        if not self._collection or self._collection.count() == 0:
+            return []
+
+        n_results = min(n_results, self._collection.count())
+        results = self._collection.query(
+            query_texts=[query],
+            n_results=n_results,
+        )
+
+        records = []
+        if results and results["ids"] and results["ids"][0]:
+            for i, record_id in enumerate(results["ids"][0]):
+                # Récupère les métadonnées complètes depuis SQLite
+                row = self._db_conn.execute(
+                    "SELECT * FROM memories WHERE id = ?", (record_id,)
+                ).fetchone()
+
+                if row and row["importance"] >= min_importance:
+                    records.append(MemoryRecord(
+                        id=row["id"],
+                        content=row["content"],
+                        source=row["source"],
+                        tags=json.loads(row["tags"]),
+                        importance=row["importance"],
+                        timestamp=row["timestamp"],
+                        metadata=json.loads(row["metadata"]),
+                    ))
+
+        return records
+
+    def search_by_source(self, source: str, limit: int = 20) -> list[MemoryRecord]:
+        """Recherche par source (conversation, system, agent, etc.)."""
+        rows = self._db_conn.execute(
+            "SELECT * FROM memories WHERE source = ? ORDER BY timestamp DESC LIMIT ?",
+            (source, limit)
+        ).fetchall()
+
+        return [self._row_to_record(row) for row in rows]
+
+    def search_by_tags(self, tags: list[str], limit: int = 20) -> list[MemoryRecord]:
+        """Recherche par tags."""
+        rows = self._db_conn.execute(
+            "SELECT * FROM memories ORDER BY timestamp DESC"
+        ).fetchall()
+
+        records = []
+        for row in rows:
+            row_tags = json.loads(row["tags"])
+            if any(tag in row_tags for tag in tags):
+                records.append(self._row_to_record(row))
+                if len(records) >= limit:
+                    break
+
+        return records
+
+    def get_recent(self, limit: int = 10) -> list[MemoryRecord]:
+        """Retourne les souvenirs les plus récents."""
+        rows = self._db_conn.execute(
+            "SELECT * FROM memories ORDER BY timestamp DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+
+        return [self._row_to_record(row) for row in rows]
+
+    def get_important(self, min_importance: float = 0.7, limit: int = 10) -> list[MemoryRecord]:
+        """Retourne les souvenirs les plus importants."""
+        rows = self._db_conn.execute(
+            "SELECT * FROM memories WHERE importance >= ? ORDER BY importance DESC LIMIT ?",
+            (min_importance, limit)
+        ).fetchall()
+
+        return [self._row_to_record(row) for row in rows]
+
+    def update_importance(self, record_id: str, importance: float) -> None:
+        """Met à jour l'importance d'un souvenir."""
+        self._db_conn.execute(
+            "UPDATE memories SET importance = ? WHERE id = ?",
+            (importance, record_id)
+        )
+        self._db_conn.commit()
+
+        if self._collection is not None:
+            # Met à jour aussi dans ChromaDB
+            try:
+                existing = self._collection.get(ids=[record_id])
+                if existing and existing["metadatas"]:
+                    meta = existing["metadatas"][0]
+                    meta["importance"] = importance
+                    self._collection.update(ids=[record_id], metadatas=[meta])
+            except Exception:
+                pass
+
+    def delete(self, record_id: str) -> None:
+        """Supprime un souvenir."""
+        self._db_conn.execute("DELETE FROM memories WHERE id = ?", (record_id,))
+        self._db_conn.commit()
+
+        if self._collection is not None:
+            try:
+                self._collection.delete(ids=[record_id])
+            except Exception:
+                pass
+
+    def count(self) -> int:
+        """Retourne le nombre total de souvenirs."""
+        row = self._db_conn.execute("SELECT COUNT(*) as cnt FROM memories").fetchone()
+        return row["cnt"] if row else 0
+
+    def get_stats(self) -> dict:
+        """Retourne des statistiques sur la mémoire."""
+        total = self.count()
+        sources = self._db_conn.execute(
+            "SELECT source, COUNT(*) as cnt FROM memories GROUP BY source"
+        ).fetchall()
+
+        return {
+            "total_entries": total,
+            "has_vector_search": self.has_vector_search,
+            "sources": {row["source"]: row["cnt"] for row in sources},
+        }
+
+    def close(self) -> None:
+        """Ferme les connexions."""
+        if self._db_conn:
+            self._db_conn.close()
+
+    def _row_to_record(self, row: sqlite3.Row) -> MemoryRecord:
+        """Convertit une row SQLite en MemoryRecord."""
+        return MemoryRecord(
+            id=row["id"],
+            content=row["content"],
+            source=row["source"],
+            tags=json.loads(row["tags"]),
+            importance=row["importance"],
+            timestamp=row["timestamp"],
+            metadata=json.loads(row["metadata"]),
+        )

@@ -2,9 +2,10 @@
 Neo Core — Configuration Globale
 ================================
 Gestion centralisée de la configuration : LLM, modèles, chemins, paramètres.
-Supporte .env pour les clés API et des valeurs par défaut pour le développement.
+Supporte .env pour les clés API et data/neo_config.json pour les paramètres du wizard.
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,20 @@ from dotenv import load_dotenv
 
 # Charge les variables d'environnement depuis .env si présent
 load_dotenv()
+
+# Chemin vers la config du wizard
+_CONFIG_FILE = Path(__file__).parent.parent / "data" / "neo_config.json"
+
+
+def _load_wizard_config() -> dict:
+    """Charge la configuration créée par le wizard d'installation."""
+    if _CONFIG_FILE.exists():
+        try:
+            with open(_CONFIG_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
 
 
 @dataclass
@@ -32,10 +47,12 @@ class LLMConfig:
 
 @dataclass
 class MemoryConfig:
-    """Configuration du système mémoire (sera étendu en étape 2)."""
-    storage_path: Path = field(default_factory=lambda: Path("./data/memory"))
+    """Configuration du système mémoire."""
+    storage_path: Path = field(default_factory=lambda: Path(__file__).parent.parent / "data" / "memory")
     vector_db: str = "chromadb"
     max_context_tokens: int = 2048
+    max_results: int = 5
+    similarity_threshold: float = 0.3
 
 
 @dataclass
@@ -46,10 +63,23 @@ class NeoConfig:
     debug: bool = field(default_factory=lambda: os.getenv("NEO_DEBUG", "false").lower() == "true")
     log_level: str = field(default_factory=lambda: os.getenv("NEO_LOG_LEVEL", "INFO"))
 
+    # Paramètres du wizard (personnalisation)
+    core_name: str = field(default_factory=lambda: os.getenv("NEO_CORE_NAME", "Neo"))
+    user_name: str = field(default_factory=lambda: os.getenv("NEO_USER_NAME", "Utilisateur"))
+
     # Noms des agents
     vox_name: str = "Vox"
     brain_name: str = "Brain"
     memory_agent_name: str = "Memory"
+
+    def __post_init__(self):
+        # Surcharge avec la config du wizard si disponible
+        wizard = _load_wizard_config()
+        if wizard:
+            if "core_name" in wizard and self.core_name == "Neo":
+                self.core_name = wizard["core_name"]
+            if "user_name" in wizard and self.user_name == "Utilisateur":
+                self.user_name = wizard["user_name"]
 
     def validate(self) -> bool:
         """Vérifie que la configuration est valide pour une utilisation avec un LLM réel."""
@@ -60,6 +90,10 @@ class NeoConfig:
     def is_mock_mode(self) -> bool:
         """Indique si on fonctionne sans clé API (mode mock pour les tests)."""
         return not self.llm.api_key
+
+    def is_installed(self) -> bool:
+        """Vérifie si le wizard d'installation a été exécuté."""
+        return _CONFIG_FILE.exists()
 
 
 # Instance globale par défaut
