@@ -151,7 +151,7 @@ class TestToolSchemas:
     def test_get_all_schemas(self):
         """get_all_tool_schemas retourne tous les schémas."""
         all_schemas = ToolRegistry.get_all_tool_schemas()
-        assert len(all_schemas) == 5
+        assert len(all_schemas) == 6
 
     def test_schemas_have_descriptions(self):
         """Les descriptions sont non-vides et informatives."""

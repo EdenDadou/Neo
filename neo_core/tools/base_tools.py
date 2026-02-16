@@ -123,6 +123,73 @@ def web_search_tool(query: str) -> str:
         return f"Erreur recherche web: {e}"
 
 
+# ─── Outil : Récupération de page web ────────────────────
+
+@tool
+def web_fetch_tool(url: str) -> str:
+    """
+    Récupère le contenu textuel d'une page web.
+
+    Args:
+        url: URL complète de la page à récupérer
+
+    Returns:
+        Contenu textuel de la page (HTML nettoyé)
+    """
+    if _MOCK_MODE:
+        return (
+            f"[Mock Web Fetch] Contenu de '{url}':\n"
+            f"Page chargée avec succès. Contenu simulé de la page web."
+        )
+
+    try:
+        import httpx
+        import re as _re
+
+        response = httpx.get(
+            url,
+            timeout=20,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/json,text/plain",
+                "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+            },
+        )
+
+        if response.status_code != 200:
+            return f"Erreur HTTP {response.status_code} pour {url}"
+
+        content_type = response.headers.get("content-type", "")
+
+        # Si c'est du JSON, retourner directement
+        if "json" in content_type:
+            return f"Données JSON de {url}:\n{response.text[:8000]}"
+
+        # Si c'est du HTML, nettoyer
+        html = response.text
+        # Supprimer scripts et styles
+        html = _re.sub(r'<script[^>]*>.*?</script>', '', html, flags=_re.DOTALL)
+        html = _re.sub(r'<style[^>]*>.*?</style>', '', html, flags=_re.DOTALL)
+        html = _re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=_re.DOTALL)
+        html = _re.sub(r'<footer[^>]*>.*?</footer>', '', html, flags=_re.DOTALL)
+        # Supprimer les tags HTML
+        text = _re.sub(r'<[^>]+>', ' ', html)
+        # Nettoyer les espaces
+        text = _re.sub(r'\s+', ' ', text).strip()
+        # Limiter la taille
+        text = text[:8000]
+
+        if not text or len(text) < 50:
+            return f"Page {url} chargée mais contenu vide ou trop court (peut nécessiter JavaScript)."
+
+        return f"Contenu de {url}:\n{text}"
+
+    except Exception as e:
+        return f"Erreur récupération {url}: {type(e).__name__}: {e}"
+
+
 # ─── Outil : Lecture de fichier ───────────────────────────
 
 # Chemins autorisés pour la lecture
@@ -351,6 +418,26 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "required": ["query"],
         },
     },
+    "web_fetch": {
+        "name": "web_fetch",
+        "description": (
+            "Récupère le contenu textuel d'une page web à partir de son URL. "
+            "Utilise cette fonction pour lire le contenu d'une page spécifique "
+            "après avoir trouvé l'URL via web_search. Utile pour obtenir des "
+            "données détaillées, des scores en direct, des articles complets. "
+            "Note : certains sites dynamiques (JavaScript) peuvent ne pas fonctionner."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "L'URL complète de la page à récupérer (ex: https://www.flashscore.com/match/xyz)",
+                }
+            },
+            "required": ["url"],
+        },
+    },
     "file_read": {
         "name": "file_read",
         "description": (
@@ -441,18 +528,19 @@ class ToolRegistry:
 
     # Mapping type de worker → noms d'outils
     WORKER_TOOLS: dict[str, list[str]] = {
-        "researcher": ["web_search", "memory_search", "file_read"],
+        "researcher": ["web_search", "web_fetch", "memory_search", "file_read"],
         "coder": ["code_execute", "file_read", "file_write", "memory_search"],
-        "summarizer": ["file_read", "memory_search"],
-        "analyst": ["code_execute", "file_read", "memory_search"],
-        "writer": ["file_read", "file_write", "memory_search"],
+        "summarizer": ["file_read", "web_fetch", "memory_search"],
+        "analyst": ["code_execute", "file_read", "web_fetch", "memory_search"],
+        "writer": ["file_read", "file_write", "web_fetch", "memory_search"],
         "translator": ["memory_search"],
-        "generic": ["web_search", "file_read", "memory_search"],
+        "generic": ["web_search", "web_fetch", "file_read", "memory_search"],
     }
 
     # Mapping nom → instance d'outil (LangChain)
     _TOOL_MAP: dict[str, object] = {
         "web_search": web_search_tool,
+        "web_fetch": web_fetch_tool,
         "file_read": file_read_tool,
         "file_write": file_write_tool,
         "code_execute": code_execute_tool,
@@ -526,6 +614,8 @@ class ToolRegistry:
             # selon leur signature
             if name == "web_search":
                 return tool_obj.invoke(args.get("query", ""))
+            elif name == "web_fetch":
+                return tool_obj.invoke(args.get("url", ""))
             elif name == "file_read":
                 return tool_obj.invoke(args.get("path", ""))
             elif name == "file_write":
