@@ -109,7 +109,7 @@ def main():
         rc.print()
 
     elif command == "version":
-        print("Neo Core v1.2.0 — Stage 15")
+        print("Neo Core v1.3.0 — Stage 16")
 
     else:
         print(f"\n  Commande inconnue : '{sys.argv[1]}'")
