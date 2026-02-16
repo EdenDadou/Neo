@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#
+# Neo Core — CLI
+# ==============
+# Commande unique : ./neo setup | ./neo chat | ./neo status
+#
+# Première utilisation :
+#   git clone https://github.com/EdenDadou/Neo.git && cd Neo
+#   ./neo setup
+#
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CYAN='\033[96m'
+GREEN='\033[92m'
+YELLOW='\033[93m'
+RED='\033[91m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ─── Trouver Python ──────────────────────────────────────────
+find_python() {
+    # 1. Venv actif ?
+    if [ -n "$VIRTUAL_ENV" ]; then
+        echo "$VIRTUAL_ENV/bin/python3"
+        return
+    fi
+    # 2. Venv local dans le projet ?
+    if [ -x "$SCRIPT_DIR/.venv/bin/python3" ]; then
+        echo "$SCRIPT_DIR/.venv/bin/python3"
+        return
+    fi
+    # 3. Python système
+    if command -v python3 &>/dev/null; then
+        echo "python3"
+        return
+    fi
+    echo ""
+}
+
+PYTHON="$(find_python)"
+
+if [ -z "$PYTHON" ]; then
+    echo -e "\n  ${RED}✗ Python3 introuvable.${RESET}"
+    echo -e "  ${DIM}Installez Python 3.10+ puis réessayez.${RESET}\n"
+    exit 1
+fi
+
+# ─── Vérifier si le package neo-core est installé ────────────
+neo_installed() {
+    $PYTHON -c "import neo_core.cli" 2>/dev/null
+}
+
+# ─── Bootstrap : installer si nécessaire ─────────────────────
+bootstrap() {
+    echo -e "\n${CYAN}${BOLD}  Neo Core — Bootstrap${RESET}\n"
+    echo -e "  ${DIM}Première exécution détectée, installation en cours...${RESET}\n"
+
+    # Upgrade pip
+    $PYTHON -m pip install --upgrade pip -q 2>/dev/null || true
+
+    # Install en mode éditable
+    if $PYTHON -m pip install -e "${SCRIPT_DIR}[dev]" -q 2>/dev/null; then
+        echo -e "  ${GREEN}✓${RESET} Neo Core installé avec succès !\n"
+    else
+        echo -e "  ${RED}✗ Erreur d'installation${RESET}"
+        echo -e "  ${DIM}Essayez : $PYTHON -m pip install -e '${SCRIPT_DIR}[dev]'${RESET}\n"
+        exit 1
+    fi
+}
+
+# ─── Main ─────────────────────────────────────────────────────
+
+# Si pas d'argument, afficher l'aide
+if [ $# -eq 0 ]; then
+    echo -e "\n${CYAN}${BOLD}  Neo Core — CLI${RESET}\n"
+    echo -e "  ${BOLD}Usage :${RESET}"
+    echo -e "    ./neo ${CYAN}<commande>${RESET}\n"
+    echo -e "  ${BOLD}Commandes :${RESET}"
+    echo -e "    ${CYAN}setup${RESET}      Onboarding complet (install + config + chat)"
+    echo -e "    ${CYAN}chat${RESET}       Lancer le chat"
+    echo -e "    ${CYAN}status${RESET}     Santé du système"
+    echo -e "    ${CYAN}version${RESET}    Version\n"
+    exit 0
+fi
+
+# Bootstrap si nécessaire
+if ! neo_installed; then
+    bootstrap
+fi
+
+# Lancer la commande
+exec $PYTHON -m neo_core.cli "$@"
