@@ -33,11 +33,11 @@ from neo_core.providers.base import (
 # Le registry sélectionne le meilleur modèle testé pour ce niveau.
 
 AGENT_REQUIREMENTS: dict[str, ModelCapability] = {
-    # Core agents
-    "vox": ModelCapability.BASIC,           # Reformulation → Ollama suffit
-    "brain": ModelCapability.ADVANCED,      # Orchestration → Claude obligatoire
-    "memory": ModelCapability.STANDARD,     # Synthèse + apprentissage → Groq/Gemini ou Claude
-    # Workers par type
+    # Core agents — le cœur du système, toujours sur Claude
+    "vox": ModelCapability.STANDARD,        # Reformulation → Claude Haiku (fiable)
+    "brain": ModelCapability.ADVANCED,      # Orchestration → Claude Sonnet (le meilleur)
+    "memory": ModelCapability.STANDARD,     # Apprentissage + synthèse → Claude Haiku (fiable)
+    # Workers — routés dynamiquement par Brain selon la tâche
     "worker:researcher": ModelCapability.STANDARD,
     "worker:coder": ModelCapability.ADVANCED,
     "worker:analyst": ModelCapability.ADVANCED,
@@ -47,10 +47,13 @@ AGENT_REQUIREMENTS: dict[str, ModelCapability] = {
     "worker:generic": ModelCapability.BASIC,
 }
 
-# Agents qui DOIVENT rester sur un provider de qualité (cloud)
-# Même si un modèle local matche la capability, on préfère le cloud
+# Agents du Core : TOUJOURS sur Anthropic (Claude)
+# Vox, Brain, Memory = le cœur, pas de compromis sur la qualité
+# Les Workers sont routés dynamiquement (Ollama, Groq, Gemini, Anthropic)
 PREFER_CLOUD_AGENTS: set[str] = {
+    "vox",
     "brain",
+    "memory",
     "worker:coder",
     "worker:analyst",
 }

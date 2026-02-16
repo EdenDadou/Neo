@@ -365,25 +365,25 @@ class TestModelRegistry:
         registry.discover_models()
         await registry.test_all()
 
-        # vox → basic → devrait obtenir basic-model
-        basic_model = registry.get_best_for("vox")
-        assert basic_model is not None
-        assert basic_model.capability == ModelCapability.BASIC
+        # vox → STANDARD, prefer_cloud mais "mock" n'est pas dans cloud_priority
+        # Donc fallback sur le modèle disponible le plus adapté
+        vox_model = registry.get_best_for("vox")
+        assert vox_model is not None
 
-        # brain → advanced → devrait obtenir advanced-model
+        # brain → ADVANCED → devrait obtenir advanced-model
         advanced_model = registry.get_best_for("brain")
         assert advanced_model is not None
         assert advanced_model.capability == ModelCapability.ADVANCED
 
     @pytest.mark.asyncio
-    async def test_routing_priority_local_for_basic_agents(self, registry):
-        """Le routing préfère local pour les agents BASIC (vox, summarizer)."""
+    async def test_routing_core_agents_prefer_cloud(self, registry):
+        """Le Core (Vox, Brain, Memory) reste sur Anthropic. Workers simples → Ollama."""
         local_model = ModelInfo(
             model_id="ollama:test",
             provider="ollama",
             model_name="test",
             display_name="Local Test",
-            capability=ModelCapability.BASIC,
+            capability=ModelCapability.STANDARD,
             is_free=True,
             is_local=True,
         )
@@ -392,7 +392,7 @@ class TestModelRegistry:
             provider="anthropic",
             model_name="test",
             display_name="Cloud Test",
-            capability=ModelCapability.BASIC,
+            capability=ModelCapability.STANDARD,
             is_free=False,
             is_local=False,
         )
@@ -405,14 +405,25 @@ class TestModelRegistry:
         registry.discover_models()
         await registry.test_all()
 
-        # Vox (BASIC, pas prefer_cloud) → Ollama local
-        best = registry.get_best_for("vox")
-        assert best.provider == "ollama"
+        # Vox (STANDARD, prefer_cloud) → Anthropic
+        best_vox = registry.get_best_for("vox")
+        assert best_vox.provider == "anthropic"
 
-        # Brain (ADVANCED, prefer_cloud) → Anthropic cloud
-        # Aucun modèle ADVANCED disponible, fallback → préfère cloud
+        # Memory (STANDARD, prefer_cloud) → Anthropic
+        best_memory = registry.get_best_for("memory")
+        assert best_memory.provider == "anthropic"
+
+        # Brain (ADVANCED, prefer_cloud) → fallback Anthropic (STANDARD >= rien de mieux)
         best_brain = registry.get_best_for("brain")
         assert best_brain.provider == "anthropic"
+
+        # Worker:summarizer (BASIC, PAS prefer_cloud) → Ollama local
+        best_summarizer = registry.get_best_for("worker:summarizer")
+        assert best_summarizer.provider == "ollama"
+
+        # Worker:translator (BASIC, PAS prefer_cloud) → Ollama local
+        best_translator = registry.get_best_for("worker:translator")
+        assert best_translator.provider == "ollama"
 
     @pytest.mark.asyncio
     async def test_routing_with_tools_requirement(self, registry):
