@@ -231,6 +231,62 @@ def run_status():
     except Exception:
         pass
 
+    # ─── Providers LLM ──────────────────────────────────────
+    console.print()
+    try:
+        from neo_core.providers.bootstrap import bootstrap_providers, get_provider_summary
+
+        registry = bootstrap_providers(config)
+        summary = get_provider_summary(registry)
+
+        prov_table = Table(title="Providers LLM", show_header=True, border_style="dim")
+        prov_table.add_column("Provider", style="bold")
+        prov_table.add_column("Type")
+        prov_table.add_column("Modèles")
+        prov_table.add_column("Statut")
+
+        for name, info in summary["providers"].items():
+            type_labels = {
+                "local": "[green]Local[/green]",
+                "cloud_free": "[cyan]Cloud gratuit[/cyan]",
+                "cloud_paid": "[yellow]Cloud payant[/yellow]",
+            }
+            type_label = type_labels.get(info["type"], info["type"])
+            avail = info["models_available"]
+            total = info["models_total"]
+
+            if avail > 0:
+                status_str = f"[green]✓ {avail}/{total} disponibles[/green]"
+            else:
+                status_str = f"[red]✗ 0/{total}[/red]"
+
+            prov_table.add_row(name.capitalize(), type_label, str(total), status_str)
+
+        if not summary["providers"]:
+            prov_table.add_row(
+                "[dim]Aucun[/dim]",
+                "[dim]—[/dim]",
+                "[dim]0[/dim]",
+                "[yellow]Mode mock (Anthropic fallback)[/yellow]",
+            )
+
+        console.print(prov_table)
+
+        # Routing actuel
+        if summary["routing"]:
+            console.print()
+            route_table = Table(title="Routing actuel", show_header=True, border_style="dim")
+            route_table.add_column("Agent", style="bold")
+            route_table.add_column("Modèle", style="cyan")
+
+            for agent, model_id in summary["routing"].items():
+                route_table.add_row(agent, f"[cyan]{model_id}[/cyan]")
+
+            console.print(route_table)
+
+    except Exception:
+        console.print("[dim]  Providers : non configurés[/dim]")
+
     console.print(
         f"\n[dim]  Pour lancer le chat : neo chat[/dim]\n"
     )

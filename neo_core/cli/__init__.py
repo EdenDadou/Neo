@@ -31,6 +31,7 @@ def print_usage():
     {CYAN}status{RESET}      Afficher la santé du système
     {CYAN}guardian{RESET}     Lancer Neo avec le Guardian (auto-restart)
     {CYAN}history{RESET}     Lister les sessions de conversation
+    {CYAN}providers{RESET}   Afficher les providers LLM configurés
     {CYAN}version{RESET}     Afficher la version
 
   {BOLD}Première utilisation :{RESET}
@@ -87,8 +88,28 @@ def main():
         guardian = Guardian(GuardianConfig())
         guardian.run()
 
+    elif command == "providers":
+        from neo_core.providers.bootstrap import bootstrap_providers, get_provider_summary
+        from neo_core.config import NeoConfig
+        from rich.console import Console as RichConsole
+        from rich.table import Table as RichTable
+        rc = RichConsole()
+        config = NeoConfig()
+        registry = bootstrap_providers(config)
+        summary = get_provider_summary(registry)
+        rc.print(f"\n[bold cyan]  Neo Core — Providers LLM[/bold cyan]\n")
+        for name, info in summary["providers"].items():
+            rc.print(f"  [bold]{name}[/bold] ({info['type']}) — {info['models_available']}/{info['models_total']} modèles")
+            for m in info["models"]:
+                status_icon = "✓" if m["status"] == "available" else "✗" if m["status"] == "failed" else "?"
+                latency = f" ({m['latency_ms']:.0f}ms)" if m["latency_ms"] else ""
+                rc.print(f"    [{status_icon}] {m['display_name']} — {m['capability']}{latency}")
+        if not summary["providers"]:
+            rc.print("  [dim]Aucun provider configuré — mode mock[/dim]")
+        rc.print()
+
     elif command == "version":
-        print("Neo Core v1.0.0 — Stage 13")
+        print("Neo Core v1.1.0 — Stage 14")
 
     else:
         print(f"\n  Commande inconnue : '{sys.argv[1]}'")

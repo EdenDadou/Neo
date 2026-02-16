@@ -14,10 +14,13 @@ Responsabilités :
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from neo_core.providers.base import (
     LLMProvider,
@@ -103,6 +106,7 @@ class ModelRegistry:
     def register_provider(self, provider: LLMProvider) -> None:
         """Enregistre un provider."""
         self._providers[provider.name] = provider
+        logger.debug("Provider registered: %s (%s)", provider.name, provider.provider_type.value)
 
     def get_provider(self, provider_name: str) -> LLMProvider | None:
         """Récupère un provider par son nom."""
@@ -144,11 +148,15 @@ class ModelRegistry:
                 models = provider.list_models()
                 for model in models:
                     self._models[model.model_id] = model
-            except Exception:
-                pass
+                logger.debug("Provider %s: %d models discovered", name, len(models))
+            except Exception as e:
+                logger.warning("Provider %s discovery failed: %s", name, e)
 
         # Charger les résultats de tests précédents
         self._load_test_results()
+
+        logger.info("Model discovery complete: %d models from %d providers",
+                    len(self._models), len(self._providers))
 
         return list(self._models.values())
 

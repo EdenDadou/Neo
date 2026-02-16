@@ -211,6 +211,15 @@ class NeoConfig:
     api_host: str = field(default_factory=lambda: os.getenv("NEO_API_HOST", "0.0.0.0"))
     api_port: int = field(default_factory=lambda: int(os.getenv("NEO_API_PORT", "8000")))
 
+    # Provider configuration
+    groq_api_key: Optional[str] = field(default_factory=lambda: os.getenv("GROQ_API_KEY", None))
+    gemini_api_key: Optional[str] = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", None))
+    ollama_url: str = field(default_factory=lambda: os.getenv("OLLAMA_URL", "http://localhost:11434"))
+    provider_mode: str = field(default_factory=lambda: os.getenv("NEO_PROVIDER_MODE", "economic"))
+
+    # Data directory
+    data_dir: Path = field(default_factory=lambda: _PROJECT_ROOT / "data")
+
     def __post_init__(self):
         # Surcharge avec la config du wizard si disponible
         wizard = _load_wizard_config()
@@ -225,6 +234,16 @@ class NeoConfig:
         if not self.llm.api_key:
             return False
         return True
+
+    def is_provider_configured(self, name: str) -> bool:
+        """Vérifie si un provider spécifique est configuré."""
+        checks = {
+            "anthropic": bool(self.llm.api_key),
+            "groq": bool(self.groq_api_key),
+            "gemini": bool(self.gemini_api_key),
+            "ollama": True,  # Toujours "configuré", la connectivité est vérifiée au runtime
+        }
+        return checks.get(name, False)
 
     def is_mock_mode(self) -> bool:
         """
