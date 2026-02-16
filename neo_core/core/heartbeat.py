@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 @dataclass
 class HeartbeatConfig:
     """Configuration du heartbeat."""
-    interval_seconds: float = 30.0  # Intervalle entre les pulses
+    interval_seconds: float = 1800.0  # Intervalle entre les pulses (30 minutes)
     stale_task_minutes: float = 10.0  # Tâche considérée "stale" après N minutes
     max_auto_tasks_per_pulse: int = 1  # Max tâches auto-lancées par pulse
     auto_consolidation: bool = True  # Consolider Memory automatiquement

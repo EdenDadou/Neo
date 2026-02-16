@@ -393,7 +393,7 @@ async def conversation_loop(vox):
         heartbeat_manager = HeartbeatManager(
             brain=vox.brain,
             memory=vox.memory,
-            config=HeartbeatConfig(interval_seconds=30.0),
+            config=HeartbeatConfig(interval_seconds=1800.0),  # 30 minutes
             on_event=on_heartbeat_event,
         )
         heartbeat_manager.start()
