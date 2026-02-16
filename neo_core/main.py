@@ -152,10 +152,10 @@ async def conversation_loop(vox: Vox):
 
 
 def main():
-    """Point d'entrée (déprécié — utilisez python3 neo.py chat)."""
+    """Point d'entrée (déprécié — utilisez neo chat)."""
     console.print(
         "\n[yellow bold]⚠ Ce point d'entrée est déprécié.[/yellow bold]"
-        "\n[dim]Utilisez plutôt :[/dim] [bold cyan]python3 neo.py chat[/bold cyan]\n"
+        "\n[dim]Utilisez plutôt :[/dim] [bold cyan]neo chat[/bold cyan]\n"
     )
     vox = bootstrap()
     asyncio.run(conversation_loop(vox))

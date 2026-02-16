@@ -3,7 +3,7 @@ Neo Core — Status : Health Check rapide
 =========================================
 Affiche un dashboard de santé du système.
 
-Usage : python3 neo.py status
+Usage : neo status
 """
 
 import json
@@ -60,7 +60,7 @@ def run_status():
     if not config_ok:
         console.print(
             "\n[yellow]  ⚠ Setup non effectué.[/yellow]"
-            "\n[dim]  Lancez : python3 neo.py setup[/dim]\n"
+            "\n[dim]  Lancez : neo setup[/dim]\n"
         )
         return
 
@@ -141,5 +141,5 @@ def run_status():
         pass
 
     console.print(
-        f"\n[dim]  Pour lancer le chat : python3 neo.py chat[/dim]\n"
+        f"\n[dim]  Pour lancer le chat : neo chat[/dim]\n"
     )

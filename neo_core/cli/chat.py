@@ -4,7 +4,7 @@ Neo Core — Chat : Boucle conversationnelle
 Interface utilisateur avec Rich.
 Bootstrap les 3 agents (Memory, Brain, Vox) puis lance la boucle de chat.
 
-Usage : python3 neo.py chat
+Usage : neo chat
 """
 
 import asyncio
@@ -88,7 +88,7 @@ def check_installation(config: NeoConfig) -> bool:
     )
     console.print(
         "[dim]Lancez le setup :[/dim] "
-        "[bold cyan]python3 neo.py setup[/bold cyan]\n"
+        "[bold cyan]neo setup[/bold cyan]\n"
     )
 
     response = console.input(

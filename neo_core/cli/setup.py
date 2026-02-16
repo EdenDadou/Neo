@@ -3,7 +3,7 @@ Neo Core — Setup : Onboarding complet
 =======================================
 Installe les dépendances, configure le système, et lance le chat.
 
-Usage : python3 neo.py setup
+Usage : neo setup
 """
 
 import json
@@ -160,20 +160,26 @@ def setup_venv() -> str:
 
 
 def install_dependencies(python_path: str) -> bool:
-    """Installe les dépendances depuis requirements.txt."""
-    req_file = PROJECT_ROOT / "requirements.txt"
-    if not req_file.exists():
-        print(f"  {RED}✗ requirements.txt introuvable{RESET}")
-        return False
-
+    """Installe Neo Core en mode éditable (pip install -e .)."""
     pip_cmd = f"{python_path} -m pip"
 
     run_command(f"{pip_cmd} install --upgrade pip -q", "Mise à jour de pip")
 
-    return run_command(
-        f"{pip_cmd} install -r {req_file} -q",
-        "Installation des dépendances"
+    # Install en mode éditable — installe le package + toutes les deps
+    success = run_command(
+        f"{pip_cmd} install -e '{PROJECT_ROOT}[dev]' -q",
+        "Installation de Neo Core + dépendances"
     )
+
+    if success:
+        # Vérifier que la commande neo est dispo
+        neo_path = Path(python_path).parent / "neo"
+        if neo_path.exists():
+            print(f"  {GREEN}✓{RESET} Commande {CYAN}neo{RESET} installée !")
+        else:
+            print(f"  {DIM}  (utilisez {CYAN}{python_path} -m neo_core.cli{RESET} comme fallback){RESET}")
+
+    return success
 
 
 def configure_auth() -> str:
@@ -389,7 +395,7 @@ def run_setup():
     else:
         print(f"""
   {BOLD}Pour lancer {core_name} :{RESET}
-    {CYAN}python3 neo.py chat{RESET}
+    {CYAN}neo chat{RESET}
 
   {BOLD}Pour lancer les tests :{RESET}
     {CYAN}python3 -m pytest tests/ -v{RESET}

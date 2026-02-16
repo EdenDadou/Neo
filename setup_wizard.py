@@ -260,9 +260,9 @@ def print_summary(core_name: str, user_name: str, python_path: str):
 def main():
     # ─── Deprecation notice ───────────────────────────────────
     print(f"\n  {YELLOW}{BOLD}⚠ Ce wizard est déprécié.{RESET}")
-    print(f"  {DIM}Utilisez plutôt :{RESET}  {CYAN}python3 neo.py setup{RESET}\n")
+    print(f"  {DIM}Utilisez plutôt :{RESET}  {CYAN}neo setup{RESET}\n")
     if not ask_confirm("Continuer avec l'ancien wizard ?", default=False):
-        print(f"\n  {DIM}Lancez : python3 neo.py setup{RESET}\n")
+        print(f"\n  {DIM}Lancez : neo setup{RESET}\n")
         sys.exit(0)
 
     print_banner()
