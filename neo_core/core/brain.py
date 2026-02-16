@@ -69,16 +69,45 @@ class Brain:
         if not self._mock_mode:
             self._init_llm()
 
+    @staticmethod
+    def _is_oauth_token(key: str) -> bool:
+        """Détecte si la clé est un token OAuth (sk-ant-oat...) vs API key (sk-ant-api...)."""
+        return key.startswith("sk-ant-oat")
+
     def _init_llm(self) -> None:
-        """Initialise le LLM réel via LangChain."""
+        """
+        Initialise le LLM réel via LangChain.
+        Supporte les clés API classiques ET les tokens OAuth Anthropic.
+        """
         try:
-            from langchain_anthropic import ChatAnthropic
-            self._llm = ChatAnthropic(
-                model=self.config.llm.model,
-                api_key=self.config.llm.api_key,
-                temperature=self.config.llm.temperature,
-                max_tokens=self.config.llm.max_tokens,
-            )
+            api_key = self.config.llm.api_key
+
+            if self._is_oauth_token(api_key):
+                # Token OAuth → utilise le client Anthropic natif avec auth_token
+                # puis passe le client à ChatAnthropic
+                import anthropic
+                from langchain_anthropic import ChatAnthropic
+
+                # Crée le client Anthropic avec le token Bearer
+                sync_client = anthropic.Anthropic(auth_token=api_key)
+                async_client = anthropic.AsyncAnthropic(auth_token=api_key)
+
+                self._llm = ChatAnthropic(
+                    model=self.config.llm.model,
+                    temperature=self.config.llm.temperature,
+                    max_tokens=self.config.llm.max_tokens,
+                    client=sync_client,
+                    async_client=async_client,
+                )
+            else:
+                # Clé API classique
+                from langchain_anthropic import ChatAnthropic
+                self._llm = ChatAnthropic(
+                    model=self.config.llm.model,
+                    api_key=api_key,
+                    temperature=self.config.llm.temperature,
+                    max_tokens=self.config.llm.max_tokens,
+                )
         except Exception as e:
             print(f"[Brain] Impossible d'initialiser le LLM: {e}")
             self._mock_mode = True

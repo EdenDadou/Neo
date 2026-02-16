@@ -282,18 +282,22 @@ def main():
 
     print_step(3, 4, "Connexion Anthropic")
 
-    print(f"  {DIM}La clé API Anthropic permet à Brain de fonctionner avec Claude.{RESET}")
+    print(f"  {DIM}La clé Anthropic permet à Brain de fonctionner avec Claude.{RESET}")
     print(f"  {DIM}Sans clé, le système tourne en mode mock (réponses simulées).{RESET}")
+    print(f"  {DIM}Deux types de clés sont supportés :{RESET}")
+    print(f"  {DIM}  • API Key classique : sk-ant-api...{RESET}")
+    print(f"  {DIM}  • Token OAuth       : sk-ant-oat...{RESET}")
     print(f"  {DIM}Obtenez votre clé sur : https://console.anthropic.com/keys{RESET}\n")
 
-    api_key = ask("Clé API Anthropic (laisser vide pour mode mock)", secret=True)
+    api_key = ask("Clé Anthropic (laisser vide pour mode mock)", secret=True)
 
     if api_key:
-        # Vérification basique du format
-        if api_key.startswith("sk-ant-") or api_key.startswith("sk-"):
-            print(f"  {GREEN}✓{RESET} Clé API enregistrée")
+        if api_key.startswith("sk-ant-oat"):
+            print(f"  {GREEN}✓{RESET} Token OAuth détecté et enregistré")
+        elif api_key.startswith("sk-ant-api") or api_key.startswith("sk-"):
+            print(f"  {GREEN}✓{RESET} Clé API classique enregistrée")
         else:
-            print(f"  {YELLOW}⚠{RESET} Le format de la clé semble inhabituel, mais on continue.")
+            print(f"  {YELLOW}⚠{RESET} Format de clé non reconnu, mais on continue.")
     else:
         print(f"  {YELLOW}⚠{RESET} Mode mock activé — Brain simulera les réponses")
 
