@@ -7,16 +7,24 @@ Responsabilités :
 - Analyser les requêtes transmises par Vox
 - Consulter le contexte enrichi par Memory
 - Déterminer l'action optimale
-- (Étape 3+) Générer dynamiquement des agents spécialisés
+- Générer dynamiquement des agents spécialisés (Workers) via Factory
+- Apprendre des résultats des Workers
 
 Authentification OAuth (méthode OpenClaw) :
 - Méthode 1 : Bearer token + header beta "anthropic-beta: oauth-2025-04-20"
 - Méthode 2 : Conversion OAuth → API key via /claude_cli/create_api_key
 - Fallback : Clé API classique via LangChain
+
+Stage 3 : Moteur d'Orchestration
+- make_decision() analyse les requêtes avec heuristiques + classification
+- _decompose_task() produit une TaskAnalysis complète
+- process() orchestre Workers pour les tâches complexes
+- Apprentissage des résultats via Memory
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -31,6 +39,8 @@ from neo_core.oauth import (
     get_api_key_from_oauth,
     OAUTH_BETA_HEADER,
 )
+from neo_core.teams.factory import WorkerFactory, TaskAnalysis
+from neo_core.teams.worker import WorkerType, WorkerResult
 
 if TYPE_CHECKING:
     from neo_core.core.memory_agent import MemoryAgent
@@ -41,7 +51,7 @@ Ton rôle :
 - Tu reçois les requêtes structurées par Vox (l'interface humaine).
 - Tu analyses chaque requête et détermines la meilleure stratégie de réponse.
 - Tu consultes le contexte fourni par Memory pour enrichir tes réponses.
-- Tu coordonnes l'exécution des tâches.
+- Tu coordonnes l'exécution des tâches et délègues aux Workers spécialisés si nécessaire.
 
 Contexte mémoire :
 {memory_context}
@@ -53,6 +63,30 @@ Règles :
 - Tu es le décideur final sur la stratégie d'exécution.
 """
 
+# Prompt pour la décomposition LLM de tâches
+DECOMPOSE_PROMPT = """Analyse cette requête et détermine comment la traiter.
+
+Requête : {request}
+
+Contexte mémoire : {memory_context}
+
+Réponds en JSON strict avec cette structure :
+{{
+  "action": "direct_response" ou "delegate_worker",
+  "worker_type": "researcher" | "coder" | "summarizer" | "analyst" | "writer" | "translator" | "generic",
+  "subtasks": ["sous-tâche 1", "sous-tâche 2", ...],
+  "reasoning": "explication courte de ta décision",
+  "confidence": 0.0 à 1.0
+}}
+
+Règles :
+- "direct_response" si c'est une question simple, une conversation, ou une demande rapide
+- "delegate_worker" si ça nécessite de la recherche, du code, de l'analyse, ou une tâche structurée
+- Le worker_type doit correspondre au type de tâche
+- Les subtasks doivent être des actions concrètes et ordonnées
+- Réponds UNIQUEMENT avec le JSON, rien d'autre.
+"""
+
 
 @dataclass
 class BrainDecision:
@@ -61,6 +95,8 @@ class BrainDecision:
     response: Optional[str] = None
     subtasks: list[str] = field(default_factory=list)
     confidence: float = 1.0
+    worker_type: Optional[str] = None  # Stage 3 : type de worker recommandé
+    reasoning: str = ""  # Stage 3 : justification de la décision
 
 
 @dataclass
@@ -71,44 +107,39 @@ class Brain:
     Analyse les requêtes, consulte Memory, et détermine
     la meilleure action à entreprendre.
 
-    Supporte 3 modes d'authentification :
-    1. OAuth Bearer + beta header (méthode OpenClaw directe)
-    2. Clé API convertie depuis OAuth (méthode OpenClaw/pi-mono)
-    3. Clé API classique via LangChain
+    Stage 3 : Peut créer des Workers spécialisés via Factory
+    pour les tâches complexes, et apprend des résultats.
     """
     config: NeoConfig = field(default_factory=lambda: default_config)
     memory: Optional[MemoryAgent] = None
     _llm: Optional[object] = None
     _mock_mode: bool = False
     _oauth_mode: bool = False
-    _auth_method: str = ""  # "oauth_bearer" | "converted_api_key" | "langchain" | "mock"
-    _anthropic_client: Optional[object] = None  # SDK Anthropic direct pour OAuth
+    _auth_method: str = ""
+    _anthropic_client: Optional[object] = None
+    _factory: Optional[WorkerFactory] = None
 
     def __post_init__(self):
         self._mock_mode = self.config.is_mock_mode()
         if not self._mock_mode:
             self._init_llm()
 
+    @property
+    def factory(self) -> WorkerFactory:
+        """Accès lazy à la Factory (créée à la demande)."""
+        if self._factory is None:
+            self._factory = WorkerFactory(config=self.config, memory=self.memory)
+        return self._factory
+
+    # ─── Initialisation LLM / Auth ──────────────────────────
+
     def _init_llm(self) -> None:
-        """
-        Initialise le LLM avec la meilleure méthode d'auth disponible.
-
-        Ordre de priorité pour les tokens OAuth :
-        1. Clé API déjà convertie (cache) → LangChain classique
-        2. Bearer + beta header → SDK Anthropic direct + httpx custom
-        3. Conversion OAuth → API Key → LangChain classique
-        4. Clé API classique → LangChain
-
-        Pour les clés API classiques :
-        → LangChain ChatAnthropic directement
-        """
+        """Initialise le LLM avec la meilleure méthode d'auth."""
         try:
             api_key = self.config.llm.api_key
-
             if is_oauth_token(api_key):
                 self._init_oauth(api_key)
             else:
-                # Clé API classique → LangChain
                 self._init_langchain(api_key)
         except Exception as e:
             print(f"[Brain] Impossible d'initialiser le LLM: {e}")
@@ -116,69 +147,45 @@ class Brain:
             self._auth_method = "mock"
 
     def _init_oauth(self, token: str) -> None:
-        """
-        Initialise l'authentification OAuth avec fallback automatique.
-
-        Essaie dans l'ordre :
-        1. Clé API convertie (cache) → LangChain
-        2. Bearer + beta header → httpx direct
-        3. Conversion OAuth → API Key → LangChain
-        """
-        # Essayer d'abord de récupérer une clé API convertie
+        """Init OAuth avec fallback automatique."""
         converted_key = get_api_key_from_oauth()
         if converted_key:
             print(f"[Brain] Clé API convertie depuis OAuth détectée")
             self._init_langchain(converted_key)
             self._auth_method = "converted_api_key"
             return
-
-        # Pas de clé convertie → Bearer + beta header (méthode OpenClaw)
         self._oauth_mode = True
         self._init_oauth_bearer(token)
 
     def _init_oauth_bearer(self, token: str) -> None:
-        """
-        Initialise le client Anthropic avec Bearer auth + beta header.
-
-        C'est la méthode OpenClaw : on utilise le SDK Anthropic avec
-        auth_token et on ajoute le header beta "oauth-2025-04-20"
-        via un httpx custom qui injecte les headers nécessaires.
-        """
+        """Init Bearer + beta header (méthode OpenClaw)."""
         import anthropic
         import httpx
 
-        # Récupérer un token valide (refresh si expiré)
         valid_token = get_valid_access_token()
         if not valid_token:
             valid_token = token
 
-        # Créer un httpx client custom qui ajoute le beta header OAuth
         custom_transport = httpx.AsyncHTTPTransport()
-
         self._anthropic_client = anthropic.AsyncAnthropic(
-            api_key="dummy",  # Sera overridé par le header Authorization
+            api_key="dummy",
             default_headers={
                 "Authorization": f"Bearer {valid_token}",
                 "anthropic-beta": OAUTH_BETA_HEADER,
             },
         )
-        # Supprimer x-api-key pour éviter le conflit
-        # Le SDK va utiliser notre header Authorization à la place
         self._current_token = valid_token
         self._auth_method = "oauth_bearer"
         print(f"[Brain] Mode OAuth Bearer + beta header activé")
 
     def _refresh_oauth_client(self) -> bool:
-        """Rafraîchit le client OAuth si le token a expiré."""
-        # D'abord, vérifier si une clé API convertie est apparue
+        """Rafraîchit le client OAuth."""
         converted_key = get_api_key_from_oauth()
         if converted_key:
             self._init_langchain(converted_key)
             self._oauth_mode = False
             self._auth_method = "converted_api_key"
             return True
-
-        # Sinon, rafraîchir le token Bearer
         valid_token = get_valid_access_token()
         if valid_token:
             self._init_oauth_bearer(valid_token)
@@ -186,7 +193,7 @@ class Brain:
         return False
 
     def _init_langchain(self, api_key: str) -> None:
-        """Initialise LangChain avec une clé API classique."""
+        """Init LangChain avec clé API classique."""
         from langchain_anthropic import ChatAnthropic
         self._llm = ChatAnthropic(
             model=self.config.llm.model,
@@ -198,15 +205,22 @@ class Brain:
         if not self._auth_method:
             self._auth_method = "langchain"
 
+    # ─── Connexions ─────────────────────────────────────────
+
     def connect_memory(self, memory: MemoryAgent) -> None:
         """Connecte Brain au système mémoire."""
         self.memory = memory
+        # Mettre à jour la factory si elle existe déjà
+        if self._factory:
+            self._factory.memory = memory
 
     def get_memory_context(self, request: str) -> str:
         """Récupère le contexte pertinent depuis Memory."""
         if self.memory:
             return self.memory.get_context(request)
         return "Aucun contexte mémoire disponible."
+
+    # ─── Analyse et décision ────────────────────────────────
 
     def analyze_complexity(self, request: str) -> str:
         """
@@ -220,37 +234,179 @@ class Brain:
             return "moderate"
         return "complex"
 
+    def make_decision(self, request: str) -> BrainDecision:
+        """
+        Prend une décision stratégique sur la manière de traiter la requête.
+
+        Stage 3 : Utilise la Factory pour classifier les tâches et déterminer
+        si un Worker spécialisé est nécessaire.
+
+        Logique :
+        1. Analyse la complexité (word count)
+        2. Classifie le type de tâche (Factory)
+        3. Décide : réponse directe ou délégation à un Worker
+        """
+        complexity = self.analyze_complexity(request)
+        worker_type = self.factory.classify_task(request)
+
+        # Les requêtes simples restent en réponse directe
+        if complexity == "simple" and worker_type == WorkerType.GENERIC:
+            return BrainDecision(
+                action="direct_response",
+                confidence=0.9,
+                reasoning="Requête simple et générique → réponse directe",
+            )
+
+        # Les requêtes modérées avec un type spécifique → Worker
+        if complexity != "simple" and worker_type != WorkerType.GENERIC:
+            subtasks = self.factory._basic_decompose(request, worker_type)
+            return BrainDecision(
+                action="delegate_worker",
+                subtasks=subtasks,
+                confidence=0.7,
+                worker_type=worker_type.value,
+                reasoning=f"Tâche {complexity} de type {worker_type.value} → Worker",
+            )
+
+        # Les requêtes complexes → Worker generic ou réponse directe
+        if complexity == "complex":
+            subtasks = self._decompose_task(request)
+            return BrainDecision(
+                action="delegate_worker",
+                subtasks=subtasks,
+                confidence=0.5,
+                worker_type=worker_type.value,
+                reasoning=f"Tâche complexe → Worker {worker_type.value}",
+            )
+
+        # Fallback : réponse directe
+        return BrainDecision(
+            action="direct_response",
+            subtasks=[request] if complexity == "moderate" else [],
+            confidence=0.7,
+            reasoning=f"Requête {complexity} générique → réponse directe",
+        )
+
+    def _decompose_task(self, request: str) -> list[str]:
+        """
+        Décompose une tâche complexe en sous-tâches.
+
+        Utilise les heuristiques de la Factory (compatible mock).
+        En mode réel, enrichi par _decompose_task_with_llm().
+        """
+        worker_type = self.factory.classify_task(request)
+        return self.factory._basic_decompose(request, worker_type)
+
+    async def _decompose_task_with_llm(self, request: str,
+                                        memory_context: str) -> TaskAnalysis:
+        """
+        Décomposition LLM-powered d'une tâche.
+
+        Demande au LLM d'analyser la requête et de produire
+        une TaskAnalysis complète (type, sous-tâches, outils).
+
+        Fallback sur les heuristiques si le LLM échoue.
+        """
+        if self._mock_mode:
+            return self.factory.analyze_task(request)
+
+        try:
+            prompt = DECOMPOSE_PROMPT.format(
+                request=request,
+                memory_context=memory_context[:500],
+            )
+
+            # Appel LLM
+            response_text = await self._raw_llm_call(prompt)
+
+            # Parser le JSON
+            # Nettoyer la réponse (le LLM peut ajouter des backticks)
+            cleaned = response_text.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+
+            data = json.loads(cleaned)
+
+            # Convertir en TaskAnalysis
+            worker_type_str = data.get("worker_type", "generic")
+            try:
+                worker_type = WorkerType(worker_type_str)
+            except ValueError:
+                worker_type = WorkerType.GENERIC
+
+            return TaskAnalysis(
+                worker_type=worker_type,
+                primary_task=request,
+                subtasks=data.get("subtasks", [request]),
+                required_tools=[
+                    getattr(t, "name", str(t))
+                    for t in self.factory._get_tools_for_type(worker_type)
+                ] if hasattr(self.factory, '_get_tools_for_type') else [],
+                reasoning=data.get("reasoning", ""),
+                confidence=float(data.get("confidence", 0.7)),
+            )
+
+        except Exception:
+            # Fallback sur les heuristiques
+            return self.factory.analyze_task(request)
+
+    # ─── Pipeline principal ─────────────────────────────────
+
     async def process(self, request: str,
                       conversation_history: list[BaseMessage] | None = None) -> str:
         """
         Pipeline principal de Brain.
 
+        Stage 3 :
         1. Récupère le contexte mémoire
-        2. Analyse la complexité
-        3. Génère une réponse (LLM réel ou mock)
+        2. Prend une décision (direct / worker)
+        3. Si direct → répond via LLM
+        4. Si worker → crée un Worker, exécute, apprend du résultat
         """
         memory_context = self.get_memory_context(request)
-        complexity = self.analyze_complexity(request)
 
         if self._mock_mode:
+            # En mock mode, utiliser le même pipeline avec Workers mock
+            decision = self.make_decision(request)
+
+            if decision.action == "delegate_worker" and decision.worker_type:
+                return await self._execute_with_worker(request, decision, memory_context)
+
+            complexity = self.analyze_complexity(request)
             return self._mock_response(request, complexity, memory_context)
 
         try:
+            # Décision : direct ou worker ?
+            decision = self.make_decision(request)
+
+            if decision.action == "delegate_worker" and decision.worker_type:
+                # Tenter la décomposition LLM pour plus de précision
+                try:
+                    analysis = await self._decompose_task_with_llm(request, memory_context)
+                except Exception:
+                    analysis = self.factory.analyze_task(request)
+
+                return await self._execute_with_worker(request, decision, memory_context, analysis)
+
+            # Réponse directe
             if self._oauth_mode:
                 return await self._oauth_response(request, memory_context, conversation_history)
             else:
                 return await self._llm_response(request, memory_context, conversation_history)
+
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)
 
-            # Si erreur d'auth en mode OAuth → tenter refresh/conversion et retry
+            # Gestion erreur auth OAuth
             if self._oauth_mode and ("authentication" in error_msg.lower()
                                      or "unauthorized" in error_msg.lower()
                                      or "401" in error_msg):
                 print(f"[Brain] Erreur auth OAuth, tentative de fallback...")
 
-                # Fallback 1 : Essayer la conversion en API key
                 converted_key = get_api_key_from_oauth()
                 if converted_key:
                     print(f"[Brain] Conversion OAuth → API key réussie, retry...")
@@ -262,7 +418,6 @@ class Brain:
                     except Exception as retry_e:
                         return f"[Brain Erreur] Après conversion: {type(retry_e).__name__}: {str(retry_e)[:300]}"
 
-                # Fallback 2 : Refresh du token et retry Bearer
                 if self._refresh_oauth_client():
                     try:
                         if self._oauth_mode:
@@ -274,34 +429,157 @@ class Brain:
 
             return f"[Brain Erreur] {error_type}: {error_msg[:500]}"
 
+    async def _execute_with_worker(self, request: str, decision: BrainDecision,
+                                    memory_context: str,
+                                    analysis: TaskAnalysis | None = None) -> str:
+        """
+        Crée et exécute un Worker pour une tâche complexe.
+
+        1. Crée le Worker via Factory
+        2. Exécute la tâche
+        3. Apprend du résultat
+        4. Retourne la réponse formatée
+        """
+        try:
+            worker_type = WorkerType(decision.worker_type)
+        except (ValueError, TypeError):
+            worker_type = WorkerType.GENERIC
+
+        if analysis:
+            worker = self.factory.create_worker(analysis)
+        else:
+            worker = self.factory.create_worker_for_type(
+                worker_type=worker_type,
+                task=request,
+                subtasks=decision.subtasks,
+            )
+
+        result = await worker.execute()
+
+        # Apprentissage
+        await self._learn_from_result(request, decision, result)
+
+        if result.success:
+            return result.output
+        else:
+            # Si le worker échoue, fallback sur réponse directe
+            return f"[Worker {worker_type.value} échoué] {result.output}"
+
+    async def _learn_from_result(self, request: str, decision: BrainDecision,
+                                  result: WorkerResult) -> None:
+        """
+        Apprentissage à partir du résultat d'un Worker.
+
+        Stocke dans Memory :
+        - Type de tâche et décision prise
+        - Résultat (succès/échec)
+        - Métriques (temps, outils)
+        """
+        if not self.memory:
+            return
+
+        try:
+            tags = [
+                "brain_learning",
+                f"worker_type:{result.worker_type}",
+                "success" if result.success else "failure",
+                f"decision:{decision.action}",
+            ]
+
+            content = (
+                f"Apprentissage Brain — {result.worker_type}\n"
+                f"Requête: {request[:200]}\n"
+                f"Décision: {decision.action} (confiance: {decision.confidence:.1f})\n"
+                f"Résultat: {'Succès' if result.success else 'Échec'}\n"
+                f"Temps: {result.execution_time:.1f}s"
+            )
+
+            if result.errors:
+                content += f"\nErreurs: {'; '.join(result.errors[:3])}"
+
+            importance = 0.5 if result.success else 0.8  # Les échecs sont plus importants
+
+            self.memory.store_memory(
+                content=content,
+                source="brain_learning",
+                tags=tags,
+                importance=importance,
+                metadata={
+                    "worker_type": result.worker_type,
+                    "decision_action": decision.action,
+                    "success": result.success,
+                    "execution_time": result.execution_time,
+                    "confidence": decision.confidence,
+                },
+            )
+        except Exception:
+            pass  # Ne pas crasher Brain pour un problème de stockage
+
+    # ─── Appels LLM ────────────────────────────────────────
+
+    async def _raw_llm_call(self, prompt: str) -> str:
+        """
+        Appel LLM brut (sans historique ni system prompt Brain).
+        Utilisé pour les tâches internes (décomposition, classification).
+        """
+        if self._oauth_mode:
+            import httpx as _httpx
+
+            valid_token = get_valid_access_token()
+            token = valid_token or getattr(self, "_current_token", None)
+            if not token:
+                raise Exception("Aucun token OAuth valide")
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": OAUTH_BETA_HEADER,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+
+            payload = {
+                "model": self.config.llm.model,
+                "max_tokens": 1024,
+                "temperature": 0.3,  # Plus déterministe pour les tâches internes
+                "messages": [{"role": "user", "content": prompt}],
+            }
+
+            async with _httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers=headers,
+                    json=payload,
+                    timeout=60,
+                )
+
+            if response.status_code == 200:
+                data = response.json()
+                return data["content"][0]["text"]
+            else:
+                error_data = response.json() if "json" in response.headers.get("content-type", "") else {}
+                error_msg = error_data.get("error", {}).get("message", response.text[:300])
+                raise Exception(f"API {response.status_code}: {error_msg}")
+        else:
+            # LangChain
+            result = await self._llm.ainvoke(prompt)
+            return result.content
+
     async def _oauth_response(self, request: str, memory_context: str,
                               conversation_history: list[BaseMessage] | None = None) -> str:
-        """
-        Génère une réponse via le SDK Anthropic avec OAuth Bearer + beta header.
-
-        C'est la méthode OpenClaw : Authorization: Bearer <token>
-        avec le header anthropic-beta: oauth-2025-04-20
-        """
+        """Génère une réponse via OAuth Bearer + beta header."""
         import httpx as _httpx
 
-        # Construire les messages
         messages = []
-
-        # Historique de conversation
         if conversation_history:
             for msg in conversation_history:
                 if isinstance(msg, HumanMessage):
                     messages.append({"role": "user", "content": msg.content})
                 elif isinstance(msg, AIMessage):
                     messages.append({"role": "assistant", "content": msg.content})
-
-        # Message actuel
         messages.append({"role": "user", "content": request})
 
-        # System prompt avec contexte mémoire
         system_prompt = BRAIN_SYSTEM_PROMPT.replace("{memory_context}", memory_context)
 
-        # Rafraîchir le token si nécessaire
         valid_token = get_valid_access_token()
         if valid_token:
             token = valid_token
@@ -310,7 +588,6 @@ class Brain:
             if not token:
                 return "[Brain Erreur] Aucun token OAuth valide disponible"
 
-        # Appel API direct via httpx (contournement complet du SDK pour contrôle total)
         headers = {
             "Authorization": f"Bearer {token}",
             "anthropic-beta": OAUTH_BETA_HEADER,
@@ -338,28 +615,24 @@ class Brain:
             data = response.json()
             return data["content"][0]["text"]
         else:
-            # Erreur → lever une exception pour déclencher le fallback
             error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
             error_msg = error_data.get("error", {}).get("message", response.text[:300])
             raise Exception(f"API {response.status_code}: {error_msg}")
 
     async def _llm_response(self, request: str, memory_context: str,
                             conversation_history: list[BaseMessage] | None = None) -> str:
-        """Génère une réponse via LangChain (clé API classique ou convertie)."""
+        """Génère une réponse via LangChain."""
         prompt = ChatPromptTemplate.from_messages([
             ("system", BRAIN_SYSTEM_PROMPT),
             MessagesPlaceholder("conversation_history", optional=True),
             ("human", "{request}"),
         ])
-
         chain = prompt | self._llm
-
         result = await chain.ainvoke({
             "memory_context": memory_context,
             "conversation_history": conversation_history or [],
             "request": request,
         })
-
         return result.content
 
     def _mock_response(self, request: str, complexity: str, context: str) -> str:
@@ -372,32 +645,3 @@ class Brain:
             f"Contexte: {context[:100]}. "
             f"Analyse de: '{request}'"
         )
-
-    def make_decision(self, request: str) -> BrainDecision:
-        """
-        Prend une décision stratégique sur la manière de traiter la requête.
-        Sera enrichi en étape 3 avec la génération d'agents.
-        """
-        complexity = self.analyze_complexity(request)
-
-        if complexity == "simple":
-            return BrainDecision(action="direct_response", confidence=0.9)
-        elif complexity == "moderate":
-            return BrainDecision(
-                action="direct_response",
-                subtasks=[request],
-                confidence=0.7,
-            )
-        else:
-            return BrainDecision(
-                action="delegate_worker",
-                subtasks=self._decompose_task(request),
-                confidence=0.5,
-            )
-
-    def _decompose_task(self, request: str) -> list[str]:
-        """
-        Décompose une tâche complexe en sous-tâches.
-        Placeholder pour l'étape 3.
-        """
-        return [f"Sous-tâche: {request}"]
