@@ -163,6 +163,39 @@ class LearningEngine:
     def __init__(self, store: MemoryStore):
         self.store = store
         self._performance_cache: dict[str, WorkerPerformance] = {}
+        # Recharger les performances depuis le store (survit au redémarrage)
+        self._reload_performance_cache()
+
+    def _reload_performance_cache(self) -> None:
+        """
+        Recharge les métriques de performance depuis le store.
+        Appelé à l'initialisation pour survivre aux redémarrages.
+        """
+        try:
+            records = self.store.search_by_source(self.SOURCE_PERFORMANCE, limit=500)
+            for record in records:
+                try:
+                    data = json.loads(record.content)
+                    wtype = data.get("worker_type", "")
+                    if not wtype:
+                        continue
+
+                    if wtype not in self._performance_cache:
+                        self._performance_cache[wtype] = WorkerPerformance(
+                            worker_type=wtype
+                        )
+
+                    perf = self._performance_cache[wtype]
+                    perf.total_tasks += 1
+                    perf.total_time += data.get("execution_time", 0.0)
+                    if data.get("success", False):
+                        perf.successes += 1
+                    else:
+                        perf.failures += 1
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        except Exception:
+            pass  # Ne pas crasher si le store est vide
 
     # ─── Enregistrement des résultats ────────────────────
 
@@ -221,25 +254,30 @@ class LearningEngine:
         )
 
     def _record_error_pattern(self, request: str, worker_type: str, errors: list[str]) -> None:
-        """Identifie et stocke un pattern d'erreur."""
+        """Identifie et stocke un pattern d'erreur (sans duplication)."""
         error_type = self._classify_error(errors)
 
         # Chercher si ce pattern existe déjà
-        existing = self._find_error_pattern(worker_type, error_type)
+        existing, existing_record_id = self._find_error_pattern_with_id(worker_type, error_type)
 
-        if existing:
+        if existing and existing_record_id:
             # Incrémenter le compteur
             existing.count += 1
             existing.last_seen = datetime.now().isoformat()
             if request[:100] not in existing.examples:
                 existing.examples.append(request[:100])
-                existing.examples = existing.examples[-5:]  # Garder les 5 derniers
+                existing.examples = existing.examples[-5:]
 
             # Générer une règle d'évitement si pattern récurrent (≥ 3)
             if existing.count >= 3 and not existing.avoidance_rule:
                 existing.avoidance_rule = self._generate_avoidance_rule(existing)
 
-            # Mettre à jour dans le store
+            # Remplacer l'ancien record (évite la duplication)
+            try:
+                self.store.delete(existing_record_id)
+            except Exception:
+                pass
+
             self.store.store(
                 content=json.dumps(existing.to_dict()),
                 source=self.SOURCE_ERROR_PATTERN,
@@ -269,17 +307,29 @@ class LearningEngine:
     def _record_success(self, request: str, worker_type: str,
                         execution_time: float, output: str) -> None:
         """Enregistre un succès comme compétence acquise."""
-        # Extraire un nom de compétence simple
         skill_name = self._extract_skill_name(request, worker_type)
 
         # Chercher si cette compétence existe déjà
-        existing_skill = self._find_skill(skill_name, worker_type)
+        existing_skill, existing_record_id = self._find_skill_with_id(skill_name, worker_type)
 
-        if existing_skill:
+        if existing_skill and existing_record_id:
+            # Mettre à jour la compétence existante
             existing_skill.success_count += 1
             existing_skill.avg_execution_time = (
                 (existing_skill.avg_execution_time * (existing_skill.success_count - 1)
                  + execution_time) / existing_skill.success_count
+            )
+            # Persister la mise à jour : supprimer l'ancien, créer le nouveau
+            try:
+                self.store.delete(existing_record_id)
+            except Exception:
+                pass
+            self.store.store(
+                content=json.dumps(existing_skill.to_dict()),
+                source=self.SOURCE_SKILL,
+                tags=[f"worker:{worker_type}", f"skill:{skill_name}"],
+                importance=min(0.8, 0.5 + existing_skill.success_count * 0.05),
+                metadata=existing_skill.to_dict(),
             )
         else:
             # Nouvelle compétence
@@ -431,6 +481,13 @@ class LearningEngine:
 
     def _find_error_pattern(self, worker_type: str, error_type: str) -> Optional[ErrorPattern]:
         """Cherche un pattern d'erreur existant."""
+        result = self._find_error_pattern_with_id(worker_type, error_type)
+        return result[0]
+
+    def _find_error_pattern_with_id(
+        self, worker_type: str, error_type: str
+    ) -> tuple[Optional[ErrorPattern], Optional[str]]:
+        """Cherche un pattern d'erreur existant et retourne aussi son record ID."""
         records = self.store.search_by_tags(
             [f"worker:{worker_type}", f"error:{error_type}"],
             limit=5,
@@ -439,13 +496,20 @@ class LearningEngine:
             if record.source == self.SOURCE_ERROR_PATTERN:
                 try:
                     data = json.loads(record.content)
-                    return ErrorPattern.from_dict(data)
+                    return ErrorPattern.from_dict(data), record.id
                 except (json.JSONDecodeError, TypeError):
                     pass
-        return None
+        return None, None
 
     def _find_skill(self, skill_name: str, worker_type: str) -> Optional[LearnedSkill]:
         """Cherche une compétence existante."""
+        result = self._find_skill_with_id(skill_name, worker_type)
+        return result[0]
+
+    def _find_skill_with_id(
+        self, skill_name: str, worker_type: str
+    ) -> tuple[Optional[LearnedSkill], Optional[str]]:
+        """Cherche une compétence existante et retourne aussi son record ID."""
         records = self.store.search_by_tags(
             [f"worker:{worker_type}", f"skill:{skill_name}"],
             limit=5,
@@ -454,10 +518,10 @@ class LearningEngine:
             if record.source == self.SOURCE_SKILL:
                 try:
                     data = json.loads(record.content)
-                    return LearnedSkill.from_dict(data)
+                    return LearnedSkill.from_dict(data), record.id
                 except (json.JSONDecodeError, TypeError):
                     pass
-        return None
+        return None, None
 
     def _find_relevant_skills(self, request: str) -> list[LearnedSkill]:
         """Cherche les compétences pertinentes par recherche sémantique."""

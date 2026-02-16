@@ -374,15 +374,59 @@ class Brain:
         # Requêtes complexes sans type spécifique → Worker generic
         if complexity == "complex":
             subtasks = self._decompose_task(request)
+            confidence = 0.5
+
+            # Consultation learning même pour les workers génériques
+            advice = self._consult_learning(request, "generic")
+            reasoning = f"Tâche complexe → Worker {worker_type.value}"
+
+            if advice and advice.relevant_skills:
+                # Si on a une compétence passée pertinente, l'utiliser
+                best_skill = advice.relevant_skills[0]
+                if best_skill.worker_type != "generic":
+                    try:
+                        alt_type = WorkerType(best_skill.worker_type)
+                        worker_type = alt_type
+                        subtasks = self.factory._basic_decompose(request, alt_type)
+                        reasoning = (
+                            f"Tâche complexe → substitué par {alt_type.value} "
+                            f"(compétence acquise: {best_skill.name})"
+                        )
+                        confidence = 0.7
+                    except ValueError:
+                        pass
+
             return BrainDecision(
                 action="delegate_worker",
                 subtasks=subtasks,
-                confidence=0.5,
+                confidence=confidence,
                 worker_type=worker_type.value,
-                reasoning=f"Tâche complexe → Worker {worker_type.value}",
+                reasoning=reasoning,
             )
 
         # Requêtes simples/modérées sans type spécifique → réponse directe
+        # Mais vérifier si une compétence passée suggère de déléguer
+        advice = self._consult_learning(request, "generic")
+        if advice and advice.relevant_skills:
+            best_skill = advice.relevant_skills[0]
+            if best_skill.success_count >= 2:
+                # On a une compétence prouvée pour ce type de requête → déléguer
+                try:
+                    skill_type = WorkerType(best_skill.worker_type)
+                    subtasks = self.factory._basic_decompose(request, skill_type)
+                    return BrainDecision(
+                        action="delegate_worker",
+                        subtasks=subtasks,
+                        confidence=0.7,
+                        worker_type=skill_type.value,
+                        reasoning=(
+                            f"Requête {complexity} mais compétence acquise "
+                            f"({best_skill.name}, ×{best_skill.success_count}) → Worker"
+                        ),
+                    )
+                except ValueError:
+                    pass
+
         return BrainDecision(
             action="direct_response",
             subtasks=[request] if complexity == "moderate" else [],
