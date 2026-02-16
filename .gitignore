@@ -1,33 +1,15 @@
-# Dependencies
-node_modules/
-
-# Build
-dist/
-
-# Environment
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 .env
-.env.local
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Data (local)
+.venv/
+venv/
+env/
 data/
-*.db
-*.db-shm
-*.db-wal
-
-# Model cache
-.cache/
-
-# Tests
-coverage/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+node_modules/
