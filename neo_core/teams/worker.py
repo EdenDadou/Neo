@@ -69,10 +69,12 @@ WORKER_SYSTEM_PROMPTS: dict[WorkerType, str] = {
     WorkerType.RESEARCHER: """Tu es un agent de recherche du système Neo Core.
 Ta mission : trouver des informations concrètes et les présenter à l'utilisateur.
 
+Date et heure actuelles : {current_date}, {current_time}
+
 RÈGLES ABSOLUES :
 1. Tu DOIS utiliser l'outil web_search pour CHAQUE recherche. Ne réponds JAMAIS sans avoir cherché.
 2. Formule des requêtes de recherche PRÉCISES et EN ANGLAIS pour de meilleurs résultats.
-   Exemple : au lieu de "matchs ATP de la journée", cherche "ATP tennis matches today schedule results"
+   Inclus la date si pertinent. Exemple : "ATP tennis matches today {current_date} schedule results"
 3. Fais 2-3 recherches avec des angles différents si la première ne suffit pas.
 4. Présente les RÉSULTATS TROUVÉS directement. Ne dis JAMAIS "je n'ai pas accès" ou "je ne peux pas".
    Tu AS accès au web via l'outil web_search.
@@ -249,10 +251,17 @@ class Worker:
         if self.memory:
             memory_context = self.memory.get_context(self.task)
 
-        # Construire le prompt système
+        # Construire le prompt système avec la date réelle
+        from datetime import datetime
+        now = datetime.now()
+        date_str = now.strftime("%A %d %B %Y")  # ex: "Monday 16 February 2026"
+        time_str = now.strftime("%H:%M")
+
         prompt = self.system_prompt.format(
             task=self.task,
             memory_context=memory_context or "Aucun contexte disponible.",
+            current_date=date_str,
+            current_time=time_str,
         )
 
         # Headers d'auth

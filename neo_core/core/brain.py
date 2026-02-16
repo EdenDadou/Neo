@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from neo_core.core.memory_agent import MemoryAgent
 
 BRAIN_SYSTEM_PROMPT = """Tu es Brain, le cortex exécutif du système Neo Core.
+Date et heure actuelles : {current_date}, {current_time}
 
 Ton rôle :
 - Tu reçois les requêtes structurées par Vox (l'interface humaine).
@@ -68,6 +69,7 @@ Règles :
 - Si une tâche est complexe, décompose-la en sous-tâches.
 - Indique clairement quand tu as besoin de plus d'informations.
 - Tu es le décideur final sur la stratégie d'exécution.
+- Réponds de manière concise et naturelle, pas de markdown excessif.
 """
 
 # Prompt pour la décomposition LLM de tâches
@@ -604,7 +606,13 @@ class Brain:
                     messages.append({"role": "assistant", "content": msg.content})
         messages.append({"role": "user", "content": request})
 
-        system_prompt = BRAIN_SYSTEM_PROMPT.replace("{memory_context}", memory_context)
+        from datetime import datetime
+        now = datetime.now()
+        system_prompt = BRAIN_SYSTEM_PROMPT.format(
+            memory_context=memory_context,
+            current_date=now.strftime("%A %d %B %Y"),
+            current_time=now.strftime("%H:%M"),
+        )
 
         valid_token = get_valid_access_token()
         if valid_token:
@@ -660,6 +668,9 @@ class Brain:
     async def _llm_response(self, request: str, memory_context: str,
                             conversation_history: list[BaseMessage] | None = None) -> str:
         """Génère une réponse via LangChain."""
+        from datetime import datetime
+        now = datetime.now()
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", BRAIN_SYSTEM_PROMPT),
             MessagesPlaceholder("conversation_history", optional=True),
@@ -668,6 +679,8 @@ class Brain:
         chain = prompt | self._llm
         result = await chain.ainvoke({
             "memory_context": memory_context,
+            "current_date": now.strftime("%A %d %B %Y"),
+            "current_time": now.strftime("%H:%M"),
             "conversation_history": conversation_history or [],
             "request": request,
         })
