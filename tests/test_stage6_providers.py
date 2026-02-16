@@ -376,14 +376,14 @@ class TestModelRegistry:
         assert advanced_model.capability == ModelCapability.ADVANCED
 
     @pytest.mark.asyncio
-    async def test_routing_priority_local_over_cloud(self, registry):
-        """Le routing préfère les modèles locaux gratuits."""
+    async def test_routing_priority_local_for_basic_agents(self, registry):
+        """Le routing préfère local pour les agents BASIC (vox, summarizer)."""
         local_model = ModelInfo(
             model_id="ollama:test",
             provider="ollama",
             model_name="test",
             display_name="Local Test",
-            capability=ModelCapability.ADVANCED,
+            capability=ModelCapability.BASIC,
             is_free=True,
             is_local=True,
         )
@@ -392,7 +392,7 @@ class TestModelRegistry:
             provider="anthropic",
             model_name="test",
             display_name="Cloud Test",
-            capability=ModelCapability.ADVANCED,
+            capability=ModelCapability.BASIC,
             is_free=False,
             is_local=False,
         )
@@ -405,8 +405,14 @@ class TestModelRegistry:
         registry.discover_models()
         await registry.test_all()
 
-        best = registry.get_best_for("brain")
-        assert best.provider == "ollama"  # Local prioritaire
+        # Vox (BASIC, pas prefer_cloud) → Ollama local
+        best = registry.get_best_for("vox")
+        assert best.provider == "ollama"
+
+        # Brain (ADVANCED, prefer_cloud) → Anthropic cloud
+        # Aucun modèle ADVANCED disponible, fallback → préfère cloud
+        best_brain = registry.get_best_for("brain")
+        assert best_brain.provider == "anthropic"
 
     @pytest.mark.asyncio
     async def test_routing_with_tools_requirement(self, registry):

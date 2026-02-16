@@ -34,9 +34,9 @@ from neo_core.providers.base import (
 
 AGENT_REQUIREMENTS: dict[str, ModelCapability] = {
     # Core agents
-    "vox": ModelCapability.BASIC,
-    "brain": ModelCapability.ADVANCED,
-    "memory": ModelCapability.BASIC,
+    "vox": ModelCapability.BASIC,           # Reformulation → Ollama suffit
+    "brain": ModelCapability.ADVANCED,      # Orchestration → Claude obligatoire
+    "memory": ModelCapability.STANDARD,     # Synthèse + apprentissage → Groq/Gemini ou Claude
     # Workers par type
     "worker:researcher": ModelCapability.STANDARD,
     "worker:coder": ModelCapability.ADVANCED,
@@ -45,6 +45,14 @@ AGENT_REQUIREMENTS: dict[str, ModelCapability] = {
     "worker:writer": ModelCapability.STANDARD,
     "worker:translator": ModelCapability.BASIC,
     "worker:generic": ModelCapability.BASIC,
+}
+
+# Agents qui DOIVENT rester sur un provider de qualité (cloud)
+# Même si un modèle local matche la capability, on préfère le cloud
+PREFER_CLOUD_AGENTS: set[str] = {
+    "brain",
+    "worker:coder",
+    "worker:analyst",
 }
 
 # Priorité des providers (gratuit local > gratuit cloud > payant)
@@ -209,21 +217,23 @@ class ModelRegistry:
                 return cached_model
 
         required = AGENT_REQUIREMENTS.get(agent_name, ModelCapability.STANDARD)
-        return self._find_best_model(required)
+        prefer_cloud = agent_name in PREFER_CLOUD_AGENTS
+        return self._find_best_model(required, prefer_cloud=prefer_cloud)
 
     def _find_best_model(
         self,
         min_capability: ModelCapability,
         require_tools: bool = False,
+        prefer_cloud: bool = False,
     ) -> ModelInfo | None:
         """
         Trouve le meilleur modèle disponible pour une capability donnée.
 
-        Priorité :
-        1. Modèles gratuits locaux (Ollama)
-        2. Modèles gratuits cloud (Groq, Gemini)
-        3. Modèles payants (Anthropic)
-        4. Si aucun modèle ADVANCED disponible, accepter STANDARD
+        Priorité normale (économe) :
+            local gratuit (Ollama) → cloud gratuit (Groq, Gemini) → cloud payant (Anthropic)
+
+        Priorité cloud (qualité, pour Brain/Coder/Analyst) :
+            cloud payant (Anthropic) → cloud gratuit (Groq, Gemini) → local (Ollama)
         """
         available = [
             m for m in self._models.values()
@@ -251,15 +261,29 @@ class ModelRegistry:
         if not matching:
             return None
 
-        # Trier par priorité : provider priority, puis capability (ascendant)
-        # On veut le modèle le moins cher qui répond au besoin
-        # Capability ascendant = préférer le niveau juste suffisant (économe)
-        def sort_key(m: ModelInfo) -> tuple:
-            return (
-                PROVIDER_PRIORITY.get(m.provider, 99),
-                CAPABILITY_ORDER.get(m.capability, 0),
-                m.avg_latency_ms or 9999,
-            )
+        if prefer_cloud:
+            # Brain, Coder, Analyst : priorité qualité (cloud d'abord)
+            # Inverser les priorités : Anthropic (3→0), Gemini (2→1), Groq (1→2), Ollama (0→3)
+            cloud_priority = {
+                "anthropic": 0,
+                "gemini": 1,
+                "groq": 2,
+                "ollama": 3,
+            }
+            def sort_key(m: ModelInfo) -> tuple:
+                return (
+                    cloud_priority.get(m.provider, 99),
+                    -CAPABILITY_ORDER.get(m.capability, 0),  # Meilleur modèle d'abord
+                    m.avg_latency_ms or 9999,
+                )
+        else:
+            # Vox, Memory, Workers simples : priorité économie (local d'abord)
+            def sort_key(m: ModelInfo) -> tuple:
+                return (
+                    PROVIDER_PRIORITY.get(m.provider, 99),
+                    CAPABILITY_ORDER.get(m.capability, 0),
+                    m.avg_latency_ms or 9999,
+                )
 
         matching.sort(key=sort_key)
         return matching[0]
