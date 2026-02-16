@@ -168,17 +168,42 @@ def print_epics(vox):
     ))
 
 
+def print_heartbeat(heartbeat_manager):
+    """Affiche le rapport du heartbeat."""
+    if not heartbeat_manager:
+        console.print("[yellow]  ⚠ Heartbeat non initialisé[/yellow]")
+        return
+
+    status = heartbeat_manager.get_status()
+    report = heartbeat_manager.get_progress_report()
+
+    lines = [
+        f"[bold]Heartbeat[/bold] — {'[green]actif[/green]' if status['running'] else '[red]inactif[/red]'}",
+        f"  Pulses: {status['pulse_count']} | Intervalle: {status['interval']:.0f}s",
+        f"  Dernier événement: {status['last_event']}",
+        "",
+        report,
+    ]
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold cyan]Heartbeat[/bold cyan]",
+        border_style="cyan",
+    ))
+
+
 def print_help():
     """Affiche les commandes disponibles."""
     console.print(Panel(
         "[bold]Commandes disponibles :[/bold]\n\n"
-        "  [cyan]/help[/cyan]     — Affiche cette aide\n"
-        "  [cyan]/status[/cyan]   — État des agents\n"
-        "  [cyan]/health[/cyan]   — Rapport de santé détaillé\n"
-        "  [cyan]/skills[/cyan]   — Compétences acquises\n"
-        "  [cyan]/tasks[/cyan]    — Registre des tâches\n"
-        "  [cyan]/epics[/cyan]    — Registre des epics\n"
-        "  [cyan]/quit[/cyan]     — Quitter le chat\n",
+        "  [cyan]/help[/cyan]      — Affiche cette aide\n"
+        "  [cyan]/status[/cyan]    — État des agents\n"
+        "  [cyan]/health[/cyan]    — Rapport de santé détaillé\n"
+        "  [cyan]/skills[/cyan]    — Compétences acquises\n"
+        "  [cyan]/tasks[/cyan]     — Registre des tâches\n"
+        "  [cyan]/epics[/cyan]     — Registre des epics\n"
+        "  [cyan]/heartbeat[/cyan] — Statut du heartbeat\n"
+        "  [cyan]/quit[/cyan]      — Quitter le chat\n",
         title="[bold]Aide[/bold]",
         border_style="dim",
     ))
@@ -241,6 +266,29 @@ def bootstrap():
 async def conversation_loop(vox):
     """Boucle principale de conversation."""
     config = vox.config
+    heartbeat_manager = None
+
+    # Démarrer le heartbeat en arrière-plan
+    try:
+        from neo_core.core.heartbeat import HeartbeatManager, HeartbeatConfig
+
+        def on_heartbeat_event(event):
+            """Affiche les événements importants du heartbeat."""
+            important = {"task_completed", "task_failed", "epic_done", "task_stale"}
+            if event.event_type in important:
+                console.print(
+                    f"\n  [dim magenta]♥ {event.message}[/dim magenta]"
+                )
+
+        heartbeat_manager = HeartbeatManager(
+            brain=vox.brain,
+            memory=vox.memory,
+            config=HeartbeatConfig(interval_seconds=30.0),
+            on_event=on_heartbeat_event,
+        )
+        heartbeat_manager.start()
+    except Exception:
+        pass
 
     print_banner(config)
 
@@ -277,6 +325,8 @@ async def conversation_loop(vox):
                 f"[bold green]  {config.user_name} >[/bold green] "
             )
         except (KeyboardInterrupt, EOFError):
+            if heartbeat_manager:
+                heartbeat_manager.stop()
             console.print("\n[dim]  Au revoir ![/dim]")
             break
 
@@ -287,6 +337,8 @@ async def conversation_loop(vox):
         # Commandes spéciales (avec ou sans /)
         cmd = user_input.lower()
         if cmd in ("/quit", "/exit", "quit", "exit", "q"):
+            if heartbeat_manager:
+                heartbeat_manager.stop()
             console.print("[dim]  Au revoir ![/dim]")
             break
 
@@ -312,6 +364,10 @@ async def conversation_loop(vox):
 
         if cmd in ("/epics", "epics"):
             print_epics(vox)
+            continue
+
+        if cmd in ("/heartbeat", "heartbeat"):
+            print_heartbeat(heartbeat_manager)
             continue
 
         # Process via Vox → Brain → Vox
