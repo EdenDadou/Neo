@@ -178,8 +178,7 @@ async def _fallback_anthropic(
     }
 
     try:
-        from neo_core.core.oauth_manager import is_oauth_token, get_valid_access_token
-        OAUTH_BETA_HEADER = "oauth-2025-04-20"
+        from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
 
         if is_oauth_token(api_key):
             valid_token = get_valid_access_token() or api_key

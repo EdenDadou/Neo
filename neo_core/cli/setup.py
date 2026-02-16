@@ -429,9 +429,11 @@ def configure_hardware_and_providers(api_key: str) -> dict:
 
     if ask_confirm("Configurer Groq (gratuit) ?"):
         groq_key = ask("Clé Groq (gsk_...)", secret=True)
-        if groq_key:
+        if groq_key and groq_key.startswith("gsk_") and len(groq_key) > 10:
             provider_keys["groq"] = groq_key
             print(f"  {GREEN}✓{RESET} Groq configuré")
+        elif groq_key:
+            print(f"  {YELLOW}⚠{RESET} Clé Groq invalide (doit commencer par gsk_) — ignoré")
         else:
             print(f"  {DIM}  (ignoré){RESET}")
 
@@ -441,10 +443,12 @@ def configure_hardware_and_providers(api_key: str) -> dict:
     print(f"  {DIM}Clé gratuite : https://aistudio.google.com/apikey{RESET}")
 
     if ask_confirm("Configurer Gemini (gratuit) ?"):
-        gemini_key = ask("Clé Gemini", secret=True)
-        if gemini_key:
+        gemini_key = ask("Clé Gemini (AIza...)", secret=True)
+        if gemini_key and gemini_key.startswith("AIza") and len(gemini_key) > 10:
             provider_keys["gemini"] = gemini_key
             print(f"  {GREEN}✓{RESET} Gemini configuré")
+        elif gemini_key:
+            print(f"  {YELLOW}⚠{RESET} Clé Gemini invalide (doit commencer par AIza) — ignoré")
         else:
             print(f"  {DIM}  (ignoré){RESET}")
 
@@ -477,7 +481,9 @@ def _test_providers(provider_keys: dict) -> dict:
             from neo_core.providers.gemini_provider import GeminiProvider
             from neo_core.providers.ollama_provider import OllamaProvider
 
-            registry = ModelRegistry()
+            # IMPORTANT : passer config_path pour que les résultats de tests
+            # soient persistés dans neo_config.json et rechargés au runtime
+            registry = ModelRegistry(config_path=CONFIG_FILE)
 
             if provider_keys.get("anthropic"):
                 registry.register_provider(AnthropicProvider(api_key=provider_keys["anthropic"]))
