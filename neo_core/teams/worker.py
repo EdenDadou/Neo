@@ -4,11 +4,13 @@ Neo Core — Worker : Agent Spécialisé Éphémère
 Un Worker est un agent créé dynamiquement par Brain via la Factory
 pour exécuter une tâche spécifique, puis détruit.
 
-Cycle de vie :
-1. Factory crée le Worker avec config, outils, prompt adapté
-2. Worker.execute() exécute la tâche
-3. Le résultat est stocké dans Memory
-4. Le Worker est détruit (pas de persistance)
+Cycle de vie géré par le WorkerLifecycleManager :
+1. Factory crée le Worker → état CREATED
+2. Brain enregistre le Worker dans le registre → état RUNNING
+3. Worker.execute() exécute la tâche
+4. Memory récupère TOUS les apprentissages (AVANT destruction)
+5. Worker.cleanup() libère les ressources → état CLOSED
+6. Le Worker est retiré du registre
 
 Stage 5 :
 - Boucle tool_use native (le LLM contrôle ses outils)
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
@@ -38,6 +41,15 @@ from neo_core.core.resilience import (
 )
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
 from neo_core.tools.base_tools import ToolRegistry
+
+
+class WorkerState(str, Enum):
+    """État du cycle de vie d'un Worker."""
+    CREATED = "created"      # Worker créé, pas encore lancé
+    RUNNING = "running"      # En cours d'exécution
+    COMPLETED = "completed"  # Exécution terminée, apprentissage fait
+    FAILED = "failed"        # Exécution échouée, apprentissage fait
+    CLOSED = "closed"        # Ressources libérées, prêt pour GC
 
 
 class WorkerType(str, Enum):
@@ -198,9 +210,18 @@ class Worker:
     health_monitor: Optional[HealthMonitor] = None
     _mock_mode: bool = False
     _model_config: Optional[object] = None
+    # ── Lifecycle fields ──
+    _worker_id: str = ""
+    _state: WorkerState = WorkerState.CREATED
+    _created_at: float = 0.0
+    _started_at: float = 0.0
+    _finished_at: float = 0.0
+    _result: Optional[WorkerResult] = None
 
     def __post_init__(self):
         self._mock_mode = self.config.is_mock_mode()
+        self._worker_id = str(uuid.uuid4())[:8]
+        self._created_at = time.time()
         # Modèle sélectionné selon le type de Worker
         self._model_config = get_agent_model(f"worker:{self.worker_type.value}")
         if not self.system_prompt:
@@ -208,14 +229,40 @@ class Worker:
                 self.worker_type, WORKER_SYSTEM_PROMPTS[WorkerType.GENERIC]
             )
 
+    # ── Propriétés lifecycle ──
+
+    @property
+    def worker_id(self) -> str:
+        return self._worker_id
+
+    @property
+    def state(self) -> WorkerState:
+        return self._state
+
+    @property
+    def is_active(self) -> bool:
+        """True si le Worker est en cours d'exécution."""
+        return self._state in (WorkerState.CREATED, WorkerState.RUNNING)
+
+    @property
+    def lifetime(self) -> float:
+        """Durée de vie du Worker en secondes."""
+        end = self._finished_at or time.time()
+        return end - self._created_at
+
     async def execute(self) -> WorkerResult:
         """
         Exécute la tâche assignée.
 
         En mode mock : retourne un résultat déterministe.
         En mode réel : boucle tool_use avec le LLM.
+
+        Note : Le state est géré ici, mais la garantie de cleanup
+        est assurée par le context manager async (voir __aenter__/__aexit__).
         """
-        start_time = time.time()
+        self._state = WorkerState.RUNNING
+        self._started_at = time.time()
+        start_time = self._started_at
 
         try:
             if self._mock_mode:
@@ -224,8 +271,11 @@ class Worker:
                 result = await self._real_execute()
 
             result.execution_time = time.time() - start_time
+            self._state = WorkerState.COMPLETED
+            self._finished_at = time.time()
+            self._result = result
 
-            # Reporter dans Memory
+            # Reporter dans Memory (apprentissage AVANT cleanup)
             self._report_to_memory(result)
 
             return result
@@ -240,8 +290,58 @@ class Worker:
                 execution_time=execution_time,
                 errors=[f"{type(e).__name__}: {e}"],
             )
+            self._state = WorkerState.FAILED
+            self._finished_at = time.time()
+            self._result = result
+
+            # Reporter dans Memory MÊME en cas d'échec (apprentissage)
             self._report_to_memory(result)
             return result
+
+    def cleanup(self) -> None:
+        """
+        Libère toutes les ressources du Worker.
+
+        Appelé automatiquement par le context manager async,
+        ou manuellement par le WorkerLifecycleManager.
+
+        IMPORTANT : L'apprentissage dans Memory est DÉJÀ fait
+        dans execute() AVANT que cleanup ne soit appelé.
+        """
+        # Libérer les références lourdes
+        self.tools = []
+        self.system_prompt = ""
+        self.subtasks = []
+        self.memory = None
+        self.health_monitor = None
+
+        # Marquer comme fermé
+        self._state = WorkerState.CLOSED
+        if not self._finished_at:
+            self._finished_at = time.time()
+
+    async def __aenter__(self):
+        """Permet l'utilisation avec `async with`."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Garantit le cleanup même en cas d'exception."""
+        self.cleanup()
+        return False  # Ne pas avaler les exceptions
+
+    def get_lifecycle_info(self) -> dict:
+        """Retourne les infos complètes du cycle de vie."""
+        return {
+            "worker_id": self._worker_id,
+            "worker_type": self.worker_type.value,
+            "state": self._state.value,
+            "task": self.task[:80],
+            "created_at": self._created_at,
+            "started_at": self._started_at,
+            "finished_at": self._finished_at,
+            "lifetime": self.lifetime,
+            "success": self._result.success if self._result else None,
+        }
 
     async def _real_execute(self) -> WorkerResult:
         """

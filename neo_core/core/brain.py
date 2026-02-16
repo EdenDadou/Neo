@@ -47,7 +47,7 @@ from neo_core.oauth import (
     OAUTH_BETA_HEADER,
 )
 from neo_core.teams.factory import WorkerFactory, TaskAnalysis
-from neo_core.teams.worker import WorkerType, WorkerResult
+from neo_core.teams.worker import WorkerType, WorkerResult, WorkerState
 
 if TYPE_CHECKING:
     from neo_core.core.memory_agent import MemoryAgent
@@ -108,6 +108,88 @@ class BrainDecision:
     reasoning: str = ""  # Stage 3 : justification de la décision
 
 
+class WorkerLifecycleManager:
+    """
+    Registre centralisé des Workers — garantit leur destruction.
+
+    Responsabilités :
+    - Tracker tous les Workers actifs (en cours d'exécution)
+    - Conserver l'historique des Workers terminés (pour stats)
+    - Garantir que AUCUN Worker ne reste en mémoire sans cleanup
+    """
+
+    def __init__(self, max_history: int = 50):
+        self._active: dict[str, object] = {}   # worker_id → Worker (en cours)
+        self._history: list[dict] = []          # Historique des Workers terminés
+        self._max_history = max_history
+        self._total_created = 0
+        self._total_cleaned = 0
+
+    def register(self, worker) -> str:
+        """Enregistre un Worker dans le registre. Retourne son ID."""
+        self._active[worker.worker_id] = worker
+        self._total_created += 1
+        return worker.worker_id
+
+    def unregister(self, worker) -> None:
+        """
+        Retire un Worker du registre et enregistre son historique.
+
+        IMPORTANT : Doit être appelé APRÈS que Memory a récupéré
+        les apprentissages et APRÈS cleanup().
+        """
+        # Sauvegarder les infos avant suppression
+        info = worker.get_lifecycle_info()
+        self._history.append(info)
+
+        # Limiter l'historique
+        if len(self._history) > self._max_history:
+            self._history = self._history[-self._max_history:]
+
+        # Retirer du registre actif
+        self._active.pop(worker.worker_id, None)
+        self._total_cleaned += 1
+
+    def get_active_workers(self) -> list[dict]:
+        """Retourne la liste des Workers actuellement actifs."""
+        return [w.get_lifecycle_info() for w in self._active.values()]
+
+    def get_history(self, limit: int = 10) -> list[dict]:
+        """Retourne les N derniers Workers terminés."""
+        return self._history[-limit:]
+
+    def get_stats(self) -> dict:
+        """Statistiques du lifecycle manager."""
+        return {
+            "active_count": len(self._active),
+            "total_created": self._total_created,
+            "total_cleaned": self._total_cleaned,
+            "leaked": self._total_created - self._total_cleaned - len(self._active),
+            "history_size": len(self._history),
+        }
+
+    def cleanup_all(self) -> int:
+        """
+        Force le cleanup de TOUS les Workers encore actifs.
+
+        Retourne le nombre de Workers nettoyés.
+        Utile lors du shutdown du système.
+        """
+        count = 0
+        for worker_id in list(self._active.keys()):
+            worker = self._active.get(worker_id)
+            if worker:
+                try:
+                    worker.cleanup()
+                    self.unregister(worker)
+                    count += 1
+                except Exception:
+                    # Force la suppression même si cleanup échoue
+                    self._active.pop(worker_id, None)
+                    count += 1
+        return count
+
+
 @dataclass
 class Brain:
     """
@@ -130,10 +212,12 @@ class Brain:
     _health: Optional[HealthMonitor] = None
     _retry_config: Optional[RetryConfig] = None
     _model_config: Optional[object] = None
+    _worker_manager: Optional[WorkerLifecycleManager] = None
 
     def __post_init__(self):
         self._mock_mode = self.config.is_mock_mode()
         self._model_config = get_agent_model("brain")
+        self._worker_manager = WorkerLifecycleManager()
 
         # Stage 5 : Initialiser la résilience
         retry, circuit, health = create_resilience_from_config(self.config.resilience)
@@ -156,6 +240,13 @@ class Brain:
         if self._health is None:
             _, _, self._health = create_resilience_from_config(self.config.resilience)
         return self._health
+
+    @property
+    def worker_manager(self) -> WorkerLifecycleManager:
+        """Accès au gestionnaire de cycle de vie des Workers."""
+        if self._worker_manager is None:
+            self._worker_manager = WorkerLifecycleManager()
+        return self._worker_manager
 
     def get_model_info(self) -> dict:
         """Retourne les infos du modèle utilisé par Brain."""
@@ -191,7 +282,18 @@ class Brain:
         if self.memory:
             report["agent_models"]["memory"] = self.memory.get_model_info()
 
+        # Worker Lifecycle stats
+        report["workers"] = self.worker_manager.get_stats()
+
         return report
+
+    def get_active_workers(self) -> list[dict]:
+        """Retourne les Workers actuellement actifs."""
+        return self.worker_manager.get_active_workers()
+
+    def get_worker_history(self, limit: int = 10) -> list[dict]:
+        """Retourne l'historique des derniers Workers exécutés."""
+        return self.worker_manager.get_history(limit)
 
     # ─── Initialisation LLM / Auth ──────────────────────────
 
@@ -588,8 +690,18 @@ class Brain:
                                     memory_context: str,
                                     analysis: TaskAnalysis | None = None) -> str:
         """
-        Crée et exécute un Worker pour une tâche complexe.
-        Stage 5 : Passe le health monitor au Worker.
+        Crée, exécute et détruit un Worker pour une tâche.
+
+        Cycle de vie garanti :
+        1. Factory crée le Worker
+        2. Worker enregistré dans le WorkerLifecycleManager
+        3. execute() → Memory récupère l'apprentissage (report_to_memory)
+        4. Brain._learn_from_result() → LearningEngine apprend
+        5. Worker.cleanup() → ressources libérées
+        6. Worker retiré du registre
+
+        Le `async with` garantit que cleanup() est TOUJOURS appelé,
+        même si une exception survient pendant l'exécution.
         """
         try:
             worker_type = WorkerType(decision.worker_type)
@@ -608,15 +720,33 @@ class Brain:
         # Stage 5 : Passer le health monitor au Worker
         worker.health_monitor = self._health
 
-        result = await worker.execute()
+        # ── Lifecycle géré par context manager ──
+        # Garantit : execute → learn → cleanup, quoi qu'il arrive
+        async with worker:
+            # 1. Enregistrer dans le registre (RUNNING)
+            self.worker_manager.register(worker)
 
-        # Apprentissage
-        await self._learn_from_result(request, decision, result)
+            try:
+                # 2. Exécuter (Memory.report_to_memory fait DANS execute)
+                result = await worker.execute()
 
-        if result.success:
-            return result.output
-        else:
-            return f"[Worker {worker_type.value} échoué] {result.output}"
+                # 3. Brain apprend du résultat (LearningEngine)
+                await self._learn_from_result(request, decision, result)
+
+                if result.success:
+                    output = result.output
+                else:
+                    output = f"[Worker {worker_type.value} échoué] {result.output}"
+
+            except Exception as e:
+                output = f"[Worker {worker_type.value} crash] {type(e).__name__}: {e}"
+
+            finally:
+                # 4. Retirer du registre (APRÈS apprentissage, AVANT cleanup)
+                # Note: cleanup() sera appelé par __aexit__ juste après
+                self.worker_manager.unregister(worker)
+
+            return output
 
     async def _learn_from_result(self, request: str, decision: BrainDecision,
                                   result: WorkerResult) -> None:

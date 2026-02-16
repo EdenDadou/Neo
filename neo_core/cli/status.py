@@ -151,6 +151,66 @@ def run_status():
 
     console.print(worker_table)
 
+    # ─── Worker Lifecycle ──────────────────────────────────────
+    console.print()
+    try:
+        wm_stats = brain.worker_manager.get_stats()
+        lifecycle_table = Table(title="Worker Lifecycle", show_header=False, border_style="dim")
+        lifecycle_table.add_column("Métrique", style="bold")
+        lifecycle_table.add_column("Valeur")
+
+        active_count = wm_stats.get("active_count", 0)
+        active_color = "yellow" if active_count > 0 else "green"
+        lifecycle_table.add_row(
+            "Workers actifs",
+            f"[{active_color}]{active_count}[/{active_color}]"
+        )
+        lifecycle_table.add_row("Total créés", str(wm_stats.get("total_created", 0)))
+        lifecycle_table.add_row("Total nettoyés", str(wm_stats.get("total_cleaned", 0)))
+
+        leaked = wm_stats.get("leaked", 0)
+        if leaked > 0:
+            lifecycle_table.add_row("⚠ Fuites mémoire", f"[red]{leaked}[/red]")
+
+        console.print(lifecycle_table)
+
+        # Historique des derniers Workers
+        history = brain.get_worker_history(limit=5)
+        if history:
+            hist_table = Table(title="Derniers Workers", show_header=True, border_style="dim")
+            hist_table.add_column("ID", style="dim")
+            hist_table.add_column("Type", style="bold")
+            hist_table.add_column("État")
+            hist_table.add_column("Durée")
+            hist_table.add_column("Tâche")
+
+            for w in reversed(history):
+                state = w.get("state", "?")
+                state_color = {
+                    "closed": "green",
+                    "completed": "cyan",
+                    "failed": "red",
+                    "running": "yellow",
+                }.get(state, "dim")
+
+                lifetime = w.get("lifetime", 0)
+                success = w.get("success")
+                result_icon = "✓" if success else "✗" if success is False else "?"
+
+                hist_table.add_row(
+                    w.get("worker_id", "?"),
+                    w.get("worker_type", "?"),
+                    f"[{state_color}]{state} {result_icon}[/{state_color}]",
+                    f"{lifetime:.1f}s",
+                    (w.get("task", "")[:40] + "...") if len(w.get("task", "")) > 40 else w.get("task", ""),
+                )
+
+            console.print()
+            console.print(hist_table)
+
+    except Exception:
+        pass
+
     # ─── Health Monitor (si disponible) ────────────────────────
     try:
         health = brain.get_system_health()

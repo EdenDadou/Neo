@@ -589,3 +589,227 @@ class TestBackwardCompatibility:
     def test_brain_connect_memory(self, brain, memory):
         """connect_memory fonctionne comme avant."""
         assert brain.memory == memory
+
+
+# ═══════════════════════════════════════════════════════════
+# WORKER LIFECYCLE MANAGEMENT
+# ═══════════════════════════════════════════════════════════
+
+class TestWorkerLifecycle:
+    """Tests du cycle de vie complet des Workers."""
+
+    def test_worker_has_lifecycle_fields(self, config):
+        """Un Worker a un ID, un state, et des timestamps."""
+        from neo_core.teams.worker import WorkerState
+        worker = Worker(
+            config=config,
+            worker_type=WorkerType.RESEARCHER,
+            task="test lifecycle",
+        )
+        assert worker.worker_id  # Non vide
+        assert len(worker.worker_id) == 8  # UUID tronqué
+        assert worker.state == WorkerState.CREATED
+        assert worker._created_at > 0
+        assert worker.is_active is True
+
+    @pytest.mark.asyncio
+    async def test_worker_state_transitions(self, config):
+        """Le state passe CREATED → RUNNING → COMPLETED après execute."""
+        from neo_core.teams.worker import WorkerState
+        worker = Worker(
+            config=config,
+            worker_type=WorkerType.GENERIC,
+            task="test state transitions",
+        )
+        assert worker.state == WorkerState.CREATED
+
+        result = await worker.execute()
+
+        assert worker.state == WorkerState.COMPLETED
+        assert result.success is True
+        assert worker._finished_at > worker._started_at
+
+    @pytest.mark.asyncio
+    async def test_worker_cleanup_releases_resources(self, config):
+        """cleanup() libère les outils, prompt, memory, et passe en CLOSED."""
+        from neo_core.teams.worker import WorkerState
+        worker = Worker(
+            config=config,
+            worker_type=WorkerType.RESEARCHER,
+            task="test cleanup",
+            tools=["fake_tool_1", "fake_tool_2"],
+        )
+        assert len(worker.tools) == 2
+
+        await worker.execute()
+        worker.cleanup()
+
+        assert worker.state == WorkerState.CLOSED
+        assert worker.tools == []
+        assert worker.system_prompt == ""
+        assert worker.memory is None
+        assert worker.health_monitor is None
+        assert worker.is_active is False
+
+    @pytest.mark.asyncio
+    async def test_worker_context_manager_guarantees_cleanup(self, config):
+        """async with Worker garantit cleanup même sans appel explicite."""
+        from neo_core.teams.worker import WorkerState
+
+        worker = Worker(
+            config=config,
+            worker_type=WorkerType.GENERIC,
+            task="test context manager",
+        )
+
+        async with worker:
+            await worker.execute()
+            assert worker.state == WorkerState.COMPLETED
+
+        # Après sortie du context manager → CLOSED
+        assert worker.state == WorkerState.CLOSED
+        assert worker.tools == []
+
+    @pytest.mark.asyncio
+    async def test_context_manager_cleanup_on_exception(self, config):
+        """async with Worker garantit cleanup même si une exception survient."""
+        from neo_core.teams.worker import WorkerState
+
+        worker = Worker(
+            config=config,
+            worker_type=WorkerType.GENERIC,
+            task="test exception cleanup",
+        )
+
+        with pytest.raises(ValueError):
+            async with worker:
+                raise ValueError("Simulated crash")
+
+        # cleanup() a quand même été appelé
+        assert worker.state == WorkerState.CLOSED
+
+    def test_worker_lifecycle_info(self, config):
+        """get_lifecycle_info() retourne un dict complet."""
+        worker = Worker(
+            config=config,
+            worker_type=WorkerType.ANALYST,
+            task="analyse des tendances du marché",
+        )
+        info = worker.get_lifecycle_info()
+        assert info["worker_id"] == worker.worker_id
+        assert info["worker_type"] == "analyst"
+        assert info["state"] == "created"
+        assert "analyse des tendances" in info["task"]
+
+    def test_lifecycle_manager_register_unregister(self, config):
+        """Le manager track les Workers actifs et l'historique."""
+        from neo_core.core.brain import WorkerLifecycleManager
+        manager = WorkerLifecycleManager()
+
+        w1 = Worker(config=config, worker_type=WorkerType.RESEARCHER, task="task1")
+        w2 = Worker(config=config, worker_type=WorkerType.CODER, task="task2")
+
+        manager.register(w1)
+        manager.register(w2)
+
+        assert len(manager.get_active_workers()) == 2
+        assert manager.get_stats()["active_count"] == 2
+        assert manager.get_stats()["total_created"] == 2
+
+        # Unregister w1
+        w1.cleanup()
+        manager.unregister(w1)
+
+        assert len(manager.get_active_workers()) == 1
+        assert manager.get_stats()["active_count"] == 1
+        assert manager.get_stats()["total_cleaned"] == 1
+        assert len(manager.get_history()) == 1
+
+    def test_lifecycle_manager_cleanup_all(self, config):
+        """cleanup_all() force la destruction de tous les Workers actifs."""
+        from neo_core.core.brain import WorkerLifecycleManager
+        manager = WorkerLifecycleManager()
+
+        for i in range(5):
+            w = Worker(config=config, worker_type=WorkerType.GENERIC, task=f"task{i}")
+            manager.register(w)
+
+        assert manager.get_stats()["active_count"] == 5
+
+        cleaned = manager.cleanup_all()
+        assert cleaned == 5
+        assert manager.get_stats()["active_count"] == 0
+        assert manager.get_stats()["total_cleaned"] == 5
+
+    def test_lifecycle_manager_leak_detection(self, config):
+        """Le manager détecte les fuites (Workers créés mais jamais nettoyés)."""
+        from neo_core.core.brain import WorkerLifecycleManager
+        manager = WorkerLifecycleManager()
+
+        w = Worker(config=config, worker_type=WorkerType.GENERIC, task="leaky")
+        manager.register(w)
+
+        # Simuler un "oubli" de unregister : le worker est encore actif
+        stats = manager.get_stats()
+        assert stats["active_count"] == 1
+        # Pas de fuite tant que le Worker est actif
+        assert stats["leaked"] == 0
+
+    @pytest.mark.asyncio
+    async def test_brain_execute_with_worker_lifecycle(self, brain):
+        """Brain._execute_with_worker utilise le lifecycle manager."""
+        decision = BrainDecision(
+            action="delegate_worker",
+            subtasks=["sous-tâche test"],
+            confidence=0.8,
+            worker_type="researcher",
+            reasoning="test lifecycle integration",
+        )
+
+        result = await brain._execute_with_worker("recherche test lifecycle", decision, "")
+
+        # Le Worker a été exécuté et nettoyé
+        assert "Worker" in result or "recherche" in result.lower() or "Tâche" in result
+        stats = brain.worker_manager.get_stats()
+        assert stats["total_created"] >= 1
+        assert stats["total_cleaned"] >= 1
+        assert stats["active_count"] == 0  # Aucun Worker actif après exécution
+
+    @pytest.mark.asyncio
+    async def test_brain_worker_history_after_execution(self, brain):
+        """Après exécution, l'historique contient le Worker terminé."""
+        decision = BrainDecision(
+            action="delegate_worker",
+            subtasks=["test"],
+            confidence=0.8,
+            worker_type="generic",
+        )
+
+        await brain._execute_with_worker("test historique", decision, "")
+
+        history = brain.get_worker_history(limit=5)
+        assert len(history) >= 1
+        last = history[-1]
+        # L'historique capture l'état au moment de unregister
+        # (avant que __aexit__ appelle cleanup → CLOSED)
+        assert last["state"] in ("completed", "closed")
+        assert last["worker_type"] == "generic"
+
+    @pytest.mark.asyncio
+    async def test_memory_learns_before_cleanup(self, brain, memory):
+        """Memory récupère l'apprentissage AVANT que le Worker soit détruit."""
+        decision = BrainDecision(
+            action="delegate_worker",
+            subtasks=["test apprentissage"],
+            confidence=0.8,
+            worker_type="researcher",
+        )
+
+        await brain._execute_with_worker("recherche pour test apprentissage", decision, "")
+
+        # Vérifier que Memory a enregistré quelque chose
+        stats = memory.get_stats()
+        assert stats.get("total_entries", 0) > 0
+
+        # Le Worker est bien fermé (plus actif)
+        assert brain.worker_manager.get_stats()["active_count"] == 0
