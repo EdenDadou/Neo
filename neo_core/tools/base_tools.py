@@ -77,12 +77,18 @@ def web_search_tool(query: str) -> str:
             f"   Un tutoriel étape par étape pour maîtriser le sujet."
         )
 
-    # Mode réel — utilise duckduckgo-search (résultats structurés)
+    # Mode réel — utilise ddgs (anciennement duckduckgo-search)
     try:
-        from duckduckgo_search import DDGS
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # Supprimer les warnings de renommage
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
 
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
+            results = list(ddgs.text(query, max_results=8))
 
         if not results:
             return f"Aucun résultat trouvé pour '{query}'."
@@ -91,13 +97,13 @@ def web_search_tool(query: str) -> str:
         for i, r in enumerate(results, 1):
             title = r.get("title", "Sans titre")
             href = r.get("href", "")
-            body = r.get("body", "")[:200]
+            body = r.get("body", "")[:300]
             formatted.append(f"{i}. «{title}» — {href}\n   {body}")
 
         return "\n".join(formatted)
 
     except ImportError:
-        # Fallback si duckduckgo-search n'est pas installé
+        # Fallback httpx si ni ddgs ni duckduckgo-search installé
         try:
             import httpx
             response = httpx.get(

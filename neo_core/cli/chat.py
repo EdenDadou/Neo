@@ -108,6 +108,11 @@ def bootstrap():
     Initialise et connecte les 3 agents du Neo Core.
     Retourne l'agent Vox prêt à communiquer.
     """
+    import warnings
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    warnings.filterwarnings("ignore", message=".*RuntimeWarning.*")
+    warnings.filterwarnings("ignore", message=".*renamed.*")
+
     from neo_core.core.brain import Brain
     from neo_core.core.memory_agent import MemoryAgent
     from neo_core.core.vox import Vox
