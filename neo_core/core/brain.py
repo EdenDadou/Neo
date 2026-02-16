@@ -78,25 +78,36 @@ class Brain:
         """
         Initialise le LLM réel via LangChain.
         Supporte les clés API classiques ET les tokens OAuth Anthropic.
+
+        Pour les tokens OAuth (sk-ant-oat...), on sous-classe ChatAnthropic
+        pour injecter auth_token au lieu de api_key dans les clients internes.
+        C'est nécessaire car _client/_async_client sont des cached_property
+        qui recréent le client à chaque accès.
         """
         try:
             from langchain_anthropic import ChatAnthropic
             api_key = self.config.llm.api_key
 
             if self._is_oauth_token(api_key):
-                # Token OAuth → crée ChatAnthropic avec une clé placeholder
-                # puis remplace les clients internes par des clients OAuth
-                import anthropic
+                # Token OAuth → sous-classe qui injecte auth_token
+                oauth_token = api_key
 
-                self._llm = ChatAnthropic(
+                class _ChatAnthropicOAuth(ChatAnthropic):
+                    """ChatAnthropic modifié pour l'authentification OAuth Bearer."""
+
+                    @property
+                    def _client_params(self):
+                        params = super()._client_params
+                        params["api_key"] = None  # Désactive x-api-key
+                        params["auth_token"] = oauth_token  # Active Bearer
+                        return params
+
+                self._llm = _ChatAnthropicOAuth(
                     model=self.config.llm.model,
                     temperature=self.config.llm.temperature,
                     max_tokens=self.config.llm.max_tokens,
                     anthropic_api_key="placeholder",
                 )
-                # Remplace les clients par des clients authentifiés via Bearer token
-                self._llm._client = anthropic.Anthropic(auth_token=api_key)
-                self._llm._async_client = anthropic.AsyncAnthropic(auth_token=api_key)
             else:
                 # Clé API classique
                 self._llm = ChatAnthropic(
