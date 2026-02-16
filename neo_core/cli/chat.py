@@ -8,6 +8,7 @@ Usage : neo chat
 """
 
 import asyncio
+import os
 import sys
 
 from rich.console import Console
@@ -15,6 +16,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from neo_core.config import NeoConfig
+from neo_core.core.guardian import GracefulShutdown, StateSnapshot, EXIT_CODE_RESTART
 
 console = Console()
 
@@ -313,6 +315,7 @@ def print_help():
         "  [cyan]/persona[/cyan]   — Personnalité de Neo\n"
         "  [cyan]/profile[/cyan]   — Profil utilisateur\n"
         "  [cyan]/reflect[/cyan]   — Force une auto-réflexion\n"
+        "  [cyan]/restart[/cyan]   — Redémarrer Neo (Guardian)\n"
         "  [cyan]/quit[/cyan]      — Quitter le chat\n",
         title="[bold]Aide[/bold]",
         border_style="dim",
@@ -377,6 +380,32 @@ async def conversation_loop(vox):
     """Boucle principale de conversation."""
     config = vox.config
     heartbeat_manager = None
+    guardian_mode = os.environ.get("NEO_GUARDIAN_MODE") == "1"
+    state_dir = config.data_dir / "guardian" if hasattr(config, "data_dir") else __import__("pathlib").Path("data/guardian")
+
+    # --- Guardian : GracefulShutdown ---
+    shutdown_handler = GracefulShutdown()
+    shutdown_handler.set_state_dir(state_dir)
+    shutdown_handler.install_handlers()
+
+    # --- Guardian : Charger le state snapshot précédent ---
+    previous_state = StateSnapshot.load(state_dir)
+    recovery_message = None
+    if previous_state:
+        reason_labels = {
+            "signal": "signal système",
+            "crash": "crash",
+            "user_quit": "arrêt utilisateur",
+            "guardian_restart": "restart Guardian",
+        }
+        reason = reason_labels.get(previous_state.shutdown_reason, previous_state.shutdown_reason)
+        recovery_message = (
+            f"Redémarré après {reason} "
+            f"(uptime précédent: {previous_state.uptime_seconds:.0f}s, "
+            f"restarts: {previous_state.restart_count})"
+        )
+        # Nettoyer le state après chargement
+        StateSnapshot.clear(state_dir)
 
     # Démarrer le heartbeat en arrière-plan
     try:
@@ -400,7 +429,25 @@ async def conversation_loop(vox):
     except Exception:
         pass
 
+    # --- Guardian : Callbacks de cleanup ---
+    def cleanup_heartbeat():
+        if heartbeat_manager:
+            heartbeat_manager.stop()
+
+    shutdown_handler.add_cleanup_callback(cleanup_heartbeat)
+
     print_banner(config)
+
+    # Message de recovery si redémarrage
+    if recovery_message:
+        console.print(
+            f"\n  [bold yellow]⟳ {recovery_message}[/bold yellow]"
+        )
+
+    if guardian_mode:
+        console.print(
+            "  [dim green]✓ Mode Guardian actif — auto-restart en cas de crash[/dim green]"
+        )
 
     # Message d'accueil personnalisé
     console.print(
@@ -437,8 +484,10 @@ async def conversation_loop(vox):
         except (KeyboardInterrupt, EOFError):
             if heartbeat_manager:
                 heartbeat_manager.stop()
+            shutdown_handler.save_state(shutdown_reason="signal")
+            shutdown_handler.clear_state()
             console.print("\n[dim]  Au revoir ![/dim]")
-            break
+            sys.exit(0)
 
         user_input = user_input.strip()
         if not user_input:
@@ -449,8 +498,26 @@ async def conversation_loop(vox):
         if cmd in ("/quit", "/exit", "quit", "exit", "q"):
             if heartbeat_manager:
                 heartbeat_manager.stop()
+            # Sauvegarder le state et nettoyer
+            shutdown_handler.save_state(
+                shutdown_reason="user_quit",
+                turn_count=0,
+                heartbeat_pulse_count=heartbeat_manager.get_status()["pulse_count"] if heartbeat_manager else 0,
+            )
+            shutdown_handler.clear_state()  # Quit normal → pas besoin du state
             console.print("[dim]  Au revoir ![/dim]")
-            break
+            sys.exit(0)
+
+        if cmd in ("/restart", "restart"):
+            console.print("[bold yellow]  ⟳ Redémarrage de Neo...[/bold yellow]")
+            if heartbeat_manager:
+                heartbeat_manager.stop()
+            shutdown_handler.save_state(
+                shutdown_reason="guardian_restart",
+                turn_count=0,
+                heartbeat_pulse_count=heartbeat_manager.get_status()["pulse_count"] if heartbeat_manager else 0,
+            )
+            sys.exit(EXIT_CODE_RESTART)  # Code 42 → Guardian relance immédiatement
 
         if cmd in ("/status", "status"):
             print_status(vox)

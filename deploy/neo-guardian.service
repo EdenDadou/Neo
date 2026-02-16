@@ -1,0 +1,50 @@
+# Neo Core Guardian — Systemd Service
+# =====================================
+# Garantit que Neo reste vivant, même après reboot serveur.
+#
+# Installation :
+#   sudo cp deploy/neo-guardian.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable neo-guardian
+#   sudo systemctl start neo-guardian
+#
+# Commandes :
+#   sudo systemctl status neo-guardian    # Voir le statut
+#   sudo journalctl -u neo-guardian -f    # Voir les logs
+#   sudo systemctl restart neo-guardian   # Redémarrer
+
+[Unit]
+Description=Neo Core Guardian — AI Multi-Agent System
+Documentation=https://github.com/EdenDadou/Neo
+After=network.target
+StartLimitIntervalSec=3600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=neo
+Group=neo
+WorkingDirectory=/opt/neo-core
+ExecStart=/opt/neo-core/.venv/bin/neo guardian
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=NEO_ENV=production
+
+# Timeouts
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/neo-core/data
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=neo-guardian
+
+[Install]
+WantedBy=multi-user.target

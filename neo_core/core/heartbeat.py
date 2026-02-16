@@ -183,6 +183,10 @@ class HeartbeatManager:
         # 4. Auto-réflexion de la personnalité (Stage 9)
         await self._perform_personality_reflection()
 
+        # 5. State snapshot périodique pour Guardian (Stage 10)
+        if self._pulse_count > 0 and self._pulse_count % 10 == 0:
+            self._save_guardian_state()
+
     # ─── Avancement des Epics ─────────────────────────
 
     async def _advance_epics(self, registry) -> None:
@@ -378,6 +382,34 @@ class HeartbeatManager:
                 logger.info("[Heartbeat] Auto-réflexion effectuée: %s", result.get("summary", ""))
         except Exception as e:
             logger.error("[Heartbeat] Erreur auto-réflexion: %s", e)
+
+    # ─── State snapshot pour Guardian (Stage 10) ──────
+
+    def _save_guardian_state(self) -> None:
+        """Sauvegarde un state snapshot périodique pour le Guardian."""
+        try:
+            from neo_core.core.guardian import StateSnapshot
+            from pathlib import Path
+
+            state_dir = Path("data/guardian")
+            registry = self.memory.task_registry if self.memory else None
+            active_tasks = []
+            if registry:
+                try:
+                    active = registry.get_active_tasks()
+                    active_tasks = [t.id for t in active[:10]]
+                except Exception:
+                    pass
+
+            snapshot = StateSnapshot(
+                heartbeat_pulse_count=self._pulse_count,
+                active_tasks=active_tasks,
+                shutdown_reason="heartbeat_snapshot",
+            )
+            snapshot.save(state_dir)
+            logger.debug("[Heartbeat] State snapshot sauvegardé (pulse #%d)", self._pulse_count)
+        except Exception as e:
+            logger.error("[Heartbeat] Erreur state snapshot: %s", e)
 
     # ─── Émission d'événements ────────────────────────
 

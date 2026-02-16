@@ -28,6 +28,7 @@ def print_usage():
     {CYAN}setup{RESET}      Onboarding complet (install deps + config + lance le chat)
     {CYAN}chat{RESET}       Lancer le chat directement
     {CYAN}status{RESET}     Afficher la santé du système
+    {CYAN}guardian{RESET}    Lancer Neo avec le Guardian (auto-restart)
     {CYAN}version{RESET}    Afficher la version
 
   {BOLD}Première utilisation :{RESET}
@@ -60,8 +61,18 @@ def main():
     elif command in ("help", "h"):
         print_usage()
 
+    elif command == "guardian":
+        from neo_core.core.guardian import Guardian, GuardianConfig
+        import logging
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
+        print(f"\n  {CYAN}{BOLD}Neo Guardian{RESET} — Surveillance active")
+        print(f"  {DIM}Neo sera relancé automatiquement en cas de crash.{RESET}")
+        print(f"  {DIM}Ctrl+C pour arrêter le Guardian.{RESET}\n")
+        guardian = Guardian(GuardianConfig())
+        guardian.run()
+
     elif command == "version":
-        print("Neo Core v0.5.0 — Stage 5")
+        print("Neo Core v0.7.1 — Stage 10")
 
     else:
         print(f"\n  Commande inconnue : '{sys.argv[1]}'")
