@@ -35,8 +35,87 @@ def _load_wizard_config() -> dict:
 
 
 @dataclass
+class AgentModelConfig:
+    """Configuration du modèle pour un agent spécifique."""
+    model: str = "claude-sonnet-4-5-20250929"
+    temperature: float = 0.7
+    max_tokens: int = 4096
+
+
+# ─── Modèles par agent ──────────────────────────────────
+# Chaque agent a un modèle choisi selon ses besoins et les ressources.
+#
+# Haiku  = rapide, économique, idéal pour les tâches simples
+# Sonnet = puissant, pour l'orchestration et les tâches complexes
+# Opus   = premium, réservé aux tâches critiques (non utilisé par défaut)
+
+AGENT_MODELS = {
+    # Vox : interface utilisateur — besoin de rapidité, pas de raisonnement lourd
+    "vox": AgentModelConfig(
+        model="claude-haiku-4-5-20251001",
+        temperature=0.6,
+        max_tokens=2048,
+    ),
+    # Brain : orchestrateur — besoin de raisonnement, planification, décision
+    "brain": AgentModelConfig(
+        model="claude-sonnet-4-5-20250929",
+        temperature=0.7,
+        max_tokens=4096,
+    ),
+    # Memory : consolidation intelligente — tâches courtes, besoin d'efficacité
+    "memory": AgentModelConfig(
+        model="claude-haiku-4-5-20251001",
+        temperature=0.3,
+        max_tokens=2048,
+    ),
+    # Workers par type — les tâches complexes méritent Sonnet
+    "worker:researcher": AgentModelConfig(
+        model="claude-sonnet-4-5-20250929",
+        temperature=0.5,
+        max_tokens=4096,
+    ),
+    "worker:coder": AgentModelConfig(
+        model="claude-sonnet-4-5-20250929",
+        temperature=0.3,
+        max_tokens=4096,
+    ),
+    "worker:analyst": AgentModelConfig(
+        model="claude-sonnet-4-5-20250929",
+        temperature=0.5,
+        max_tokens=4096,
+    ),
+    # Workers légers — Haiku suffit
+    "worker:summarizer": AgentModelConfig(
+        model="claude-haiku-4-5-20251001",
+        temperature=0.5,
+        max_tokens=2048,
+    ),
+    "worker:writer": AgentModelConfig(
+        model="claude-haiku-4-5-20251001",
+        temperature=0.8,
+        max_tokens=4096,
+    ),
+    "worker:translator": AgentModelConfig(
+        model="claude-haiku-4-5-20251001",
+        temperature=0.3,
+        max_tokens=2048,
+    ),
+    "worker:generic": AgentModelConfig(
+        model="claude-haiku-4-5-20251001",
+        temperature=0.5,
+        max_tokens=2048,
+    ),
+}
+
+
+def get_agent_model(agent_name: str) -> AgentModelConfig:
+    """Récupère la config modèle pour un agent donné."""
+    return AGENT_MODELS.get(agent_name, AGENT_MODELS["brain"])
+
+
+@dataclass
 class LLMConfig:
-    """Configuration du modèle de langage."""
+    """Configuration du modèle de langage (legacy — utilisée pour l'auth globale)."""
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-5-20250929"
     api_key: Optional[str] = field(default=None, repr=False)

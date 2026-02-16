@@ -74,7 +74,8 @@ def run_status():
         memory = MemoryAgent(config=config)
         memory.initialize()
         memory_status = "[green]✓ Opérationnel[/green]"
-        memory_detail = f"[dim]{memory.memory_count()} souvenirs[/dim]"
+        stats = memory.get_stats()
+        memory_detail = f"[dim]{stats.get('total_entries', 0)} souvenirs[/dim]"
     except Exception as e:
         memory_status = f"[red]✗ Erreur[/red]"
         memory_detail = f"[dim]{e}[/dim]"
@@ -111,14 +112,44 @@ def run_status():
 
     agents_table = Table(title="Agents", show_header=True, border_style="dim")
     agents_table.add_column("Agent", style="bold")
+    agents_table.add_column("Modèle", style="cyan")
     agents_table.add_column("Statut")
     agents_table.add_column("Détails")
 
-    agents_table.add_row("Memory", memory_status, memory_detail)
-    agents_table.add_row("Brain", brain_status, brain_detail)
-    agents_table.add_row("Vox", vox_status, vox_detail)
+    # Récupérer les infos modèle
+    from neo_core.config import get_agent_model
+    vox_model = get_agent_model("vox").model.split("-")[1] if get_agent_model("vox") else "?"
+    brain_model = get_agent_model("brain").model.split("-")[1] if get_agent_model("brain") else "?"
+    memory_model = get_agent_model("memory").model.split("-")[1] if get_agent_model("memory") else "?"
+
+    agents_table.add_row("Vox", f"[cyan]{vox_model}[/cyan]", vox_status, vox_detail)
+    agents_table.add_row("Brain", f"[cyan]{brain_model}[/cyan]", brain_status, brain_detail)
+    agents_table.add_row("Memory", f"[cyan]{memory_model}[/cyan]", memory_status, memory_detail)
 
     console.print(agents_table)
+
+    # ─── Worker Models ─────────────────────────────────────────
+    console.print()
+    worker_table = Table(title="Worker Models", show_header=True, border_style="dim")
+    worker_table.add_column("Type", style="bold")
+    worker_table.add_column("Modèle", style="cyan")
+    worker_table.add_column("Rôle")
+
+    worker_types = {
+        "researcher": "Recherche web, données temps réel",
+        "coder": "Code, debug, développement",
+        "analyst": "Analyse de données, tendances",
+        "summarizer": "Résumé, synthèse",
+        "writer": "Rédaction, contenu",
+        "translator": "Traduction",
+        "generic": "Tâches générales",
+    }
+    for wtype, role in worker_types.items():
+        wmodel = get_agent_model(f"worker:{wtype}")
+        model_name = wmodel.model.split("-")[1] if wmodel else "?"
+        worker_table.add_row(wtype, f"[cyan]{model_name}[/cyan]", f"[dim]{role}[/dim]")
+
+    console.print(worker_table)
 
     # ─── Health Monitor (si disponible) ────────────────────────
     try:

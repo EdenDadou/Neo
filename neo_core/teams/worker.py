@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from neo_core.core.memory_agent import MemoryAgent
 
-from neo_core.config import NeoConfig
+from neo_core.config import NeoConfig, get_agent_model
 from neo_core.core.resilience import (
     RetryConfig,
     RetryableError,
@@ -197,9 +197,12 @@ class Worker:
     system_prompt: str = ""
     health_monitor: Optional[HealthMonitor] = None
     _mock_mode: bool = False
+    _model_config: Optional[object] = None
 
     def __post_init__(self):
         self._mock_mode = self.config.is_mock_mode()
+        # Modèle sélectionné selon le type de Worker
+        self._model_config = get_agent_model(f"worker:{self.worker_type.value}")
         if not self.system_prompt:
             self.system_prompt = WORKER_SYSTEM_PROMPTS.get(
                 self.worker_type, WORKER_SYSTEM_PROMPTS[WorkerType.GENERIC]
@@ -305,11 +308,11 @@ class Worker:
         total_text_parts = []
 
         for iteration in range(max_iterations):
-            # Payload
+            # Payload — utilise le modèle dédié au type de Worker
             payload = {
-                "model": self.config.llm.model,
-                "max_tokens": self.config.llm.max_tokens,
-                "temperature": self.config.llm.temperature,
+                "model": self._model_config.model,
+                "max_tokens": self._model_config.max_tokens,
+                "temperature": self._model_config.temperature,
                 "system": prompt,
                 "messages": messages,
             }
@@ -491,6 +494,14 @@ class Worker:
             tool_calls=tool_calls,
             metadata={"mock": True},
         )
+
+    def get_model_info(self) -> dict:
+        """Retourne les infos du modèle utilisé par ce Worker."""
+        return {
+            "agent": f"Worker:{self.worker_type.value}",
+            "model": self._model_config.model if self._model_config else "unknown",
+            "task": self.task[:80],
+        }
 
     def _report_to_memory(self, result: WorkerResult) -> None:
         """

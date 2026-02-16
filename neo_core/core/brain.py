@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Optional
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from neo_core.config import NeoConfig, default_config
+from neo_core.config import NeoConfig, default_config, get_agent_model
 from neo_core.core.resilience import (
     RetryConfig,
     RetryableError,
@@ -129,9 +129,11 @@ class Brain:
     _factory: Optional[WorkerFactory] = None
     _health: Optional[HealthMonitor] = None
     _retry_config: Optional[RetryConfig] = None
+    _model_config: Optional[object] = None
 
     def __post_init__(self):
         self._mock_mode = self.config.is_mock_mode()
+        self._model_config = get_agent_model("brain")
 
         # Stage 5 : Initialiser la résilience
         retry, circuit, health = create_resilience_from_config(self.config.resilience)
@@ -155,6 +157,16 @@ class Brain:
             _, _, self._health = create_resilience_from_config(self.config.resilience)
         return self._health
 
+    def get_model_info(self) -> dict:
+        """Retourne les infos du modèle utilisé par Brain."""
+        return {
+            "agent": "Brain",
+            "model": self._model_config.model if self._model_config else "unknown",
+            "role": "Orchestration, décision, raisonnement",
+            "has_llm": not self._mock_mode,
+            "auth_method": self._auth_method,
+        }
+
     def get_system_health(self) -> dict:
         """Retourne le rapport de santé complet du système."""
         report = self.health.get_health_report()
@@ -162,13 +174,23 @@ class Brain:
             "mock_mode": self._mock_mode,
             "auth_method": self._auth_method,
             "oauth_mode": self._oauth_mode,
+            "model": self._model_config.model if self._model_config else "unknown",
         }
         if self.memory and self.memory.is_initialized:
             stats = self.memory.get_stats()
             report["memory"]["stats"] = stats
+            report["memory"]["model"] = self.memory.get_model_info()
             self.health.set_memory_health(True)
         else:
             self.health.set_memory_health(self.memory is not None)
+
+        # Ajouter les infos modèle de chaque agent au rapport
+        report["agent_models"] = {
+            "brain": self.get_model_info(),
+        }
+        if self.memory:
+            report["agent_models"]["memory"] = self.memory.get_model_info()
+
         return report
 
     # ─── Initialisation LLM / Auth ──────────────────────────
@@ -233,17 +255,18 @@ class Brain:
         return False
 
     def _init_langchain(self, api_key: str) -> None:
-        """Init LangChain avec clé API classique."""
+        """Init LangChain avec clé API classique et modèle dédié Brain."""
         from langchain_anthropic import ChatAnthropic
         self._llm = ChatAnthropic(
-            model=self.config.llm.model,
+            model=self._model_config.model,
             api_key=api_key,
-            temperature=self.config.llm.temperature,
-            max_tokens=self.config.llm.max_tokens,
+            temperature=self._model_config.temperature,
+            max_tokens=self._model_config.max_tokens,
         )
         self._oauth_mode = False
         if not self._auth_method:
             self._auth_method = "langchain"
+        print(f"[Brain] LLM initialisé : {self._model_config.model}")
 
     # ─── Connexions ─────────────────────────────────────────
 
@@ -553,7 +576,7 @@ class Brain:
             }
 
             payload = {
-                "model": self.config.llm.model,
+                "model": self._model_config.model,
                 "max_tokens": 1024,
                 "temperature": 0.3,
                 "messages": [{"role": "user", "content": prompt}],
@@ -630,9 +653,9 @@ class Brain:
         }
 
         payload = {
-            "model": self.config.llm.model,
-            "max_tokens": self.config.llm.max_tokens,
-            "temperature": self.config.llm.temperature,
+            "model": self._model_config.model,
+            "max_tokens": self._model_config.max_tokens,
+            "temperature": self._model_config.temperature,
             "system": system_prompt,
             "messages": messages,
         }

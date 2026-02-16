@@ -22,10 +22,43 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from neo_core.config import NeoConfig, default_config
+from neo_core.config import NeoConfig, default_config, get_agent_model
 from neo_core.memory.store import MemoryStore, MemoryRecord
 from neo_core.memory.context import ContextEngine, ContextBlock
 from neo_core.memory.consolidator import MemoryConsolidator
+from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
+
+# Prompt pour la synthèse intelligente de conversations
+MEMORY_SUMMARIZE_PROMPT = """Tu es Memory, le bibliothécaire du système Neo Core.
+Synthétise ces échanges conversationnels en un résumé concis et utile.
+
+Échanges :
+{conversations}
+
+Règles :
+- Identifie les informations clés, préférences utilisateur, et décisions prises
+- Conserve les faits importants, élimine le superflu
+- Structure le résumé en points essentiels
+- Maximum 5-8 points
+- Réponds UNIQUEMENT avec le résumé, rien d'autre.
+"""
+
+# Prompt pour l'enrichissement de contexte
+MEMORY_CONTEXT_PROMPT = """Tu es Memory, le bibliothécaire du système Neo Core.
+À partir des souvenirs retrouvés, synthétise un contexte pertinent pour la requête.
+
+Requête : {query}
+
+Souvenirs retrouvés :
+{memories}
+
+Règles :
+- Sélectionne uniquement les informations pertinentes pour la requête
+- Organise-les de manière logique
+- Sois concis (max 200 mots)
+- Si aucun souvenir n'est pertinent, dis-le clairement
+- Réponds UNIQUEMENT avec le contexte synthétisé, rien d'autre.
+"""
 
 
 @dataclass
@@ -45,9 +78,12 @@ class MemoryAgent:
     _initialized: bool = field(default=False, init=False)
     _turn_count: int = field(default=0, init=False)
     _consolidation_interval: int = 50  # Consolide tous les N tours
+    _llm: Optional[object] = field(default=None, init=False)
+    _mock_mode: bool = field(default=False, init=False)
+    _model_config: Optional[object] = field(default=None, init=False)
 
     def initialize(self) -> None:
-        """Initialise le système mémoire complet."""
+        """Initialise le système mémoire complet + LLM dédié."""
         self._store = MemoryStore(self.config.memory)
         self._store.initialize()
 
@@ -55,6 +91,70 @@ class MemoryAgent:
         self._consolidator = MemoryConsolidator(self._store, self.config)
 
         self._initialized = True
+        self._mock_mode = self.config.is_mock_mode()
+        self._model_config = get_agent_model("memory")
+
+        if not self._mock_mode:
+            self._init_llm()
+
+    def _init_llm(self) -> None:
+        """Initialise le LLM dédié de Memory (Haiku — économique)."""
+        try:
+            api_key = self.config.llm.api_key
+            if is_oauth_token(api_key):
+                self._llm = None  # Sera géré via _memory_llm_call
+            else:
+                from langchain_anthropic import ChatAnthropic
+                self._llm = ChatAnthropic(
+                    model=self._model_config.model,
+                    api_key=api_key,
+                    temperature=self._model_config.temperature,
+                    max_tokens=self._model_config.max_tokens,
+                )
+            print(f"[Memory] LLM initialisé : {self._model_config.model}")
+        except Exception as e:
+            print(f"[Memory] LLM non disponible ({e}), mode heuristique")
+            self._llm = None
+
+    async def _memory_llm_call(self, prompt: str) -> Optional[str]:
+        """Appel LLM dédié pour Memory (synthèse/contexte)."""
+        if self._mock_mode:
+            return None
+
+        api_key = self.config.llm.api_key
+
+        if is_oauth_token(api_key):
+            import httpx
+            valid_token = get_valid_access_token() or api_key
+            headers = {
+                "Authorization": f"Bearer {valid_token}",
+                "anthropic-beta": OAUTH_BETA_HEADER,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            payload = {
+                "model": self._model_config.model,
+                "max_tokens": self._model_config.max_tokens,
+                "temperature": self._model_config.temperature,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers=headers,
+                    json=payload,
+                    timeout=30.0,
+                )
+            if response.status_code == 200:
+                data = response.json()
+                return data["content"][0]["text"]
+            return None
+
+        elif self._llm:
+            result = await self._llm.ainvoke(prompt)
+            return result.content
+
+        return None
 
     @property
     def is_initialized(self) -> bool:
@@ -118,6 +218,30 @@ class MemoryAgent:
         if self._turn_count % self._consolidation_interval == 0:
             self.consolidate()
 
+    async def smart_summarize(self, entries: list[MemoryRecord]) -> Optional[str]:
+        """
+        Synthèse intelligente via LLM (Haiku).
+        Fallback sur la synthèse heuristique si LLM indisponible.
+        """
+        if not entries:
+            return None
+
+        # Tenter la synthèse LLM
+        if not self._mock_mode and (self._llm or is_oauth_token(self.config.llm.api_key or "")):
+            try:
+                conversations = "\n\n".join(
+                    f"[{e.source}] {e.content[:300]}" for e in entries[:20]
+                )
+                prompt = MEMORY_SUMMARIZE_PROMPT.format(conversations=conversations)
+                result = await self._memory_llm_call(prompt)
+                if result:
+                    return result.strip()
+            except Exception:
+                pass
+
+        # Fallback heuristique
+        return self._consolidator.summarize_conversation(entries)
+
     def consolidate(self) -> dict:
         """
         Lance une consolidation complète de la mémoire.
@@ -170,3 +294,14 @@ class MemoryAgent:
         """Ferme proprement les connexions."""
         if self._store:
             self._store.close()
+
+    def get_model_info(self) -> dict:
+        """Retourne les infos du modèle utilisé par Memory."""
+        return {
+            "agent": "Memory",
+            "model": self._model_config.model if self._model_config else "none",
+            "role": "Consolidation et synthèse intelligente",
+            "has_llm": self._llm is not None or (
+                not self._mock_mode and is_oauth_token(self.config.llm.api_key or "")
+            ),
+        }
