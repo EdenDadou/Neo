@@ -212,17 +212,22 @@ class TestRetryBackoff:
     """Tests du retry avec exponential backoff."""
 
     def test_compute_backoff_delay(self):
-        """Les délais croissent exponentiellement."""
+        """Les délais croissent exponentiellement (avec jitter ±20%)."""
         config = RetryConfig(base_delay=1.0, exponential_base=2.0, max_delay=30.0)
-        assert compute_backoff_delay(0, config) == 1.0
-        assert compute_backoff_delay(1, config) == 2.0
-        assert compute_backoff_delay(2, config) == 4.0
-        assert compute_backoff_delay(3, config) == 8.0
+        # attempt=0 → base 1.0, jitter [0.8, 1.2]
+        assert 0.8 <= compute_backoff_delay(0, config) <= 1.2
+        # attempt=1 → base 2.0, jitter [1.6, 2.4]
+        assert 1.6 <= compute_backoff_delay(1, config) <= 2.4
+        # attempt=2 → base 4.0, jitter [3.2, 4.8]
+        assert 3.2 <= compute_backoff_delay(2, config) <= 4.8
+        # attempt=3 → base 8.0, jitter [6.4, 9.6]
+        assert 6.4 <= compute_backoff_delay(3, config) <= 9.6
 
     def test_backoff_max_delay(self):
-        """Le délai ne dépasse pas max_delay."""
+        """Le délai ne dépasse pas max_delay * 1.2 (jitter)."""
         config = RetryConfig(base_delay=1.0, exponential_base=2.0, max_delay=5.0)
-        assert compute_backoff_delay(10, config) == 5.0
+        delay = compute_backoff_delay(10, config)
+        assert 4.0 <= delay <= 6.0
 
     @pytest.mark.asyncio
     async def test_retry_success_first_try(self):

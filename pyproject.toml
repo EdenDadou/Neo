@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neo-core"
-version = "0.5.0"
+version = "1.2.0"
 description = "Neo Core — Écosystème IA Multi-Agents Autonome"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,12 +17,20 @@ dependencies = [
     "ddgs>=6.0",
     "fastapi>=0.115",
     "uvicorn>=0.32",
+    "httpx>=0.25",
+    "psutil>=6.0",
 ]
 
 [project.optional-dependencies]
+providers = [
+    "groq>=0.4",
+    "google-generativeai>=0.5",
+    "ollama>=0.1",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=4.0",
 ]
 
 [project.scripts]

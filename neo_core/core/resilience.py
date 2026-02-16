@@ -10,6 +10,7 @@ Utilisé par Brain et Worker pour gérer les erreurs transitoires
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -44,9 +45,16 @@ class RetryConfig:
 
 
 def compute_backoff_delay(attempt: int, config: RetryConfig) -> float:
-    """Calcule le délai de backoff pour une tentative donnée."""
+    """
+    Calcule le délai de backoff pour une tentative donnée.
+
+    Inclut un jitter aléatoire de ±20% pour éviter le thundering herd
+    (tous les clients qui retentent exactement au même moment).
+    """
     delay = config.base_delay * (config.exponential_base ** attempt)
-    return min(delay, config.max_delay)
+    delay = min(delay, config.max_delay)
+    jitter = random.uniform(0.8, 1.2)
+    return delay * jitter
 
 
 class RetryableError(Exception):

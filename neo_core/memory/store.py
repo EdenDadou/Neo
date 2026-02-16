@@ -176,12 +176,19 @@ class MemoryStore:
 
         records = []
         if results and results["ids"] and results["ids"][0]:
-            for i, record_id in enumerate(results["ids"][0]):
-                # Récupère les métadonnées complètes depuis SQLite
-                row = self._db_conn.execute(
-                    "SELECT * FROM memories WHERE id = ?", (record_id,)
-                ).fetchone()
+            record_ids = results["ids"][0]
 
+            # Batch query : un seul SELECT IN au lieu de N requêtes individuelles
+            placeholders = ",".join("?" * len(record_ids))
+            rows = self._db_conn.execute(
+                f"SELECT * FROM memories WHERE id IN ({placeholders})",
+                record_ids,
+            ).fetchall()
+            id_to_row = {row["id"]: row for row in rows}
+
+            # Reconstituer dans l'ordre ChromaDB (pertinence décroissante)
+            for record_id in record_ids:
+                row = id_to_row.get(record_id)
                 if row and row["importance"] >= min_importance:
                     records.append(MemoryRecord(
                         id=row["id"],
