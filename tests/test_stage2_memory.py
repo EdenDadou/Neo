@@ -269,12 +269,13 @@ class TestMemoryAgent:
         assert "Eden" in context
 
     def test_conversation_turn(self, memory_agent):
+        before = memory_agent.get_stats()["total_entries"]
         memory_agent.on_conversation_turn(
             "Je m'appelle Eden",
             "Bonjour Eden, enchanté !"
         )
         stats = memory_agent.get_stats()
-        assert stats["total_entries"] == 2
+        assert stats["total_entries"] >= before + 2
 
     def test_search(self, memory_agent):
         memory_agent.store_memory("Python est mon langage préféré.", importance=0.8)

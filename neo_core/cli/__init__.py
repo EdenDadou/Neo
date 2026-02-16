@@ -27,6 +27,7 @@ def print_usage():
   {BOLD}Commandes :{RESET}
     {CYAN}setup{RESET}       Onboarding complet (install deps + config + lance le chat)
     {CYAN}chat{RESET}        Lancer le chat directement
+    {CYAN}api{RESET}         Lancer le serveur REST API
     {CYAN}status{RESET}      Afficher la santé du système
     {CYAN}guardian{RESET}     Lancer Neo avec le Guardian (auto-restart)
     {CYAN}history{RESET}     Lister les sessions de conversation
@@ -55,6 +56,16 @@ def main():
         from neo_core.cli.chat import run_chat
         run_chat()
 
+    elif command == "api":
+        import uvicorn
+        from neo_core.api.server import create_app
+        host = sys.argv[2] if len(sys.argv) > 2 else "0.0.0.0"
+        port = int(sys.argv[3]) if len(sys.argv) > 3 else 8000
+        print(f"\n  {CYAN}{BOLD}Neo Core API{RESET} — http://{host}:{port}")
+        print(f"  {DIM}Docs: http://{host}:{port}/docs{RESET}\n")
+        app = create_app()
+        uvicorn.run(app, host=host, port=port)
+
     elif command == "status":
         from neo_core.cli.status import run_status
         run_status()
@@ -77,7 +88,7 @@ def main():
         guardian.run()
 
     elif command == "version":
-        print("Neo Core v0.7.1 — Stage 10")
+        print("Neo Core v1.0.0 — Stage 13")
 
     else:
         print(f"\n  Commande inconnue : '{sys.argv[1]}'")

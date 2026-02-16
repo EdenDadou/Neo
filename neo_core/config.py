@@ -206,6 +206,11 @@ class NeoConfig:
     brain_name: str = "Brain"
     memory_agent_name: str = "Memory"
 
+    # API configuration
+    api_key: Optional[str] = field(default_factory=lambda: os.getenv("NEO_API_KEY", None))
+    api_host: str = field(default_factory=lambda: os.getenv("NEO_API_HOST", "0.0.0.0"))
+    api_port: int = field(default_factory=lambda: int(os.getenv("NEO_API_PORT", "8000")))
+
     def __post_init__(self):
         # Surcharge avec la config du wizard si disponible
         wizard = _load_wizard_config()
