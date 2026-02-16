@@ -8,7 +8,7 @@ Tous les tests fonctionnent en mode mock (sans clé API).
 import pytest
 import asyncio
 
-from neo_core.config import NeoConfig, LLMConfig
+from neo_core.config import NeoConfig, LLMConfig, MemoryConfig
 from neo_core.core.vox import Vox, AgentStatus
 from neo_core.core.brain import Brain, BrainDecision
 from neo_core.core.memory_agent import MemoryAgent
@@ -18,9 +18,12 @@ from neo_core.main import bootstrap
 # ─── Fixtures ────────────────────────────────────────────────────────
 
 @pytest.fixture
-def config():
-    """Config sans clé API → mode mock."""
-    return NeoConfig(llm=LLMConfig(api_key=None))
+def config(tmp_path):
+    """Config sans clé API → mode mock, avec stockage temporaire."""
+    return NeoConfig(
+        llm=LLMConfig(api_key=None),
+        memory=MemoryConfig(storage_path=tmp_path / "test_memory"),
+    )
 
 
 @pytest.fixture

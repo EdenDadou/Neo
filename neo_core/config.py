@@ -13,11 +13,14 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-# Charge les variables d'environnement depuis .env si présent
-load_dotenv()
+# Chemin racine du projet (parent de neo_core/)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Charge les variables d'environnement depuis .env à la racine du projet
+load_dotenv(_PROJECT_ROOT / ".env")
 
 # Chemin vers la config du wizard
-_CONFIG_FILE = Path(__file__).parent.parent / "data" / "neo_config.json"
+_CONFIG_FILE = _PROJECT_ROOT / "data" / "neo_config.json"
 
 
 def _load_wizard_config() -> dict:
@@ -48,7 +51,7 @@ class LLMConfig:
 @dataclass
 class MemoryConfig:
     """Configuration du système mémoire."""
-    storage_path: Path = field(default_factory=lambda: Path(__file__).parent.parent / "data" / "memory")
+    storage_path: Path = field(default_factory=lambda: _PROJECT_ROOT / "data" / "memory")
     vector_db: str = "chromadb"
     max_context_tokens: int = 2048
     max_results: int = 5
