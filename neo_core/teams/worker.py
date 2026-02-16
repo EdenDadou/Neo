@@ -22,6 +22,7 @@ Stage 5 :
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -41,6 +42,8 @@ from neo_core.core.resilience import (
 )
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
 from neo_core.tools.base_tools import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerState(str, Enum):
@@ -458,7 +461,9 @@ class Worker:
             for tu in pending_tool_uses:
                 try:
                     result = ToolRegistry.execute_tool(tu["name"], tu["input"])
+                    logger.info(f"Tool executed: {tu['name']}")
                 except Exception as e:
+                    logger.error(f"Tool execution failed: {tu['name']}: %s", e)
                     result = f"Erreur outil {tu['name']}: {e}"
 
                 tool_results.append({
@@ -515,7 +520,8 @@ class Worker:
 
             return response_data
 
-        except Exception:
+        except Exception as e:
+            logger.debug("Provider call failed: %s", e)
             if self.health_monitor:
                 self.health_monitor.record_api_call(success=False)
             return None
@@ -598,5 +604,5 @@ class Worker:
                     "success": result.success,
                 },
             )
-        except Exception:
-            pass  # Ne pas faire crasher le worker pour un problème mémoire
+        except Exception as e:
+            logger.debug("Memory reporting failed: %s", e)  # Ne pas faire crasher le worker pour un problème mémoire

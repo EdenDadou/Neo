@@ -18,6 +18,7 @@ Responsabilités :
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -30,6 +31,8 @@ from neo_core.memory.learning import LearningEngine, LearningAdvice
 from neo_core.memory.task_registry import TaskRegistry, Task, Epic
 from neo_core.core.persona import PersonaEngine
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
+
+logger = logging.getLogger(__name__)
 
 # Prompt pour la synthèse intelligente de conversations
 MEMORY_SUMMARIZE_PROMPT = """Tu es Memory, le bibliothécaire du système Neo Core.
@@ -122,20 +125,18 @@ class MemoryAgent:
                     temperature=self._model_config.temperature,
                     max_tokens=self._model_config.max_tokens,
                 )
-            print(f"[Memory] LLM initialisé : {self._model_config.model}")
+            logger.info(f"[Memory] LLM initialisé : {self._model_config.model}")
         except Exception as e:
-            print(f"[Memory] LLM non disponible ({e}), mode heuristique")
-            self._llm = None
+            logger.error(f"[Memory] LLM non disponible ({e}), mode heuristique")
 
     def _init_persona_engine(self) -> None:
         """Initialise le moteur de personnalité et d'empathie (Stage 9)."""
         try:
             self._persona_engine = PersonaEngine(store=self._store)
             self._persona_engine.initialize()
-            print("[Memory] PersonaEngine initialisé")
+            logger.info("[Memory] PersonaEngine initialisé")
         except Exception as e:
-            print(f"[Memory] PersonaEngine non disponible ({e})")
-            self._persona_engine = None
+            logger.error(f"[Memory] PersonaEngine non disponible ({e})")
 
     async def _memory_llm_call(self, prompt: str) -> Optional[str]:
         """
@@ -161,14 +162,15 @@ class MemoryAgent:
                 return response.text
             return None
 
-        except Exception:
+        except Exception as e:
+            logger.debug("Memory LLM call via route_chat failed: %s", e)
             # Fallback LangChain legacy
             if self._llm:
                 try:
                     result = await self._llm.ainvoke(prompt)
                     return result.content
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Memory LLM ainvoke fallback failed: %s", e)
 
         return None
 
@@ -288,8 +290,8 @@ class MemoryAgent:
                             f"[Tâche {task.id[:8]}] {exchange_summary[:200]}"
                         )
 
-        except Exception:
-            pass  # Ne jamais bloquer le flux principal
+        except Exception as e:
+            logger.debug("Task enrichment failed: %s", e)  # Ne jamais bloquer le flux principal
 
     async def smart_summarize(self, entries: list[MemoryRecord]) -> Optional[str]:
         """
@@ -309,8 +311,8 @@ class MemoryAgent:
                 result = await self._memory_llm_call(prompt)
                 if result:
                     return result.strip()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Smart summarize LLM call failed: %s", e)
 
         # Fallback heuristique
         return self._consolidator.summarize_conversation(entries)

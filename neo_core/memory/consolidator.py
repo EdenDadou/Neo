@@ -13,12 +13,15 @@ Responsabilités :
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
 from neo_core.config import NeoConfig, default_config
 from neo_core.memory.store import MemoryStore, MemoryRecord
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass

@@ -9,10 +9,13 @@ Utilisé par le wizard setup et le ModelRegistry.
 
 from __future__ import annotations
 
+import logging
 import platform
 import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -202,7 +205,7 @@ class HardwareDetector:
 
     Usage :
         profile = HardwareDetector.detect()
-        print(profile.summary())
+        logger.info(profile.summary())
         models = profile.recommend_ollama_models()
     """
 

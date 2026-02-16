@@ -16,11 +16,14 @@ et ajoute une couche d'intelligence au-dessus.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
 from neo_core.memory.store import MemoryStore, MemoryRecord
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Structures de données ──────────────────────────────
@@ -192,10 +195,10 @@ class LearningEngine:
                         perf.successes += 1
                     else:
                         perf.failures += 1
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        except Exception:
-            pass  # Ne pas crasher si le store est vide
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug("Failed to parse performance cache record: %s", e)
+        except Exception as e:
+            logger.debug("Failed to reload performance cache: %s", e)  # Ne pas crasher si le store est vide
 
     # ─── Enregistrement des résultats ────────────────────
 
@@ -275,8 +278,8 @@ class LearningEngine:
             # Remplacer l'ancien record (évite la duplication)
             try:
                 self.store.delete(existing_record_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to delete old error pattern record: %s", e)
 
             self.store.store(
                 content=json.dumps(existing.to_dict()),
@@ -322,8 +325,8 @@ class LearningEngine:
             # Persister la mise à jour : supprimer l'ancien, créer le nouveau
             try:
                 self.store.delete(existing_record_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to delete old skill record: %s", e)
             self.store.store(
                 content=json.dumps(existing_skill.to_dict()),
                 source=self.SOURCE_SKILL,
@@ -484,8 +487,8 @@ class LearningEngine:
             try:
                 data = json.loads(record.content)
                 skills.append(LearnedSkill.from_dict(data))
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug("Failed to parse learned skill record: %s", e)
         return skills
 
     def get_error_patterns(self) -> list[ErrorPattern]:
@@ -496,8 +499,8 @@ class LearningEngine:
             try:
                 data = json.loads(record.content)
                 patterns.append(ErrorPattern.from_dict(data))
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug("Failed to parse error pattern record: %s", e)
         return patterns
 
     # ─── Méthodes internes ───────────────────────────────
@@ -565,8 +568,8 @@ class LearningEngine:
                 try:
                     data = json.loads(record.content)
                     return ErrorPattern.from_dict(data), record.id
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug("Failed to parse error pattern with ID: %s", e)
         return None, None
 
     def _find_skill(self, skill_name: str, worker_type: str) -> Optional[LearnedSkill]:
@@ -587,8 +590,8 @@ class LearningEngine:
                 try:
                     data = json.loads(record.content)
                     return LearnedSkill.from_dict(data), record.id
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug("Failed to parse skill with ID: %s", e)
         return None, None
 
     def _find_relevant_skills(self, request: str) -> list[LearnedSkill]:
@@ -603,8 +606,8 @@ class LearningEngine:
                 try:
                     data = json.loads(record.content)
                     skills.append(LearnedSkill.from_dict(data))
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug("Failed to parse relevant skill: %s", e)
         return skills
 
     def _get_error_patterns_for_type(self, worker_type: str) -> list[ErrorPattern]:
@@ -619,8 +622,8 @@ class LearningEngine:
                 try:
                     data = json.loads(record.content)
                     patterns.append(ErrorPattern.from_dict(data))
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug("Failed to parse error pattern for type: %s", e)
         return patterns
 
     def _extract_skill_name(self, request: str, worker_type: str) -> str:

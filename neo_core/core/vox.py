@@ -12,6 +12,7 @@ Responsabilités :
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -20,6 +21,9 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from neo_core.config import NeoConfig, default_config, get_agent_model
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
+from neo_core.validation import validate_message, ValidationError
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from neo_core.core.brain import Brain
@@ -149,10 +153,9 @@ class Vox:
                     temperature=self._model_config.temperature,
                     max_tokens=self._model_config.max_tokens,
                 )
-            print(f"[Vox] LLM initialisé : {self._model_config.model}")
+            logger.info(f"LLM initialisé : {self._model_config.model}")
         except Exception as e:
-            print(f"[Vox] LLM non disponible ({e}), mode passthrough")
-            self._llm = None
+            logger.error(f"LLM non disponible ({e}), mode passthrough")
 
     async def _vox_llm_call(self, prompt: str) -> str:
         """
@@ -179,14 +182,15 @@ class Vox:
             # Fallback : retourne le prompt original
             return prompt
 
-        except Exception:
+        except Exception as e:
             # Fallback LangChain legacy
+            logger.debug(f"route_chat failed, trying legacy LangChain: {e}")
             if self._llm:
                 try:
                     result = await self._llm.ainvoke(prompt)
                     return result.content
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"LangChain ainvoke failed: {e}")
 
         return prompt  # Passthrough si pas de LLM
 
@@ -227,8 +231,10 @@ class Vox:
             if ack and len(ack.strip()) < 100:
                 return ack.strip()
 
-        except (asyncio.TimeoutError, Exception):
-            pass
+        except asyncio.TimeoutError as e:
+            logger.debug(f"Acknowledgment generation timeout: {e}")
+        except Exception as e:
+            logger.debug(f"Acknowledgment generation failed: {e}")
 
         return random.choice(STATIC_ACKS)
 
@@ -237,8 +243,8 @@ class Vox:
         if self.memory and self.memory.persona_engine and self.memory.persona_engine.is_initialized:
             try:
                 return self.memory.persona_engine.get_vox_injection()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to get personality injection: {e}")
         return ""
 
     def get_system_status(self) -> str:
@@ -273,7 +279,8 @@ class Vox:
             prompt = VOX_REFORMULATE_PROMPT.format(user_message=human_message)
             result = await self._vox_llm_call(prompt)
             return result.strip() if result else human_message
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to reformat request: {e}")
             return human_message
 
     async def process_message(self, human_message: str) -> str:
@@ -286,6 +293,13 @@ class Vox:
         4. Transmet à Brain (Sonnet)
         5. Retourne la réponse de Brain telle quelle
         """
+        # Input validation
+        try:
+            human_message = validate_message(human_message)
+        except ValidationError as e:
+            logger.error(f"Message validation failed: {e}")
+            return f"[Erreur] Message invalide : {e}"
+
         if not self.brain:
             return "[Erreur] Brain n'est pas connecté à Vox."
 
@@ -303,8 +317,8 @@ class Vox:
             try:
                 ack = await self._generate_ack(human_message)
                 self._on_thinking_callback(ack)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to send thinking callback: {e}")
 
         self.update_agent_status("Vox", active=False, task="communication", progress=0.0)
         self.update_agent_status("Brain", active=True, task="analyse de la requête", progress=0.5)

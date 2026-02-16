@@ -11,6 +11,7 @@ Les embeddings sont générés par ChromaDB (modèle par défaut all-MiniLM-L6-v
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Optional
 
 from neo_core.config import MemoryConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -111,6 +114,15 @@ class MemoryStore:
     def has_vector_search(self) -> bool:
         """Indique si la recherche vectorielle est disponible."""
         return self._collection is not None
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures proper cleanup."""
+        self.close()
+        return False
 
     def store(self, content: str, source: str = "conversation",
               tags: list[str] | None = None, importance: float = 0.5,
@@ -242,8 +254,8 @@ class MemoryStore:
                     meta = existing["metadatas"][0]
                     meta["importance"] = importance
                     self._collection.update(ids=[record_id], metadatas=[meta])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("ChromaDB update importance failed: %s", e)
 
     def delete(self, record_id: str) -> None:
         """Supprime un souvenir."""
@@ -253,8 +265,8 @@ class MemoryStore:
         if self._collection is not None:
             try:
                 self._collection.delete(ids=[record_id])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("ChromaDB delete failed: %s", e)
 
     def count(self) -> int:
         """Retourne le nombre total de souvenirs."""

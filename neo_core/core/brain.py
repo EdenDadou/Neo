@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 from typing import TYPE_CHECKING, Optional
 
+from neo_core.validation import validate_message, ValidationError
+
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
@@ -189,8 +191,9 @@ class WorkerLifecycleManager:
                     worker.cleanup()
                     self.unregister(worker)
                     count += 1
-                except Exception:
+                except Exception as e:
                     # Force la suppression même si cleanup échoue
+                    logger.debug("Erreur lors du cleanup du Worker %s: %s", worker_id, e)
                     self._active.pop(worker_id, None)
                     count += 1
         return count
@@ -312,7 +315,7 @@ class Brain:
             else:
                 self._init_langchain(api_key)
         except Exception as e:
-            print(f"[Brain] Impossible d'initialiser le LLM: {e}")
+            logger.error("Impossible d'initialiser le LLM: %s", e)
             self._mock_mode = True
             self._auth_method = "mock"
 
@@ -320,7 +323,7 @@ class Brain:
         """Init OAuth avec fallback automatique."""
         converted_key = get_api_key_from_oauth()
         if converted_key:
-            print(f"[Brain] Clé API convertie depuis OAuth détectée")
+            logger.info("Clé API convertie depuis OAuth détectée")
             self._init_langchain(converted_key)
             self._auth_method = "converted_api_key"
             return
@@ -346,7 +349,7 @@ class Brain:
         )
         self._current_token = valid_token
         self._auth_method = "oauth_bearer"
-        print(f"[Brain] Mode OAuth Bearer + beta header activé")
+        logger.info("Mode OAuth Bearer + beta header activé")
 
     def _refresh_oauth_client(self) -> bool:
         """Rafraîchit le client OAuth."""
@@ -374,7 +377,7 @@ class Brain:
         self._oauth_mode = False
         if not self._auth_method:
             self._auth_method = "langchain"
-        print(f"[Brain] LLM initialisé : {self._model_config.model}")
+        logger.info("LLM initialisé : %s", self._model_config.model)
 
     # ─── Connexions ─────────────────────────────────────────
 
@@ -404,8 +407,8 @@ class Brain:
                 learning_context = advice.to_context_string()
                 if learning_context:
                     context += f"\n\n=== Apprentissage ===\n{learning_context}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Impossible de récupérer les conseils d'apprentissage: %s", e)
 
         return context
 
@@ -460,8 +463,8 @@ class Brain:
                         reasoning_parts.append(
                             f"→ substitué par {alt_type.value} (historique)"
                         )
-                    except ValueError:
-                        pass
+                    except ValueError as e:
+                        logger.debug("Type de worker invalide %s: %s", advice.recommended_worker, e)
 
                 # Si des avertissements existent, les inclure
                 if advice.warnings:
@@ -501,8 +504,8 @@ class Brain:
                             f"(compétence acquise: {best_skill.name})"
                         )
                         confidence = 0.7
-                    except ValueError:
-                        pass
+                    except ValueError as e:
+                        logger.debug("Type de worker invalide pour compétence %s: %s", best_skill.worker_type, e)
 
             return BrainDecision(
                 action="delegate_worker",
@@ -532,8 +535,8 @@ class Brain:
                             f"({best_skill.name}, ×{best_skill.success_count}) → Worker"
                         ),
                     )
-                except ValueError:
-                    pass
+                except ValueError as e:
+                    logger.debug("Type de worker invalide pour compétence acquise %s: %s", best_skill.worker_type, e)
 
         return BrainDecision(
             action="direct_response",
@@ -552,7 +555,8 @@ class Brain:
 
         try:
             return self.memory.get_learning_advice(request, worker_type)
-        except Exception:
+        except Exception as e:
+            logger.debug("Impossible de consulter l'apprentissage pour %s: %s", worker_type, e)
             return None
 
     def _decompose_task(self, request: str) -> list[str]:
@@ -608,7 +612,8 @@ class Brain:
                 confidence=float(data.get("confidence", 0.7)),
             )
 
-        except Exception:
+        except Exception as e:
+            logger.debug("Décomposition LLM échouée, utilisation des heuristiques: %s", e)
             return self.factory.analyze_task(request)
 
     # ─── Pipeline principal ─────────────────────────────────
@@ -625,6 +630,13 @@ class Brain:
         4. Si direct → répond via LLM (avec retry)
         5. Si worker → crée un Worker, exécute, apprend du résultat
         """
+        # Stage 11: Input validation
+        try:
+            request = validate_message(request)
+        except ValidationError as e:
+            logger.warning("Validation du message échouée: %s", e)
+            return f"[Brain Erreur] Message invalide: {str(e)[:200]}"
+
         memory_context = self.get_memory_context(request)
 
         if self._mock_mode:
@@ -649,7 +661,8 @@ class Brain:
             if decision.action == "delegate_worker" and decision.worker_type:
                 try:
                     analysis = await self._decompose_task_with_llm(request, memory_context)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Décomposition LLM échouée, utilisation de analyze_task: %s", e)
                     analysis = self.factory.analyze_task(request)
 
                 return await self._execute_with_worker(request, decision, memory_context, analysis)
@@ -668,17 +681,18 @@ class Brain:
             if self._oauth_mode and ("authentication" in error_msg.lower()
                                      or "unauthorized" in error_msg.lower()
                                      or "401" in error_msg):
-                print(f"[Brain] Erreur auth OAuth, tentative de fallback...")
+                logger.warning("Erreur auth OAuth, tentative de fallback...")
 
                 converted_key = get_api_key_from_oauth()
                 if converted_key:
-                    print(f"[Brain] Conversion OAuth → API key réussie, retry...")
+                    logger.info("Conversion OAuth → API key réussie, retry...")
                     self._init_langchain(converted_key)
                     self._oauth_mode = False
                     self._auth_method = "converted_api_key"
                     try:
                         return await self._llm_response(request, memory_context, conversation_history)
                     except Exception as retry_e:
+                        logger.error("Erreur après conversion OAuth: %s", type(retry_e).__name__)
                         return f"[Brain Erreur] Après conversion: {type(retry_e).__name__}: {str(retry_e)[:300]}"
 
                 if self._refresh_oauth_client():
@@ -688,8 +702,10 @@ class Brain:
                         else:
                             return await self._llm_response(request, memory_context, conversation_history)
                     except Exception as retry_e:
+                        logger.error("Erreur après refresh OAuth: %s", type(retry_e).__name__)
                         return f"[Brain Erreur] Après refresh: {type(retry_e).__name__}: {str(retry_e)[:300]}"
 
+            logger.error("Erreur lors du traitement de la requête: %s: %s", error_type, error_msg[:200])
             return f"[Brain Erreur] {error_type}: {error_msg[:500]}"
 
     async def _execute_with_worker(self, request: str, decision: BrainDecision,
@@ -718,8 +734,8 @@ class Brain:
                     description=request[:200],
                     worker_type=decision.worker_type or "generic",
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Impossible de créer le TaskRecord: %s", e)
 
         for attempt in range(1, max_attempts + 1):
             # Si retry → améliorer la stratégie via Memory
@@ -753,8 +769,8 @@ class Brain:
             if task_record:
                 try:
                     self.memory.update_task_status(task_record.id, "in_progress")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Impossible de mettre à jour le statut de la tâche: %s", e)
 
             # ── Lifecycle géré par context manager ──
             async with worker:
@@ -772,8 +788,8 @@ class Brain:
                                     task_record.id, "done",
                                     result=result.output[:500],
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("Impossible de marquer la tâche comme terminée: %s", e)
                         return result.output
 
                     # Échec → collecter l'erreur pour le prochain essai
@@ -803,8 +819,8 @@ class Brain:
                     task_record.id, "failed",
                     result=f"Échec après {max_attempts} tentatives: {last_err}",
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Impossible de marquer la tâche comme échouée: %s", e)
 
         last_error = errors_so_far[-1]["error"] if errors_so_far else "erreur inconnue"
         return (
@@ -848,8 +864,8 @@ class Brain:
                     current_decision.worker_type or "generic",
                     previous_errors,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Impossible de consulter les conseils de retry: %s", e)
 
         if attempt == 2:
             # Stratégie 2 : Changer de worker_type si recommandé
@@ -863,8 +879,8 @@ class Brain:
                         f"Retry: changement {current_decision.worker_type} → {alt_worker} "
                         f"(conseil Memory)"
                     )
-                except ValueError:
-                    pass
+                except ValueError as e:
+                    logger.debug("Type de worker recommandé invalide %s: %s", alt_worker, e)
 
             if new_decision.worker_type == current_decision.worker_type:
                 # Pas de recommandation → simplifier la requête
@@ -940,8 +956,8 @@ class Brain:
                     "confidence": decision.confidence,
                 },
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Impossible d'enregistrer l'apprentissage: %s", e)
 
     # ─── Appels LLM ────────────────────────────────────────
 
@@ -974,6 +990,7 @@ class Brain:
 
         except Exception as e:
             # Fallback LangChain legacy
+            logger.debug("Appel LLM via router échoué, utilisation de LangChain: %s", e)
             if self._llm:
                 result = await self._llm.ainvoke(prompt)
                 if self._health:
@@ -1006,8 +1023,8 @@ class Brain:
         if self.memory and self.memory.persona_engine and self.memory.persona_engine.is_initialized:
             try:
                 user_context = self.memory.persona_engine.get_brain_injection()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Impossible de récupérer le contexte utilisateur: %s", e)
 
         system_prompt = BRAIN_SYSTEM_PROMPT.format(
             memory_context=memory_context,
@@ -1038,6 +1055,7 @@ class Brain:
             return f"[Brain Erreur] {response.text}"
 
         except Exception as e:
+            logger.error("Erreur dans _oauth_response: %s: %s", type(e).__name__, str(e)[:200])
             if self._health:
                 self._health.record_api_call(success=False)
             return f"[Brain Erreur] {type(e).__name__}: {str(e)[:200]}"
@@ -1053,8 +1071,8 @@ class Brain:
         if self.memory and self.memory.persona_engine and self.memory.persona_engine.is_initialized:
             try:
                 user_context = self.memory.persona_engine.get_brain_injection()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Impossible de récupérer le contexte utilisateur: %s", e)
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", BRAIN_SYSTEM_PROMPT),

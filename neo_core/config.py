@@ -6,12 +6,15 @@ Supporte .env pour les clés API et data/neo_config.json pour les paramètres du
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Chemin racine du projet (parent de neo_core/)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -29,8 +32,8 @@ def _load_wizard_config() -> dict:
         try:
             with open(_CONFIG_FILE) as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
+        except (json.JSONDecodeError, IOError) as e:
+            logger.debug("Failed to load wizard config: %s", e)
     return {}
 
 
