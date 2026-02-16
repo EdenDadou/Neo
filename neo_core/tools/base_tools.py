@@ -3,12 +3,15 @@ Neo Core — Outils de base pour les Workers
 =============================================
 Outils LangChain utilisés par les agents spécialisés (Workers).
 
+Stage 5 : Outils réels fonctionnels + schémas tool_use Anthropic.
+
 Chaque outil :
 - Est un LangChain BaseTool
 - Supporte un mode mock (retourne des résultats déterministes)
 - A des protections de sécurité intégrées
+- Expose un schéma tool_use pour l'API Anthropic
 
-Le ToolRegistry gère le chargement et la sélection d'outils par type de Worker.
+Le ToolRegistry gère le chargement, la sélection, et l'exécution d'outils.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import textwrap
 import time
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from langchain_core.tools import tool
 
@@ -74,22 +77,42 @@ def web_search_tool(query: str) -> str:
             f"   Un tutoriel étape par étape pour maîtriser le sujet."
         )
 
-    # Mode réel — utilise httpx pour une recherche basique
-    # (peut être étendu avec Google Custom Search, Brave API, etc.)
+    # Mode réel — utilise duckduckgo-search (résultats structurés)
     try:
-        import httpx
-        # Fallback : DuckDuckGo lite (pas de clé API requise)
-        response = httpx.get(
-            "https://lite.duckduckgo.com/lite/",
-            params={"q": query},
-            timeout=15,
-            follow_redirects=True,
-        )
-        if response.status_code == 200:
-            # Parser les résultats basiques
-            text = response.text[:2000]
-            return f"Résultats web pour '{query}':\n{text}"
-        return f"Recherche web échouée (HTTP {response.status_code})"
+        from duckduckgo_search import DDGS
+
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+
+        if not results:
+            return f"Aucun résultat trouvé pour '{query}'."
+
+        formatted = [f"Résultats web pour '{query}':"]
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "Sans titre")
+            href = r.get("href", "")
+            body = r.get("body", "")[:200]
+            formatted.append(f"{i}. «{title}» — {href}\n   {body}")
+
+        return "\n".join(formatted)
+
+    except ImportError:
+        # Fallback si duckduckgo-search n'est pas installé
+        try:
+            import httpx
+            response = httpx.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                timeout=15,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if response.status_code == 200:
+                text = response.text[:3000]
+                return f"Résultats web pour '{query}' (HTML brut):\n{text}"
+            return f"Recherche web échouée (HTTP {response.status_code})"
+        except Exception as e:
+            return f"Erreur recherche web: {e}"
     except Exception as e:
         return f"Erreur recherche web: {e}"
 
@@ -301,14 +324,113 @@ def memory_search_tool(query: str) -> str:
         return f"Erreur recherche mémoire: {e}"
 
 
+# ─── Schémas tool_use pour l'API Anthropic ────────────────
+
+TOOL_SCHEMAS: dict[str, dict] = {
+    "web_search": {
+        "name": "web_search",
+        "description": (
+            "Recherche sur le web. Utilise cette fonction pour trouver des informations "
+            "actuelles et récentes sur n'importe quel sujet. Retourne des résultats "
+            "avec titres, URLs et extraits."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Les termes de recherche à utiliser",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+    "file_read": {
+        "name": "file_read",
+        "description": (
+            "Lit le contenu d'un fichier à partir de son chemin. "
+            "Utile pour lire des documents, du code source, ou tout fichier texte."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Le chemin complet du fichier à lire",
+                }
+            },
+            "required": ["path"],
+        },
+    },
+    "file_write": {
+        "name": "file_write",
+        "description": (
+            "Écrit du contenu dans un fichier. Crée le fichier s'il n'existe pas. "
+            "Utile pour sauvegarder du code, des résultats, ou créer des documents."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Le chemin du fichier à écrire",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Le contenu à écrire dans le fichier",
+                },
+            },
+            "required": ["path", "content"],
+        },
+    },
+    "code_execute": {
+        "name": "code_execute",
+        "description": (
+            "Exécute du code Python dans un environnement sandbox sécurisé. "
+            "Fonctions de base disponibles : print, len, range, types natifs, "
+            "opérations mathématiques. Pas d'accès réseau ni au système de fichiers."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Le code Python à exécuter",
+                }
+            },
+            "required": ["code"],
+        },
+    },
+    "memory_search": {
+        "name": "memory_search",
+        "description": (
+            "Recherche dans la mémoire persistante du système Neo Core. "
+            "Trouve des informations, conversations, et résultats précédents "
+            "pertinents pour la requête."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "La requête de recherche en langage naturel",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
 # ─── Registre d'outils ───────────────────────────────────
 
 class ToolRegistry:
     """
     Registre centralisé des outils disponibles.
 
-    Gère la sélection d'outils par type de Worker
-    et l'initialisation globale (mock mode, mémoire, etc.)
+    Gère la sélection d'outils par type de Worker,
+    l'initialisation globale, les schémas tool_use,
+    et l'exécution d'outils par nom.
     """
 
     # Mapping type de worker → noms d'outils
@@ -322,7 +444,7 @@ class ToolRegistry:
         "generic": ["web_search", "file_read", "memory_search"],
     }
 
-    # Mapping nom → instance d'outil
+    # Mapping nom → instance d'outil (LangChain)
     _TOOL_MAP: dict[str, object] = {
         "web_search": web_search_tool,
         "file_read": file_read_tool,
@@ -354,6 +476,65 @@ class ToolRegistry:
     def list_worker_types(cls) -> list[str]:
         """Liste tous les types de workers supportés."""
         return list(cls.WORKER_TOOLS.keys())
+
+    @classmethod
+    def get_tool_schemas_for_type(cls, worker_type: str) -> list[dict]:
+        """
+        Retourne les schémas tool_use Anthropic pour un type de Worker.
+
+        Format compatible avec le paramètre `tools` de l'API Messages.
+        """
+        tool_names = cls.WORKER_TOOLS.get(worker_type, cls.WORKER_TOOLS["generic"])
+        schemas = []
+        for name in tool_names:
+            if name in TOOL_SCHEMAS:
+                schemas.append(TOOL_SCHEMAS[name])
+        return schemas
+
+    @classmethod
+    def get_all_tool_schemas(cls) -> list[dict]:
+        """Retourne tous les schémas tool_use disponibles."""
+        return list(TOOL_SCHEMAS.values())
+
+    @classmethod
+    def execute_tool(cls, name: str, args: dict) -> str:
+        """
+        Exécute un outil par son nom avec les arguments fournis.
+
+        Utilisé par la boucle tool_use du Worker quand le LLM
+        demande l'exécution d'un outil.
+
+        Args:
+            name: Nom de l'outil (ex: "web_search")
+            args: Arguments de l'outil (ex: {"query": "ATP matches"})
+
+        Returns:
+            Résultat de l'outil sous forme de string
+        """
+        tool_obj = cls._TOOL_MAP.get(name)
+        if tool_obj is None:
+            return f"Erreur: Outil inconnu '{name}'"
+
+        try:
+            # Les outils LangChain acceptent un dict ou un string
+            # selon leur signature
+            if name == "web_search":
+                return tool_obj.invoke(args.get("query", ""))
+            elif name == "file_read":
+                return tool_obj.invoke(args.get("path", ""))
+            elif name == "file_write":
+                return tool_obj.invoke({
+                    "path": args.get("path", ""),
+                    "content": args.get("content", ""),
+                })
+            elif name == "code_execute":
+                return tool_obj.invoke(args.get("code", ""))
+            elif name == "memory_search":
+                return tool_obj.invoke(args.get("query", ""))
+            else:
+                return tool_obj.invoke(args)
+        except Exception as e:
+            return f"Erreur exécution outil '{name}': {type(e).__name__}: {e}"
 
     @classmethod
     def initialize(cls, mock_mode: bool = False,

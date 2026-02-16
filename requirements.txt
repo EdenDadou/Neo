@@ -8,5 +8,6 @@ rich>=13.0
 pytest>=8.0
 pytest-asyncio>=0.24
 python-dotenv>=1.0
+duckduckgo-search>=7.0
 fastapi>=0.115
 uvicorn>=0.32

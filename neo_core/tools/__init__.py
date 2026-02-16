@@ -2,6 +2,7 @@
 
 from .base_tools import (
     ToolRegistry,
+    TOOL_SCHEMAS,
     web_search_tool,
     file_read_tool,
     file_write_tool,
@@ -13,6 +14,7 @@ from .base_tools import (
 
 __all__ = [
     "ToolRegistry",
+    "TOOL_SCHEMAS",
     "web_search_tool",
     "file_read_tool",
     "file_write_tool",

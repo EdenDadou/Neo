@@ -62,10 +62,25 @@ class MemoryConfig:
 
 
 @dataclass
+class ResilienceConfig:
+    """Configuration de la résilience (retry, circuit breaker, timeouts)."""
+    max_retries: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 30.0
+    exponential_base: float = 2.0
+    api_timeout: float = 60.0
+    worker_timeout: float = 180.0
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_recovery: float = 60.0
+    max_tool_iterations: int = 10
+
+
+@dataclass
 class NeoConfig:
     """Configuration principale de Neo Core."""
     llm: LLMConfig = field(default_factory=LLMConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    resilience: ResilienceConfig = field(default_factory=ResilienceConfig)
     debug: bool = field(default_factory=lambda: os.getenv("NEO_DEBUG", "false").lower() == "true")
     log_level: str = field(default_factory=lambda: os.getenv("NEO_LOG_LEVEL", "INFO"))
 

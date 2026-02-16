@@ -16,10 +16,7 @@ Authentification OAuth (méthode OpenClaw) :
 - Fallback : Clé API classique via LangChain
 
 Stage 3 : Moteur d'Orchestration
-- make_decision() analyse les requêtes avec heuristiques + classification
-- _decompose_task() produit une TaskAnalysis complète
-- process() orchestre Workers pour les tâches complexes
-- Apprentissage des résultats via Memory
+Stage 5 : Résilience (retry, circuit breaker, health monitoring)
 """
 
 from __future__ import annotations
@@ -32,6 +29,16 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from neo_core.config import NeoConfig, default_config
+from neo_core.core.resilience import (
+    RetryConfig,
+    RetryableError,
+    NonRetryableError,
+    retry_with_backoff,
+    CircuitBreaker,
+    CircuitOpenError,
+    HealthMonitor,
+    create_resilience_from_config,
+)
 from neo_core.oauth import (
     is_oauth_token,
     get_valid_access_token,
@@ -108,7 +115,7 @@ class Brain:
     la meilleure action à entreprendre.
 
     Stage 3 : Peut créer des Workers spécialisés via Factory
-    pour les tâches complexes, et apprend des résultats.
+    Stage 5 : Résilience (retry, circuit breaker, health monitoring)
     """
     config: NeoConfig = field(default_factory=lambda: default_config)
     memory: Optional[MemoryAgent] = None
@@ -118,9 +125,17 @@ class Brain:
     _auth_method: str = ""
     _anthropic_client: Optional[object] = None
     _factory: Optional[WorkerFactory] = None
+    _health: Optional[HealthMonitor] = None
+    _retry_config: Optional[RetryConfig] = None
 
     def __post_init__(self):
         self._mock_mode = self.config.is_mock_mode()
+
+        # Stage 5 : Initialiser la résilience
+        retry, circuit, health = create_resilience_from_config(self.config.resilience)
+        self._retry_config = retry
+        self._health = health
+
         if not self._mock_mode:
             self._init_llm()
 
@@ -130,6 +145,29 @@ class Brain:
         if self._factory is None:
             self._factory = WorkerFactory(config=self.config, memory=self.memory)
         return self._factory
+
+    @property
+    def health(self) -> HealthMonitor:
+        """Accès au moniteur de santé."""
+        if self._health is None:
+            _, _, self._health = create_resilience_from_config(self.config.resilience)
+        return self._health
+
+    def get_system_health(self) -> dict:
+        """Retourne le rapport de santé complet du système."""
+        report = self.health.get_health_report()
+        report["brain"] = {
+            "mock_mode": self._mock_mode,
+            "auth_method": self._auth_method,
+            "oauth_mode": self._oauth_mode,
+        }
+        if self.memory and self.memory.is_initialized:
+            stats = self.memory.get_stats()
+            report["memory"]["stats"] = stats
+            self.health.set_memory_health(True)
+        else:
+            self.health.set_memory_health(self.memory is not None)
+        return report
 
     # ─── Initialisation LLM / Auth ──────────────────────────
 
@@ -240,11 +278,6 @@ class Brain:
 
         Stage 3 : Utilise la Factory pour classifier les tâches et déterminer
         si un Worker spécialisé est nécessaire.
-
-        Logique :
-        1. Analyse la complexité (word count)
-        2. Classifie le type de tâche (Factory)
-        3. Décide : réponse directe ou délégation à un Worker
         """
         complexity = self.analyze_complexity(request)
         worker_type = self.factory.classify_task(request)
@@ -290,9 +323,7 @@ class Brain:
     def _decompose_task(self, request: str) -> list[str]:
         """
         Décompose une tâche complexe en sous-tâches.
-
         Utilise les heuristiques de la Factory (compatible mock).
-        En mode réel, enrichi par _decompose_task_with_llm().
         """
         worker_type = self.factory.classify_task(request)
         return self.factory._basic_decompose(request, worker_type)
@@ -301,10 +332,6 @@ class Brain:
                                         memory_context: str) -> TaskAnalysis:
         """
         Décomposition LLM-powered d'une tâche.
-
-        Demande au LLM d'analyser la requête et de produire
-        une TaskAnalysis complète (type, sous-tâches, outils).
-
         Fallback sur les heuristiques si le LLM échoue.
         """
         if self._mock_mode:
@@ -316,11 +343,9 @@ class Brain:
                 memory_context=memory_context[:500],
             )
 
-            # Appel LLM
             response_text = await self._raw_llm_call(prompt)
 
             # Parser le JSON
-            # Nettoyer la réponse (le LLM peut ajouter des backticks)
             cleaned = response_text.strip()
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
@@ -330,7 +355,6 @@ class Brain:
 
             data = json.loads(cleaned)
 
-            # Convertir en TaskAnalysis
             worker_type_str = data.get("worker_type", "generic")
             try:
                 worker_type = WorkerType(worker_type_str)
@@ -350,7 +374,6 @@ class Brain:
             )
 
         except Exception:
-            # Fallback sur les heuristiques
             return self.factory.analyze_task(request)
 
     # ─── Pipeline principal ─────────────────────────────────
@@ -360,16 +383,16 @@ class Brain:
         """
         Pipeline principal de Brain.
 
-        Stage 3 :
-        1. Récupère le contexte mémoire
-        2. Prend une décision (direct / worker)
-        3. Si direct → répond via LLM
-        4. Si worker → crée un Worker, exécute, apprend du résultat
+        Stage 5 :
+        1. Vérifie la santé du système (circuit breaker)
+        2. Récupère le contexte mémoire
+        3. Prend une décision (direct / worker)
+        4. Si direct → répond via LLM (avec retry)
+        5. Si worker → crée un Worker, exécute, apprend du résultat
         """
         memory_context = self.get_memory_context(request)
 
         if self._mock_mode:
-            # En mock mode, utiliser le même pipeline avec Workers mock
             decision = self.make_decision(request)
 
             if decision.action == "delegate_worker" and decision.worker_type:
@@ -378,12 +401,17 @@ class Brain:
             complexity = self.analyze_complexity(request)
             return self._mock_response(request, complexity, memory_context)
 
+        # Stage 5 : Vérifier le circuit breaker
+        if not self.health.can_make_api_call():
+            return (
+                "[Brain] Le système est temporairement indisponible "
+                "(trop d'erreurs consécutives). Réessayez dans quelques instants."
+            )
+
         try:
-            # Décision : direct ou worker ?
             decision = self.make_decision(request)
 
             if decision.action == "delegate_worker" and decision.worker_type:
-                # Tenter la décomposition LLM pour plus de précision
                 try:
                     analysis = await self._decompose_task_with_llm(request, memory_context)
                 except Exception:
@@ -434,11 +462,7 @@ class Brain:
                                     analysis: TaskAnalysis | None = None) -> str:
         """
         Crée et exécute un Worker pour une tâche complexe.
-
-        1. Crée le Worker via Factory
-        2. Exécute la tâche
-        3. Apprend du résultat
-        4. Retourne la réponse formatée
+        Stage 5 : Passe le health monitor au Worker.
         """
         try:
             worker_type = WorkerType(decision.worker_type)
@@ -454,6 +478,9 @@ class Brain:
                 subtasks=decision.subtasks,
             )
 
+        # Stage 5 : Passer le health monitor au Worker
+        worker.health_monitor = self._health
+
         result = await worker.execute()
 
         # Apprentissage
@@ -462,19 +489,11 @@ class Brain:
         if result.success:
             return result.output
         else:
-            # Si le worker échoue, fallback sur réponse directe
             return f"[Worker {worker_type.value} échoué] {result.output}"
 
     async def _learn_from_result(self, request: str, decision: BrainDecision,
                                   result: WorkerResult) -> None:
-        """
-        Apprentissage à partir du résultat d'un Worker.
-
-        Stocke dans Memory :
-        - Type de tâche et décision prise
-        - Résultat (succès/échec)
-        - Métriques (temps, outils)
-        """
+        """Apprentissage à partir du résultat d'un Worker."""
         if not self.memory:
             return
 
@@ -497,7 +516,7 @@ class Brain:
             if result.errors:
                 content += f"\nErreurs: {'; '.join(result.errors[:3])}"
 
-            importance = 0.5 if result.success else 0.8  # Les échecs sont plus importants
+            importance = 0.5 if result.success else 0.8
 
             self.memory.store_memory(
                 content=content,
@@ -513,14 +532,14 @@ class Brain:
                 },
             )
         except Exception:
-            pass  # Ne pas crasher Brain pour un problème de stockage
+            pass
 
     # ─── Appels LLM ────────────────────────────────────────
 
     async def _raw_llm_call(self, prompt: str) -> str:
         """
         Appel LLM brut (sans historique ni system prompt Brain).
-        Utilisé pour les tâches internes (décomposition, classification).
+        Stage 5 : Avec retry et health monitoring.
         """
         if self._oauth_mode:
             import httpx as _httpx
@@ -540,28 +559,41 @@ class Brain:
             payload = {
                 "model": self.config.llm.model,
                 "max_tokens": 1024,
-                "temperature": 0.3,  # Plus déterministe pour les tâches internes
+                "temperature": 0.3,
                 "messages": [{"role": "user", "content": prompt}],
             }
 
-            async with _httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers=headers,
-                    json=payload,
-                    timeout=60,
-                )
+            timeout = self.config.resilience.api_timeout
 
-            if response.status_code == 200:
-                data = response.json()
-                return data["content"][0]["text"]
-            else:
+            async def _do_call():
+                async with _httpx.AsyncClient() as client:
+                    response = await client.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers=headers,
+                        json=payload,
+                        timeout=timeout,
+                    )
+
+                status = response.status_code
+                if self._health:
+                    self._health.record_api_call(success=(status == 200))
+
+                if status == 200:
+                    data = response.json()
+                    return data["content"][0]["text"]
+
+                if status in self._retry_config.retryable_status_codes:
+                    raise RetryableError(f"API {status}", status_code=status)
+
                 error_data = response.json() if "json" in response.headers.get("content-type", "") else {}
                 error_msg = error_data.get("error", {}).get("message", response.text[:300])
-                raise Exception(f"API {response.status_code}: {error_msg}")
+                raise NonRetryableError(f"API {status}: {error_msg}", status_code=status)
+
+            return await retry_with_backoff(_do_call, self._retry_config)
         else:
-            # LangChain
             result = await self._llm.ainvoke(prompt)
+            if self._health:
+                self._health.record_api_call(success=True)
             return result.content
 
     async def _oauth_response(self, request: str, memory_context: str,
@@ -603,21 +635,33 @@ class Brain:
             "messages": messages,
         }
 
-        async with _httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers=headers,
-                json=payload,
-                timeout=120,
-            )
+        timeout = self.config.resilience.api_timeout
 
-        if response.status_code == 200:
-            data = response.json()
-            return data["content"][0]["text"]
-        else:
+        async def _do_call():
+            async with _httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout,
+                )
+
+            status = response.status_code
+            if self._health:
+                self._health.record_api_call(success=(status == 200))
+
+            if status == 200:
+                data = response.json()
+                return data["content"][0]["text"]
+
+            if status in self._retry_config.retryable_status_codes:
+                raise RetryableError(f"API {status}", status_code=status)
+
             error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
             error_msg = error_data.get("error", {}).get("message", response.text[:300])
-            raise Exception(f"API {response.status_code}: {error_msg}")
+            raise Exception(f"API {status}: {error_msg}")
+
+        return await retry_with_backoff(_do_call, self._retry_config)
 
     async def _llm_response(self, request: str, memory_context: str,
                             conversation_history: list[BaseMessage] | None = None) -> str:
@@ -633,6 +677,8 @@ class Brain:
             "conversation_history": conversation_history or [],
             "request": request,
         })
+        if self._health:
+            self._health.record_api_call(success=True)
         return result.content
 
     def _mock_response(self, request: str, complexity: str, context: str) -> str:

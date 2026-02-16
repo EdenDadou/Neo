@@ -10,12 +10,16 @@ Cycle de vie :
 3. Le résultat est stocké dans Memory
 4. Le Worker est détruit (pas de persistance)
 
-Authentification :
-- Hérite de la même méthode que Brain (OAuth Bearer + beta, API key, mock)
+Stage 5 :
+- Boucle tool_use native (le LLM contrôle ses outils)
+- Retry avec exponential backoff
+- Timeout protection
+- Circuit breaker integration
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -25,7 +29,15 @@ if TYPE_CHECKING:
     from neo_core.core.memory_agent import MemoryAgent
 
 from neo_core.config import NeoConfig
+from neo_core.core.resilience import (
+    RetryConfig,
+    RetryableError,
+    NonRetryableError,
+    retry_with_backoff,
+    HealthMonitor,
+)
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
+from neo_core.tools.base_tools import ToolRegistry
 
 
 class WorkerType(str, Enum):
@@ -63,6 +75,8 @@ Stratégie :
 3. Synthétise les résultats de manière claire et structurée
 4. Cite tes sources
 
+IMPORTANT : Tu as accès à des outils. Utilise-les activement pour obtenir des informations réelles et à jour.
+
 Tâche : {task}
 
 Contexte mémoire : {memory_context}
@@ -76,6 +90,8 @@ Stratégie :
 2. Écris du code propre, commenté et fonctionnel
 3. Teste ton code si possible via l'outil d'exécution
 4. Explique ta solution
+
+IMPORTANT : Tu as accès à des outils. Utilise-les pour lire des fichiers, exécuter du code, et sauvegarder tes résultats.
 
 Tâche : {task}
 
@@ -104,6 +120,8 @@ Stratégie :
 2. Identifie les tendances, patterns et anomalies
 3. Formule des conclusions et recommandations
 4. Justifie ton analyse avec des données
+
+IMPORTANT : Tu as accès à des outils. Utilise-les pour exécuter du code d'analyse et consulter la mémoire.
 
 Tâche : {task}
 
@@ -141,6 +159,8 @@ Contexte mémoire : {memory_context}
     WorkerType.GENERIC: """Tu es un agent spécialisé du système Neo Core.
 Ta mission : accomplir la tâche qui t'est assignée avec précision.
 
+IMPORTANT : Tu as accès à des outils. Utilise-les si nécessaire pour accomplir ta tâche.
+
 Tâche : {task}
 
 Contexte mémoire : {memory_context}
@@ -154,6 +174,9 @@ class Worker:
     Agent spécialisé éphémère.
 
     Créé par la Factory, exécute une tâche, reporte dans Memory, puis est détruit.
+
+    Stage 5 : Utilise la boucle tool_use native d'Anthropic pour que le LLM
+    contrôle activement ses outils au lieu de les appeler à l'aveugle.
     """
     config: NeoConfig
     worker_type: WorkerType
@@ -162,6 +185,7 @@ class Worker:
     tools: list = field(default_factory=list)
     memory: Optional[MemoryAgent] = None
     system_prompt: str = ""
+    health_monitor: Optional[HealthMonitor] = None
     _mock_mode: bool = False
 
     def __post_init__(self):
@@ -176,7 +200,7 @@ class Worker:
         Exécute la tâche assignée.
 
         En mode mock : retourne un résultat déterministe.
-        En mode réel : appelle le LLM avec les outils disponibles.
+        En mode réel : boucle tool_use avec le LLM.
         """
         start_time = time.time()
 
@@ -208,10 +232,13 @@ class Worker:
 
     async def _real_execute(self) -> WorkerResult:
         """
-        Exécution réelle via le LLM.
+        Exécution réelle via le LLM avec boucle tool_use native.
 
-        Utilise httpx direct avec Bearer + beta header (comme Brain)
-        pour garder le contrôle total sur l'auth.
+        Stage 5 : Le LLM contrôle ses outils :
+        1. On envoie la requête + définitions d'outils
+        2. Si stop_reason == "tool_use" → on exécute l'outil demandé
+        3. On renvoie le résultat au LLM
+        4. On boucle jusqu'à stop_reason == "end_turn" (max N itérations)
         """
         import httpx
 
@@ -220,13 +247,13 @@ class Worker:
         if self.memory:
             memory_context = self.memory.get_context(self.task)
 
-        # Construire le prompt
+        # Construire le prompt système
         prompt = self.system_prompt.format(
             task=self.task,
             memory_context=memory_context or "Aucun contexte disponible.",
         )
 
-        # Déterminer les headers d'auth
+        # Headers d'auth
         headers = {
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
@@ -239,79 +266,184 @@ class Worker:
         else:
             headers["x-api-key"] = api_key
 
-        # Construire le message
+        # Message initial
         user_message = self.task
         if self.subtasks:
             user_message += "\n\nSous-tâches :\n" + "\n".join(
                 f"- {st}" for st in self.subtasks
             )
 
-        # Appel aux outils d'abord si disponibles (exécution séquentielle simple)
-        tool_results = []
+        # Schémas tool_use pour ce type de Worker
+        tool_schemas = ToolRegistry.get_tool_schemas_for_type(self.worker_type.value)
+
+        # Messages conversationnels (accumule les tool_use)
+        messages = [{"role": "user", "content": user_message}]
+
+        # Config retry
+        retry_config = RetryConfig.from_resilience_config(self.config.resilience)
+
+        # Tracking des tool calls
         tool_calls = []
-        for t in self.tools:
+        max_iterations = self.config.resilience.max_tool_iterations
+        total_text_parts = []
+
+        for iteration in range(max_iterations):
+            # Payload
+            payload = {
+                "model": self.config.llm.model,
+                "max_tokens": self.config.llm.max_tokens,
+                "temperature": self.config.llm.temperature,
+                "system": prompt,
+                "messages": messages,
+            }
+
+            # N'inclure les outils que s'il y en a
+            if tool_schemas:
+                payload["tools"] = tool_schemas
+
+            # Appel API avec retry
+            response_data = await self._api_call_with_retry(
+                headers, payload, retry_config
+            )
+
+            if response_data is None:
+                return WorkerResult(
+                    success=False,
+                    output="Échec de l'appel API après retries",
+                    worker_type=self.worker_type.value,
+                    task=self.task,
+                    errors=["API call failed after retries"],
+                    tool_calls=tool_calls,
+                )
+
+            # Traiter la réponse
+            stop_reason = response_data.get("stop_reason", "end_turn")
+            content_blocks = response_data.get("content", [])
+
+            # Collecter le texte et les tool_use
+            assistant_content = []
+            pending_tool_uses = []
+
+            for block in content_blocks:
+                if block["type"] == "text":
+                    total_text_parts.append(block["text"])
+                    assistant_content.append(block)
+                elif block["type"] == "tool_use":
+                    tool_name = block["name"]
+                    tool_input = block["input"]
+                    tool_id = block["id"]
+                    tool_calls.append(f"{tool_name}({tool_input})")
+                    assistant_content.append(block)
+                    pending_tool_uses.append({
+                        "id": tool_id,
+                        "name": tool_name,
+                        "input": tool_input,
+                    })
+
+            if stop_reason == "end_turn" or not pending_tool_uses:
+                # Le LLM a terminé — retourner la réponse
+                final_output = "\n".join(total_text_parts) if total_text_parts else "Tâche exécutée."
+                return WorkerResult(
+                    success=True,
+                    output=final_output,
+                    worker_type=self.worker_type.value,
+                    task=self.task,
+                    tool_calls=tool_calls,
+                    metadata={"iterations": iteration + 1},
+                )
+
+            # stop_reason == "tool_use" → exécuter les outils demandés
+            # Ajouter le message assistant avec ses tool_use
+            messages.append({"role": "assistant", "content": assistant_content})
+
+            # Exécuter chaque outil et construire les résultats
+            tool_results = []
+            for tu in pending_tool_uses:
+                try:
+                    result = ToolRegistry.execute_tool(tu["name"], tu["input"])
+                except Exception as e:
+                    result = f"Erreur outil {tu['name']}: {e}"
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu["id"],
+                    "content": str(result)[:5000],  # Limiter la taille
+                })
+
+            # Renvoyer les résultats au LLM
+            messages.append({"role": "user", "content": tool_results})
+
+        # Max iterations atteint
+        final_output = "\n".join(total_text_parts) if total_text_parts else "Tâche interrompue (max itérations atteint)."
+        return WorkerResult(
+            success=True,
+            output=final_output,
+            worker_type=self.worker_type.value,
+            task=self.task,
+            tool_calls=tool_calls,
+            metadata={"iterations": max_iterations, "max_reached": True},
+        )
+
+    async def _api_call_with_retry(
+        self,
+        headers: dict,
+        payload: dict,
+        retry_config: RetryConfig,
+    ) -> dict | None:
+        """
+        Appel API Anthropic avec retry et exponential backoff.
+
+        Retourne le JSON de réponse ou None si toutes les tentatives échouent.
+        """
+        import httpx
+
+        timeout = self.config.resilience.api_timeout
+
+        async def _do_call():
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout,
+                )
+
+            status = response.status_code
+
+            # Record dans le health monitor
+            if self.health_monitor:
+                self.health_monitor.record_api_call(
+                    success=(status == 200),
+                    error=f"HTTP {status}" if status != 200 else "",
+                )
+
+            if status == 200:
+                return response.json()
+
+            # Erreurs retryables
+            if status in retry_config.retryable_status_codes:
+                error_msg = response.text[:300]
+                raise RetryableError(f"HTTP {status}: {error_msg}", status_code=status)
+
+            # Erreurs non retryables (400, 401, 403, 404)
+            error_data = {}
             try:
-                # Chaque outil peut contribuer du contexte
-                tool_name = getattr(t, "name", str(t))
-                if tool_name == "web_search":
-                    res = t.invoke(self.task[:100])
-                    tool_results.append(f"[Recherche web]\n{res}")
-                    tool_calls.append(f"web_search('{self.task[:50]}...')")
-                elif tool_name == "memory_search":
-                    res = t.invoke(self.task[:100])
-                    tool_results.append(f"[Mémoire]\n{res}")
-                    tool_calls.append(f"memory_search('{self.task[:50]}...')")
-                elif tool_name == "file_read" and self.subtasks:
-                    # Lire les fichiers mentionnés dans les sous-tâches
-                    for st in self.subtasks:
-                        if "/" in st or "." in st:
-                            res = t.invoke(st)
-                            tool_results.append(f"[Fichier: {st}]\n{res}")
-                            tool_calls.append(f"file_read('{st}')")
+                error_data = response.json()
             except Exception:
                 pass
-
-        # Enrichir le message avec les résultats d'outils
-        if tool_results:
-            user_message += "\n\nRésultats des outils :\n" + "\n---\n".join(tool_results)
-
-        payload = {
-            "model": self.config.llm.model,
-            "max_tokens": self.config.llm.max_tokens,
-            "temperature": self.config.llm.temperature,
-            "system": prompt,
-            "messages": [{"role": "user", "content": user_message}],
-        }
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers=headers,
-                json=payload,
-                timeout=120,
-            )
-
-        if response.status_code == 200:
-            data = response.json()
-            output = data["content"][0]["text"]
-            return WorkerResult(
-                success=True,
-                output=output,
-                worker_type=self.worker_type.value,
-                task=self.task,
-                tool_calls=tool_calls,
-            )
-        else:
-            error_data = response.json() if "json" in response.headers.get("content-type", "") else {}
             error_msg = error_data.get("error", {}).get("message", response.text[:300])
-            return WorkerResult(
-                success=False,
-                output=f"Erreur API ({response.status_code}): {error_msg}",
-                worker_type=self.worker_type.value,
-                task=self.task,
-                errors=[f"HTTP {response.status_code}: {error_msg}"],
-                tool_calls=tool_calls,
-            )
+            raise NonRetryableError(f"HTTP {status}: {error_msg}", status_code=status)
+
+        try:
+            return await retry_with_backoff(_do_call, retry_config)
+        except NonRetryableError as e:
+            # Erreur définitive, pas de retry
+            return None
+        except RetryableError:
+            # Toutes les tentatives épuisées
+            return None
+        except Exception:
+            return None
 
     def _mock_execute(self) -> WorkerResult:
         """Exécution mock déterministe pour les tests."""
