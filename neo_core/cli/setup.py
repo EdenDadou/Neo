@@ -384,19 +384,11 @@ def run_setup():
     Auth         : {GREEN}{'API Key / OAuth' if api_key else 'Mode mock'}{RESET}
 """)
 
-    if ask_confirm(f"Lancer {core_name} maintenant ?"):
-        print(f"\n  {CYAN}Démarrage de {core_name}...{RESET}\n")
-        # Reload la config depuis le .env qu'on vient de créer
-        from dotenv import load_dotenv
-        load_dotenv(ENV_FILE, override=True)
+    print(f"\n  {CYAN}Démarrage de {core_name}...{RESET}\n")
 
-        from neo_core.cli.chat import run_chat
-        run_chat()
-    else:
-        print(f"""
-  {BOLD}Pour lancer {core_name} :{RESET}
-    {CYAN}neo chat{RESET}
+    # Reload la config depuis le .env qu'on vient de créer
+    from dotenv import load_dotenv
+    load_dotenv(ENV_FILE, override=True)
 
-  {BOLD}Pour lancer les tests :{RESET}
-    {CYAN}python3 -m pytest tests/ -v{RESET}
-""")
+    from neo_core.cli.chat import run_chat
+    run_chat()
