@@ -80,28 +80,25 @@ class Brain:
         Supporte les clés API classiques ET les tokens OAuth Anthropic.
         """
         try:
+            from langchain_anthropic import ChatAnthropic
             api_key = self.config.llm.api_key
 
             if self._is_oauth_token(api_key):
-                # Token OAuth → utilise le client Anthropic natif avec auth_token
-                # puis passe le client à ChatAnthropic
+                # Token OAuth → crée ChatAnthropic avec une clé placeholder
+                # puis remplace les clients internes par des clients OAuth
                 import anthropic
-                from langchain_anthropic import ChatAnthropic
-
-                # Crée le client Anthropic avec le token Bearer
-                sync_client = anthropic.Anthropic(auth_token=api_key)
-                async_client = anthropic.AsyncAnthropic(auth_token=api_key)
 
                 self._llm = ChatAnthropic(
                     model=self.config.llm.model,
                     temperature=self.config.llm.temperature,
                     max_tokens=self.config.llm.max_tokens,
-                    client=sync_client,
-                    async_client=async_client,
+                    anthropic_api_key="placeholder",
                 )
+                # Remplace les clients par des clients authentifiés via Bearer token
+                self._llm._client = anthropic.Anthropic(auth_token=api_key)
+                self._llm._async_client = anthropic.AsyncAnthropic(auth_token=api_key)
             else:
                 # Clé API classique
-                from langchain_anthropic import ChatAnthropic
                 self._llm = ChatAnthropic(
                     model=self.config.llm.model,
                     api_key=api_key,
