@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from neo_core.config import NeoConfig, default_config
-from neo_core.oauth import is_oauth_token, get_valid_access_token, load_credentials
+from neo_core.oauth import is_oauth_token, get_valid_access_token
 
 if TYPE_CHECKING:
     from neo_core.core.memory_agent import MemoryAgent
@@ -65,6 +65,7 @@ class Brain:
     _llm: Optional[object] = None
     _mock_mode: bool = False
     _oauth_mode: bool = False
+    _anthropic_client: Optional[object] = None  # SDK Anthropic direct pour OAuth
 
     def __post_init__(self):
         self._mock_mode = self.config.is_mock_mode()
@@ -73,30 +74,20 @@ class Brain:
 
     def _init_llm(self) -> None:
         """
-        Initialise le LLM réel via LangChain.
-        Supporte les clés API classiques ET les tokens OAuth Anthropic.
+        Initialise le LLM.
 
-        Pour les tokens OAuth :
-        - Récupère un access token valide (avec refresh automatique)
-        - Crée une sous-classe ChatAnthropic qui utilise Bearer auth
+        - Clé API classique (sk-ant-api...) → LangChain ChatAnthropic
+        - Token OAuth (sk-ant-oat...) → SDK Anthropic direct (bypass LangChain)
         """
         try:
-            from langchain_anthropic import ChatAnthropic
-
             api_key = self.config.llm.api_key
 
             if is_oauth_token(api_key):
                 self._oauth_mode = True
-
-                # Tenter de récupérer un token valide (refresh si expiré)
-                valid_token = get_valid_access_token()
-                if not valid_token:
-                    # Pas de credentials stockées → utiliser le token brut
-                    valid_token = api_key
-
-                self._create_oauth_llm(ChatAnthropic, valid_token)
+                self._init_oauth_client(api_key)
             else:
-                # Clé API classique
+                # Clé API classique → LangChain
+                from langchain_anthropic import ChatAnthropic
                 self._llm = ChatAnthropic(
                     model=self.config.llm.model,
                     api_key=api_key,
@@ -107,43 +98,32 @@ class Brain:
             print(f"[Brain] Impossible d'initialiser le LLM: {e}")
             self._mock_mode = True
 
-    def _create_oauth_llm(self, chat_cls, token: str) -> None:
-        """Crée une instance ChatAnthropic configurée pour OAuth Bearer."""
-        oauth_token = token
+    def _init_oauth_client(self, token: str) -> None:
+        """
+        Initialise le client Anthropic direct avec Bearer auth.
+        Pas de LangChain — SDK Anthropic natif qui gère auth_token correctement.
+        """
+        import anthropic
 
-        class _ChatAnthropicOAuth(chat_cls):
-            """ChatAnthropic avec authentification OAuth Bearer."""
+        # Tenter de récupérer un token valide (refresh si expiré)
+        valid_token = get_valid_access_token()
+        if not valid_token:
+            valid_token = token
 
-            @property
-            def _client_params(self) -> dict:
-                return {
-                    "api_key": None,
-                    "auth_token": oauth_token,
-                    "base_url": self.anthropic_api_url,
-                    "max_retries": self.max_retries,
-                    "default_headers": (self.default_headers or None),
-                    "timeout": self.default_request_timeout,
-                }
-
-        self._llm = _ChatAnthropicOAuth(
-            model=self.config.llm.model,
-            temperature=self.config.llm.temperature,
-            max_tokens=self.config.llm.max_tokens,
-            anthropic_api_key="placeholder",
+        self._anthropic_client = anthropic.AsyncAnthropic(
+            api_key=None,
+            auth_token=valid_token,
         )
 
-    def _refresh_oauth_if_needed(self) -> bool:
-        """
-        Vérifie si le token OAuth a expiré et le rafraîchit.
-        Retourne True si le LLM a été recréé avec un nouveau token.
-        """
-        if not self._oauth_mode:
-            return False
-
+    def _refresh_oauth_client(self) -> bool:
+        """Rafraîchit le client OAuth si le token a expiré."""
         valid_token = get_valid_access_token()
         if valid_token:
-            from langchain_anthropic import ChatAnthropic
-            self._create_oauth_llm(ChatAnthropic, valid_token)
+            import anthropic
+            self._anthropic_client = anthropic.AsyncAnthropic(
+                api_key=None,
+                auth_token=valid_token,
+            )
             return True
         return False
 
@@ -152,10 +132,7 @@ class Brain:
         self.memory = memory
 
     def get_memory_context(self, request: str) -> str:
-        """
-        Récupère le contexte pertinent depuis Memory.
-        En étape 1, retourne un contexte vide. Sera enrichi en étape 2.
-        """
+        """Récupère le contexte pertinent depuis Memory."""
         if self.memory:
             return self.memory.get_context(request)
         return "Aucun contexte mémoire disponible."
@@ -164,9 +141,7 @@ class Brain:
         """
         Analyse la complexité d'une requête.
         Retourne : "simple" | "moderate" | "complex"
-        Sera enrichi en étape 3 pour la délégation.
         """
-        # Heuristique simple pour l'étape 1
         word_count = len(request.split())
         if word_count < 15:
             return "simple"
@@ -183,35 +158,69 @@ class Brain:
         2. Analyse la complexité
         3. Génère une réponse (LLM réel ou mock)
         """
-        # Contexte mémoire
         memory_context = self.get_memory_context(request)
-
-        # Analyse
         complexity = self.analyze_complexity(request)
 
         if self._mock_mode:
             return self._mock_response(request, complexity, memory_context)
 
-        # Réponse LLM réelle
         try:
-            return await self._llm_response(request, memory_context, conversation_history)
+            if self._oauth_mode:
+                return await self._oauth_response(request, memory_context, conversation_history)
+            else:
+                return await self._llm_response(request, memory_context, conversation_history)
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)
 
             # Si erreur d'auth en mode OAuth → tenter refresh et retry
             if self._oauth_mode and "authentication" in error_msg.lower():
-                if self._refresh_oauth_if_needed():
+                if self._refresh_oauth_client():
                     try:
-                        return await self._llm_response(request, memory_context, conversation_history)
+                        return await self._oauth_response(request, memory_context, conversation_history)
                     except Exception as retry_e:
                         return f"[Brain Erreur] Après refresh: {type(retry_e).__name__}: {str(retry_e)[:300]}"
 
             return f"[Brain Erreur] {error_type}: {error_msg[:500]}"
 
+    async def _oauth_response(self, request: str, memory_context: str,
+                              conversation_history: list[BaseMessage] | None = None) -> str:
+        """
+        Génère une réponse via le SDK Anthropic direct (OAuth Bearer).
+        Pas de LangChain — appel direct à l'API Anthropic.
+        """
+        # Construire les messages
+        messages = []
+
+        # Historique de conversation
+        if conversation_history:
+            for msg in conversation_history:
+                if isinstance(msg, HumanMessage):
+                    messages.append({"role": "user", "content": msg.content})
+                elif isinstance(msg, AIMessage):
+                    messages.append({"role": "assistant", "content": msg.content})
+
+        # Message actuel
+        messages.append({"role": "user", "content": request})
+
+        # System prompt avec contexte mémoire
+        system_prompt = BRAIN_SYSTEM_PROMPT.replace("{memory_context}", memory_context)
+
+        # Appel API direct
+        response = await self._anthropic_client.messages.create(
+            model=self.config.llm.model,
+            max_tokens=self.config.llm.max_tokens,
+            temperature=self.config.llm.temperature,
+            system=system_prompt,
+            messages=messages,
+        )
+
+        # Extraire le texte de la réponse
+        return response.content[0].text
+
     async def _llm_response(self, request: str, memory_context: str,
                             conversation_history: list[BaseMessage] | None = None) -> str:
-        """Génère une réponse via le LLM réel."""
+        """Génère une réponse via LangChain (clé API classique)."""
         prompt = ChatPromptTemplate.from_messages([
             ("system", BRAIN_SYSTEM_PROMPT),
             MessagesPlaceholder("conversation_history", optional=True),
@@ -256,7 +265,7 @@ class Brain:
             )
         else:
             return BrainDecision(
-                action="delegate_worker",  # Sera implémenté en étape 3
+                action="delegate_worker",
                 subtasks=self._decompose_task(request),
                 confidence=0.5,
             )
