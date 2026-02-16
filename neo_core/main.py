@@ -137,10 +137,12 @@ async def conversation_loop(vox: Vox):
             continue
 
         # Process via Vox → Brain → Vox
-        with console.status("[bold cyan]  Brain analyse...[/bold cyan]"):
-            response = await vox.process_message(user_input)
-
-        console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response}\n")
+        try:
+            with console.status("[bold cyan]  Brain analyse...[/bold cyan]"):
+                response = await vox.process_message(user_input)
+            console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response}\n")
+        except Exception as e:
+            console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
 
 
 def main():
