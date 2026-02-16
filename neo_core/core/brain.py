@@ -276,32 +276,26 @@ class Brain:
         """
         Prend une décision stratégique sur la manière de traiter la requête.
 
-        Stage 3 : Utilise la Factory pour classifier les tâches et déterminer
-        si un Worker spécialisé est nécessaire.
+        Règle clé : si la Factory détecte un type spécifique (≠ GENERIC),
+        on délègue TOUJOURS à un Worker, même pour les requêtes courtes.
+        Une requête courte peut avoir besoin d'outils (ex: "matchs ATP du jour").
         """
         complexity = self.analyze_complexity(request)
         worker_type = self.factory.classify_task(request)
 
-        # Les requêtes simples restent en réponse directe
-        if complexity == "simple" and worker_type == WorkerType.GENERIC:
-            return BrainDecision(
-                action="direct_response",
-                confidence=0.9,
-                reasoning="Requête simple et générique → réponse directe",
-            )
-
-        # Les requêtes modérées avec un type spécifique → Worker
-        if complexity != "simple" and worker_type != WorkerType.GENERIC:
+        # Si un type spécifique est détecté → TOUJOURS déléguer
+        # (peu importe la complexité — "matchs ATP" est court mais a besoin de web_search)
+        if worker_type != WorkerType.GENERIC:
             subtasks = self.factory._basic_decompose(request, worker_type)
             return BrainDecision(
                 action="delegate_worker",
                 subtasks=subtasks,
-                confidence=0.7,
+                confidence=0.8,
                 worker_type=worker_type.value,
-                reasoning=f"Tâche {complexity} de type {worker_type.value} → Worker",
+                reasoning=f"Type {worker_type.value} détecté → Worker (complexité: {complexity})",
             )
 
-        # Les requêtes complexes → Worker generic ou réponse directe
+        # Requêtes complexes sans type spécifique → Worker generic
         if complexity == "complex":
             subtasks = self._decompose_task(request)
             return BrainDecision(
@@ -312,11 +306,11 @@ class Brain:
                 reasoning=f"Tâche complexe → Worker {worker_type.value}",
             )
 
-        # Fallback : réponse directe
+        # Requêtes simples/modérées sans type spécifique → réponse directe
         return BrainDecision(
             action="direct_response",
             subtasks=[request] if complexity == "moderate" else [],
-            confidence=0.7,
+            confidence=0.9 if complexity == "simple" else 0.7,
             reasoning=f"Requête {complexity} générique → réponse directe",
         )
 

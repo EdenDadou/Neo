@@ -41,9 +41,31 @@ class TaskAnalysis:
 
 _CLASSIFICATION_PATTERNS: dict[WorkerType, list[str]] = {
     WorkerType.RESEARCHER: [
+        # Verbes de recherche explicites
         r"recherch", r"cherch", r"trouv", r"investig", r"explor",
         r"search", r"find", r"look\s*up", r"discover",
         r"renseign", r"inform", r"document",
+        # Sport / résultats / classements
+        r"\bmatchs?\b", r"\bscores?\b", r"\brésultats?\b", r"\bclassement",
+        r"\batp\b", r"\bfifa\b", r"\bligue\b", r"\bchampion", r"\btournoi",
+        r"\bfoot\b", r"\btennis\b", r"\bbasket\b", r"\bf1\b", r"\bmoto\s*gp",
+        r"\béquipe", r"\bjoueur", r"\bvainqueur", r"\bgagn",
+        # Météo
+        r"mét[ée]o", r"quel\s*temps", r"temp[ée]rature", r"pr[ée]vision",
+        # Actualité / news
+        r"\bactualit", r"\bnews\b", r"\bnouvelles?\b", r"\binfos?\b",
+        # Finance / prix
+        r"\bcours\b", r"\bbourse\b", r"\bcrypto", r"\bbitcoin",
+        r"\bprix\b",
+        # Marqueurs temporels (= besoin de données fraîches)
+        r"aujourd[''h]?hui", r"\bce\s*(soir|matin)", r"\bdemain\b",
+        r"en\s*ce\s*moment", r"actuellement", r"récemment",
+        r"de\s*la\s*journée", r"\bdu\s*jour\b", r"\bcette\s*semaine",
+        # Questions implicites sur l'état du monde
+        r"\bqui\s*(a\s*gagn|est\s*premier|mène|joue)",
+        r"\boù\s*(en\s*est|se\s*passe|joue)",
+        r"\bquand\b.{0,20}\b(est|commence|finit|a\s*lieu)",
+        r"\bc['']est\s*quoi", r"\bqu['']est[- ]ce\s*que",
     ],
     WorkerType.CODER: [
         r"code", r"script", r"program", r"développ", r"debug",
