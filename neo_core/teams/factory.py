@@ -222,6 +222,7 @@ class WorkerFactory:
         - Les outils appropriés pour son type
         - Le prompt système spécialisé
         - La connexion à Memory
+        - Le contexte d'apprentissage (erreurs passées, compétences)
         """
         # Récupérer les outils
         tools = ToolRegistry.get_tools_for_type(analysis.worker_type.value)
@@ -232,11 +233,26 @@ class WorkerFactory:
             memory=self.memory,
         )
 
+        # Enrichir les subtasks avec les conseils d'apprentissage
+        enriched_subtasks = list(analysis.subtasks)
+        if self.memory and self.memory.is_initialized:
+            try:
+                advice = self.memory.get_learning_advice(
+                    analysis.primary_task, analysis.worker_type.value
+                )
+                learning_context = advice.to_context_string()
+                if learning_context:
+                    enriched_subtasks.insert(0,
+                        f"[Mémoire] {learning_context}"
+                    )
+            except Exception:
+                pass
+
         return Worker(
             config=self.config,
             worker_type=analysis.worker_type,
             task=analysis.primary_task,
-            subtasks=analysis.subtasks,
+            subtasks=enriched_subtasks,
             tools=tools,
             memory=self.memory,
         )

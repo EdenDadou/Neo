@@ -26,6 +26,7 @@ from neo_core.config import NeoConfig, default_config, get_agent_model
 from neo_core.memory.store import MemoryStore, MemoryRecord
 from neo_core.memory.context import ContextEngine, ContextBlock
 from neo_core.memory.consolidator import MemoryConsolidator
+from neo_core.memory.learning import LearningEngine, LearningAdvice
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
 
 # Prompt pour la synthèse intelligente de conversations
@@ -75,6 +76,7 @@ class MemoryAgent:
     _store: Optional[MemoryStore] = field(default=None, init=False)
     _context_engine: Optional[ContextEngine] = field(default=None, init=False)
     _consolidator: Optional[MemoryConsolidator] = field(default=None, init=False)
+    _learning: Optional[LearningEngine] = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
     _turn_count: int = field(default=0, init=False)
     _consolidation_interval: int = 50  # Consolide tous les N tours
@@ -89,6 +91,7 @@ class MemoryAgent:
 
         self._context_engine = ContextEngine(self._store, self.config.memory)
         self._consolidator = MemoryConsolidator(self._store, self.config)
+        self._learning = LearningEngine(self._store)
 
         self._initialized = True
         self._mock_mode = self.config.is_mock_mode()
@@ -280,6 +283,59 @@ class MemoryAgent:
             "initialized": True,
             "turn_count": self._turn_count,
             "next_consolidation_in": self._consolidation_interval - (self._turn_count % self._consolidation_interval),
+        }
+
+    # ─── Learning Engine (boucle d'apprentissage fermée) ───
+
+    @property
+    def learning(self) -> Optional[LearningEngine]:
+        """Accès au moteur d'apprentissage."""
+        return self._learning
+
+    def record_execution_result(
+        self,
+        request: str,
+        worker_type: str,
+        success: bool,
+        execution_time: float = 0.0,
+        errors: list[str] | None = None,
+        output: str = "",
+    ) -> None:
+        """
+        Enregistre le résultat d'une exécution pour apprentissage.
+        Interface principale appelée par Brain après chaque Worker.
+        """
+        if not self._initialized or not self._learning:
+            return
+
+        self._learning.record_result(
+            request=request,
+            worker_type=worker_type,
+            success=success,
+            execution_time=execution_time,
+            errors=errors,
+            output=output,
+        )
+
+    def get_learning_advice(self, request: str, proposed_worker_type: str) -> LearningAdvice:
+        """
+        Obtient les conseils du LearningEngine AVANT de créer un Worker.
+        Appelé par Brain.make_decision() pour ajuster la stratégie.
+        """
+        if not self._initialized or not self._learning:
+            return LearningAdvice()
+
+        return self._learning.get_advice(request, proposed_worker_type)
+
+    def get_learning_stats(self) -> dict:
+        """Retourne les statistiques d'apprentissage."""
+        if not self._initialized or not self._learning:
+            return {"skills": 0, "error_patterns": 0, "performance": {}}
+
+        return {
+            "skills": len(self._learning.get_learned_skills()),
+            "error_patterns": len(self._learning.get_error_patterns()),
+            "performance": self._learning.get_performance_summary(),
         }
 
     def clear(self) -> None:

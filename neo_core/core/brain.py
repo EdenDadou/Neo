@@ -278,10 +278,28 @@ class Brain:
             self._factory.memory = memory
 
     def get_memory_context(self, request: str) -> str:
-        """Récupère le contexte pertinent depuis Memory."""
-        if self.memory:
-            return self.memory.get_context(request)
-        return "Aucun contexte mémoire disponible."
+        """
+        Récupère le contexte pertinent depuis Memory.
+        Inclut les conseils du LearningEngine si disponibles.
+        """
+        if not self.memory:
+            return "Aucun contexte mémoire disponible."
+
+        context = self.memory.get_context(request)
+
+        # Ajouter les conseils d'apprentissage au contexte
+        try:
+            # On récupère les conseils pour le type le plus probable
+            worker_type = self.factory.classify_task(request)
+            if worker_type != WorkerType.GENERIC:
+                advice = self.memory.get_learning_advice(request, worker_type.value)
+                learning_context = advice.to_context_string()
+                if learning_context:
+                    context += f"\n\n=== Apprentissage ===\n{learning_context}"
+        except Exception:
+            pass
+
+        return context
 
     # ─── Analyse et décision ────────────────────────────────
 
@@ -301,23 +319,56 @@ class Brain:
         """
         Prend une décision stratégique sur la manière de traiter la requête.
 
-        Règle clé : si la Factory détecte un type spécifique (≠ GENERIC),
-        on délègue TOUJOURS à un Worker, même pour les requêtes courtes.
-        Une requête courte peut avoir besoin d'outils (ex: "matchs ATP du jour").
+        Boucle d'apprentissage fermée :
+        1. Classifie la tâche (Factory)
+        2. Consulte l'historique des erreurs (Memory/LearningEngine)
+        3. Ajuste la stratégie si nécessaire
+        4. Retourne la décision avec confiance ajustée
         """
         complexity = self.analyze_complexity(request)
         worker_type = self.factory.classify_task(request)
 
         # Si un type spécifique est détecté → TOUJOURS déléguer
-        # (peu importe la complexité — "matchs ATP" est court mais a besoin de web_search)
         if worker_type != WorkerType.GENERIC:
             subtasks = self.factory._basic_decompose(request, worker_type)
+            confidence = 0.8
+
+            # ── Consultation de l'historique (Learning Loop) ──
+            advice = self._consult_learning(request, worker_type.value)
+
+            if advice:
+                # Ajuster la confiance en fonction de l'historique
+                confidence += advice.confidence_adjustment
+                confidence = max(0.1, min(1.0, confidence))
+
+                reasoning_parts = [f"Type {worker_type.value} détecté"]
+
+                # Si un worker alternatif est recommandé
+                if advice.recommended_worker and advice.recommended_worker != worker_type.value:
+                    try:
+                        alt_type = WorkerType(advice.recommended_worker)
+                        worker_type = alt_type
+                        subtasks = self.factory._basic_decompose(request, alt_type)
+                        reasoning_parts.append(
+                            f"→ substitué par {alt_type.value} (historique)"
+                        )
+                    except ValueError:
+                        pass
+
+                # Si des avertissements existent, les inclure
+                if advice.warnings:
+                    reasoning_parts.append(f"⚠ {'; '.join(advice.warnings[:2])}")
+
+                reasoning = " | ".join(reasoning_parts)
+            else:
+                reasoning = f"Type {worker_type.value} détecté → Worker (complexité: {complexity})"
+
             return BrainDecision(
                 action="delegate_worker",
                 subtasks=subtasks,
-                confidence=0.8,
+                confidence=confidence,
                 worker_type=worker_type.value,
-                reasoning=f"Type {worker_type.value} détecté → Worker (complexité: {complexity})",
+                reasoning=reasoning,
             )
 
         # Requêtes complexes sans type spécifique → Worker generic
@@ -338,6 +389,19 @@ class Brain:
             confidence=0.9 if complexity == "simple" else 0.7,
             reasoning=f"Requête {complexity} générique → réponse directe",
         )
+
+    def _consult_learning(self, request: str, worker_type: str) -> object | None:
+        """
+        Consulte le LearningEngine de Memory pour obtenir des conseils.
+        Retourne un LearningAdvice ou None si Memory n'est pas disponible.
+        """
+        if not self.memory or not self.memory.is_initialized:
+            return None
+
+        try:
+            return self.memory.get_learning_advice(request, worker_type)
+        except Exception:
+            return None
 
     def _decompose_task(self, request: str) -> list[str]:
         """
@@ -512,11 +576,28 @@ class Brain:
 
     async def _learn_from_result(self, request: str, decision: BrainDecision,
                                   result: WorkerResult) -> None:
-        """Apprentissage à partir du résultat d'un Worker."""
+        """
+        Apprentissage à partir du résultat d'un Worker.
+
+        Boucle fermée :
+        - Enregistre dans le LearningEngine (patterns d'erreur, compétences)
+        - Stocke aussi un résumé en mémoire classique pour le contexte
+        """
         if not self.memory:
             return
 
         try:
+            # 1. Enregistrer dans le LearningEngine (boucle fermée)
+            self.memory.record_execution_result(
+                request=request,
+                worker_type=result.worker_type,
+                success=result.success,
+                execution_time=result.execution_time,
+                errors=result.errors,
+                output=result.output[:500] if result.success else "",
+            )
+
+            # 2. Stocker aussi en mémoire classique pour le contexte
             tags = [
                 "brain_learning",
                 f"worker_type:{result.worker_type}",
