@@ -1,16 +1,9 @@
-#!/usr/bin/env python3
 """
-Neo Core — Wizard d'Installation
-==================================
-Assistant interactif pour configurer et installer Neo Core.
+Neo Core — Setup : Onboarding complet
+=======================================
+Installe les dépendances, configure le système, et lance le chat.
 
-Demande :
-- Le nom du Core (personnalisation du système)
-- Le nom de l'utilisateur
-- La clé API Anthropic
-- Installe toutes les dépendances automatiquement
-
-Usage : python3 setup_wizard.py
+Usage : python3 neo.py setup
 """
 
 import json
@@ -29,9 +22,11 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 RESET = "\033[0m"
 
-CONFIG_DIR = Path(__file__).parent / "data"
+# Racine du projet (parent de neo_core/)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+CONFIG_DIR = PROJECT_ROOT / "data"
 CONFIG_FILE = CONFIG_DIR / "neo_config.json"
-ENV_FILE = Path(__file__).parent / ".env"
+ENV_FILE = PROJECT_ROOT / ".env"
 
 
 def clear_screen():
@@ -70,14 +65,10 @@ def ask(prompt: str, default: str = "", secret: bool = False) -> str:
         display = f"  {GREEN}▸{RESET} {prompt}: "
 
     if secret:
-        # getpass peut échouer dans certains terminaux (SSH, VPS)
-        # On essaie getpass d'abord, puis fallback sur input()
         try:
             import getpass
             value = getpass.getpass(display)
             if not value.strip():
-                # getpass a retourné vide — peut-être un bug terminal
-                # Réessayer avec input() classique
                 print(f"  {DIM}(saisie non détectée, réessai en mode visible){RESET}")
                 value = input(display)
         except (EOFError, OSError):
@@ -147,7 +138,7 @@ def setup_venv() -> str:
 
     print(f"  {YELLOW}⚠{RESET} Pas de virtual environment détecté")
 
-    venv_path = Path(__file__).parent / ".venv"
+    venv_path = PROJECT_ROOT / ".venv"
 
     if venv_path.exists():
         print(f"  {GREEN}✓{RESET} Virtual environment existant trouvé: {venv_path}")
@@ -164,28 +155,129 @@ def setup_venv() -> str:
             print(f"\n  {YELLOW}⚠ Sans venv, l'installation pourrait échouer sur certains systèmes.{RESET}")
             return sys.executable
 
-    # Retourne le chemin du python dans le venv
     venv_python = venv_path / "bin" / "python3"
     return str(venv_python)
 
 
 def install_dependencies(python_path: str) -> bool:
     """Installe les dépendances depuis requirements.txt."""
-    req_file = Path(__file__).parent / "requirements.txt"
+    req_file = PROJECT_ROOT / "requirements.txt"
     if not req_file.exists():
         print(f"  {RED}✗ requirements.txt introuvable{RESET}")
         return False
 
     pip_cmd = f"{python_path} -m pip"
 
-    # Upgrade pip d'abord
     run_command(f"{pip_cmd} install --upgrade pip -q", "Mise à jour de pip")
 
-    # Install dependencies
     return run_command(
         f"{pip_cmd} install -r {req_file} -q",
         "Installation des dépendances"
     )
+
+
+def configure_auth() -> str:
+    """Configure l'authentification Anthropic. Retourne la clé/token."""
+    print(f"  {DIM}La clé Anthropic permet à Brain de fonctionner avec Claude.{RESET}")
+    print(f"  {DIM}Sans clé, le système tourne en mode mock (réponses simulées).{RESET}")
+    print()
+    print(f"  {DIM}Trois méthodes supportées :{RESET}")
+    print(f"  {DIM}  1. Claude Code : si vous avez 'claude' installé (auto-import){RESET}")
+    print(f"  {DIM}  2. API Key     : sk-ant-api... (console.anthropic.com/keys){RESET}")
+    print(f"  {DIM}  3. Token OAuth : sk-ant-oat... (claude setup-token){RESET}")
+    print()
+
+    api_key = None
+
+    # Tenter l'import automatique depuis Claude Code
+    try:
+        from neo_core.oauth import import_claude_code_credentials, setup_oauth_from_token
+
+        claude_creds = import_claude_code_credentials()
+        if claude_creds:
+            print(f"  {GREEN}✓{RESET} Credentials Claude Code détectées automatiquement !")
+            token = claude_creds["access_token"]
+            print(f"  {DIM}  Token: {token[:12]}...{token[-4:]}{RESET}")
+            if ask_confirm("Utiliser ces credentials ?"):
+                api_key = token
+                print(f"  {GREEN}✓{RESET} Credentials Claude Code importées (avec refresh automatique)")
+    except Exception:
+        pass
+
+    if not api_key:
+        api_key = ask("Clé Anthropic (laisser vide pour mode mock)", secret=True)
+
+    if api_key:
+        masked = api_key[:12] + "..." + api_key[-4:]
+        if api_key.startswith("sk-ant-oat"):
+            try:
+                from neo_core.oauth import setup_oauth_from_token
+                result = setup_oauth_from_token(api_key)
+                if result["success"]:
+                    print(f"  {GREEN}✓{RESET} {result['message']} : {DIM}{masked}{RESET}")
+                else:
+                    print(f"  {YELLOW}⚠{RESET} {result['message']}")
+            except Exception:
+                print(f"  {GREEN}✓{RESET} Token OAuth stocké : {DIM}{masked}{RESET}")
+        elif api_key.startswith("sk-ant-api") or api_key.startswith("sk-"):
+            print(f"  {GREEN}✓{RESET} Clé API classique : {DIM}{masked}{RESET}")
+        else:
+            print(f"  {YELLOW}⚠{RESET} Format non reconnu : {DIM}{masked}{RESET}")
+    else:
+        print(f"  {YELLOW}⚠{RESET} Mode mock activé — Brain simulera les réponses")
+
+    return api_key or ""
+
+
+def test_connection(api_key: str) -> bool:
+    """Teste la connexion à l'API Anthropic."""
+    if not api_key:
+        print(f"  {DIM}⊘ Pas de clé API — test ignoré (mode mock){RESET}")
+        return True
+
+    print(f"  {DIM}⧗ Test de connexion à Anthropic...{RESET}", end="", flush=True)
+    try:
+        import httpx
+        from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
+
+        headers = {
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+
+        if is_oauth_token(api_key):
+            valid_token = get_valid_access_token() or api_key
+            headers["Authorization"] = f"Bearer {valid_token}"
+            headers["anthropic-beta"] = OAUTH_BETA_HEADER
+        else:
+            headers["x-api-key"] = api_key
+
+        payload = {
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "Dis 'ok'"}],
+        }
+
+        response = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+
+        if response.status_code == 200:
+            print(f"\r  {GREEN}✓ Connexion à Anthropic réussie !{RESET}          ")
+            return True
+        else:
+            error = response.json().get("error", {}).get("message", response.text[:100])
+            print(f"\r  {YELLOW}⚠ Connexion échouée (HTTP {response.status_code}): {error}{RESET}")
+            return False
+    except ImportError:
+        print(f"\r  {DIM}⊘ httpx non installé — test ignoré{RESET}          ")
+        return True
+    except Exception as e:
+        print(f"\r  {YELLOW}⚠ Test échoué: {e}{RESET}          ")
+        return False
 
 
 def save_config(core_name: str, user_name: str, api_key: str, python_path: str):
@@ -196,8 +288,8 @@ def save_config(core_name: str, user_name: str, api_key: str, python_path: str):
         "core_name": core_name,
         "user_name": user_name,
         "python_path": python_path,
-        "version": "0.2",
-        "stage": 2,
+        "version": "0.5",
+        "stage": 5,
     }
 
     with open(CONFIG_FILE, "w") as f:
@@ -205,9 +297,8 @@ def save_config(core_name: str, user_name: str, api_key: str, python_path: str):
 
     print(f"  {GREEN}✓{RESET} Configuration sauvegardée: {CONFIG_FILE}")
 
-    # Fichier .env pour la clé API
     env_content = f"""# Neo Core — Configuration Environnement
-# Généré par le wizard d'installation
+# Généré par neo.py setup
 
 ANTHROPIC_API_KEY={api_key}
 NEO_CORE_NAME={core_name}
@@ -218,70 +309,37 @@ NEO_LOG_LEVEL=INFO
     with open(ENV_FILE, "w") as f:
         f.write(env_content)
 
-    # Sécurise le fichier .env
     os.chmod(ENV_FILE, 0o600)
     print(f"  {GREEN}✓{RESET} Variables d'environnement: {ENV_FILE}")
 
 
-def print_summary(core_name: str, user_name: str, python_path: str):
-    """Affiche le résumé de l'installation."""
-    venv_active = ".venv" in python_path
-
-    print(f"""
-{CYAN}{BOLD}  ╔═══════════════════════════════════════════════╗
-  ║          Installation terminée !               ║
-  ╚═══════════════════════════════════════════════╝{RESET}
-
-  {BOLD}Configuration :{RESET}
-    Nom du Core  : {GREEN}{core_name}{RESET}
-    Utilisateur  : {GREEN}{user_name}{RESET}
-    Python       : {DIM}{python_path}{RESET}
-    Venv         : {GREEN if venv_active else YELLOW}{'oui' if venv_active else 'non'}{RESET}
-
-  {BOLD}Pour lancer {core_name} :{RESET}
-""")
-
-    if venv_active and not check_venv():
-        print(f"    {CYAN}source .venv/bin/activate{RESET}")
-
-    print(f"    {CYAN}python3 -m neo_core.main{RESET}")
-    print(f"""
-  {BOLD}Pour lancer les tests :{RESET}
-    {CYAN}python3 -m pytest tests/ -v{RESET}
-
-  {DIM}─────────────────────────────────────────────────{RESET}
-  {DIM}Fichiers de configuration :{RESET}
-  {DIM}  .env              → Clés API et variables{RESET}
-  {DIM}  data/neo_config.json → Paramètres du Core{RESET}
-  {DIM}─────────────────────────────────────────────────{RESET}
-""")
-
-
-def main():
-    # ─── Deprecation notice ───────────────────────────────────
-    print(f"\n  {YELLOW}{BOLD}⚠ Ce wizard est déprécié.{RESET}")
-    print(f"  {DIM}Utilisez plutôt :{RESET}  {CYAN}python3 neo.py setup{RESET}\n")
-    if not ask_confirm("Continuer avec l'ancien wizard ?", default=False):
-        print(f"\n  {DIM}Lancez : python3 neo.py setup{RESET}\n")
-        sys.exit(0)
-
+def run_setup():
+    """Point d'entrée du setup complet."""
     print_banner()
 
-    print(f"  {BOLD}Bienvenue dans le wizard d'installation de Neo Core.{RESET}")
-    print(f"  {DIM}Ce wizard va configurer votre système en quelques étapes.{RESET}\n")
+    print(f"  {BOLD}Bienvenue dans le setup de Neo Core.{RESET}")
+    print(f"  {DIM}Ce wizard va tout configurer en quelques étapes.{RESET}\n")
 
     # ─── Étape 1 : Vérifications système ─────────────────────────
-
-    print_step(1, 4, "Vérifications système")
+    print_step(1, 5, "Vérifications système")
 
     if not check_python_version():
         sys.exit(1)
 
     python_path = setup_venv()
 
-    # ─── Étape 2 : Identité du Core ─────────────────────────────
+    # ─── Étape 2 : Installation des dépendances ─────────────────
+    print_step(2, 5, "Installation des dépendances")
 
-    print_step(2, 4, "Identité du Core")
+    if not install_dependencies(python_path):
+        print(f"\n  {RED}⚠ L'installation a rencontré des erreurs.{RESET}")
+        print(f"  {DIM}Vous pouvez réessayer manuellement :{RESET}")
+        print(f"  {CYAN}{python_path} -m pip install -r requirements.txt{RESET}")
+        if not ask_confirm("Continuer malgré les erreurs ?", default=False):
+            sys.exit(1)
+
+    # ─── Étape 3 : Identité du Core ─────────────────────────────
+    print_step(3, 5, "Identité du Core")
 
     print(f"  {DIM}Donnez un nom à votre système IA.{RESET}")
     print(f"  {DIM}Ce nom sera utilisé par les agents pour se référencer.{RESET}\n")
@@ -295,84 +353,44 @@ def main():
 
     print(f"\n  {GREEN}✓{RESET} Core: {BOLD}{core_name}{RESET} — Utilisateur: {BOLD}{user_name}{RESET}")
 
-    # ─── Étape 3 : Clé API ──────────────────────────────────────
+    # ─── Étape 4 : Connexion Anthropic ───────────────────────────
+    print_step(4, 5, "Connexion Anthropic")
 
-    print_step(3, 4, "Connexion Anthropic")
+    api_key = configure_auth()
 
-    print(f"  {DIM}La clé Anthropic permet à Brain de fonctionner avec Claude.{RESET}")
-    print(f"  {DIM}Sans clé, le système tourne en mode mock (réponses simulées).{RESET}")
-    print()
-    print(f"  {DIM}Trois méthodes supportées :{RESET}")
-    print(f"  {DIM}  1. Claude Code : si vous avez 'claude' installé (auto-import){RESET}")
-    print(f"  {DIM}  2. API Key     : sk-ant-api... (console.anthropic.com/keys){RESET}")
-    print(f"  {DIM}  3. Token OAuth : sk-ant-oat... (claude setup-token){RESET}")
-    print()
-
-    # Tenter l'import automatique depuis Claude Code
-    api_key = None
-    try:
-        sys.path.insert(0, str(Path(__file__).parent))
-        from neo_core.oauth import import_claude_code_credentials, setup_oauth_from_token
-
-        claude_creds = import_claude_code_credentials()
-        if claude_creds:
-            print(f"  {GREEN}✓{RESET} Credentials Claude Code détectées automatiquement !")
-            token = claude_creds["access_token"]
-            print(f"  {DIM}  Token: {token[:12]}...{token[-4:]}{RESET}")
-            if ask_confirm("Utiliser ces credentials ?"):
-                api_key = token
-                print(f"  {GREEN}✓{RESET} Credentials Claude Code importées (avec refresh automatique)")
-            else:
-                print(f"  {DIM}OK, saisie manuelle...{RESET}")
-    except Exception:
-        pass
-
-    if not api_key:
-        api_key = ask("Clé Anthropic (laisser vide pour mode mock)", secret=True)
-
-    if api_key:
-        masked = api_key[:12] + "..." + api_key[-4:]
-        if api_key.startswith("sk-ant-oat"):
-            # Token OAuth → stocker dans le système OAuth avec gestion refresh
-            try:
-                from neo_core.oauth import setup_oauth_from_token
-                result = setup_oauth_from_token(api_key)
-                if result["success"]:
-                    print(f"  {GREEN}✓{RESET} {result['message']} : {DIM}{masked}{RESET}")
-                else:
-                    print(f"  {YELLOW}⚠{RESET} {result['message']}")
-            except Exception as e:
-                print(f"  {GREEN}✓{RESET} Token OAuth stocké : {DIM}{masked}{RESET}")
-        elif api_key.startswith("sk-ant-api") or api_key.startswith("sk-"):
-            print(f"  {GREEN}✓{RESET} Clé API classique : {DIM}{masked}{RESET}")
-        else:
-            print(f"  {YELLOW}⚠{RESET} Format non reconnu : {DIM}{masked}{RESET}")
-    else:
-        print(f"  {YELLOW}⚠{RESET} Mode mock activé — Brain simulera les réponses")
-
-    # ─── Étape 4 : Installation des dépendances ─────────────────
-
-    print_step(4, 4, "Installation des dépendances")
-
-    if not install_dependencies(python_path):
-        print(f"\n  {RED}⚠ L'installation a rencontré des erreurs.{RESET}")
-        print(f"  {DIM}Vous pouvez réessayer manuellement :{RESET}")
-        print(f"  {CYAN}{python_path} -m pip install -r requirements.txt{RESET}")
-        if not ask_confirm("Continuer malgré les erreurs ?", default=False):
-            sys.exit(1)
-
-    # ─── Sauvegarde ──────────────────────────────────────────────
+    # ─── Étape 5 : Sauvegarde et vérification ────────────────────
+    print_step(5, 5, "Finalisation")
 
     save_config(core_name, user_name, api_key, python_path)
 
-    # ─── Résumé ──────────────────────────────────────────────────
+    # Test de connexion
+    test_connection(api_key)
 
-    print_summary(core_name, user_name, python_path)
+    # ─── Résumé + lancement du chat ──────────────────────────────
+    print(f"""
+{CYAN}{BOLD}  ╔═══════════════════════════════════════════════╗
+  ║          Installation terminée !               ║
+  ╚═══════════════════════════════════════════════╝{RESET}
 
+  {BOLD}Configuration :{RESET}
+    Nom du Core  : {GREEN}{core_name}{RESET}
+    Utilisateur  : {GREEN}{user_name}{RESET}
+    Auth         : {GREEN}{'API Key / OAuth' if api_key else 'Mode mock'}{RESET}
+""")
 
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print(f"\n\n  {DIM}Installation annulée.{RESET}\n")
-        sys.exit(0)
+    if ask_confirm(f"Lancer {core_name} maintenant ?"):
+        print(f"\n  {CYAN}Démarrage de {core_name}...{RESET}\n")
+        # Reload la config depuis le .env qu'on vient de créer
+        from dotenv import load_dotenv
+        load_dotenv(ENV_FILE, override=True)
+
+        from neo_core.cli.chat import run_chat
+        run_chat()
+    else:
+        print(f"""
+  {BOLD}Pour lancer {core_name} :{RESET}
+    {CYAN}python3 neo.py chat{RESET}
+
+  {BOLD}Pour lancer les tests :{RESET}
+    {CYAN}python3 -m pytest tests/ -v{RESET}
+""")

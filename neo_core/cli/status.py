@@ -1,0 +1,145 @@
+"""
+Neo Core — Status : Health Check rapide
+=========================================
+Affiche un dashboard de santé du système.
+
+Usage : python3 neo.py status
+"""
+
+import json
+from pathlib import Path
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from neo_core.config import NeoConfig
+
+console = Console()
+
+# Racine du projet
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+CONFIG_FILE = PROJECT_ROOT / "data" / "neo_config.json"
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def run_status():
+    """Affiche le statut complet du système."""
+    console.print("\n[bold cyan]  Neo Core — Status[/bold cyan]\n")
+
+    # ─── Config ────────────────────────────────────────────────
+    config_ok = CONFIG_FILE.exists()
+    env_ok = ENV_FILE.exists()
+
+    table = Table(title="Configuration", show_header=False, border_style="dim")
+    table.add_column("Élément", style="bold")
+    table.add_column("Statut")
+
+    table.add_row(
+        "neo_config.json",
+        f"[green]✓ Trouvé[/green]" if config_ok else "[red]✗ Manquant[/red]",
+    )
+    table.add_row(
+        ".env",
+        f"[green]✓ Trouvé[/green]" if env_ok else "[red]✗ Manquant[/red]",
+    )
+
+    if config_ok:
+        try:
+            with open(CONFIG_FILE) as f:
+                cfg = json.load(f)
+            table.add_row("Core Name", f"[cyan]{cfg.get('core_name', '?')}[/cyan]")
+            table.add_row("User Name", f"[cyan]{cfg.get('user_name', '?')}[/cyan]")
+            table.add_row("Version", f"[dim]{cfg.get('version', '?')}[/dim]")
+            table.add_row("Stage", f"[dim]{cfg.get('stage', '?')}[/dim]")
+        except Exception as e:
+            table.add_row("Erreur lecture", f"[red]{e}[/red]")
+
+    console.print(table)
+
+    if not config_ok:
+        console.print(
+            "\n[yellow]  ⚠ Setup non effectué.[/yellow]"
+            "\n[dim]  Lancez : python3 neo.py setup[/dim]\n"
+        )
+        return
+
+    # ─── Test des agents ───────────────────────────────────────
+    console.print()
+
+    try:
+        config = NeoConfig()
+
+        from neo_core.core.memory_agent import MemoryAgent
+        memory = MemoryAgent(config=config)
+        memory.initialize()
+        memory_status = "[green]✓ Opérationnel[/green]"
+        memory_detail = f"[dim]{memory.memory_count()} souvenirs[/dim]"
+    except Exception as e:
+        memory_status = f"[red]✗ Erreur[/red]"
+        memory_detail = f"[dim]{e}[/dim]"
+
+    try:
+        from neo_core.core.brain import Brain
+        brain = Brain(config=config)
+        brain.connect_memory(memory)
+        brain_status = "[green]✓ Opérationnel[/green]"
+        auth_method = getattr(brain, "_auth_method", "unknown")
+        auth_labels = {
+            "oauth_bearer": "OAuth Bearer",
+            "converted_api_key": "API Key (converti)",
+            "langchain": "API Key classique",
+        }
+        brain_detail = f"[dim]{auth_labels.get(auth_method, auth_method)}[/dim]"
+
+        if config.is_mock_mode():
+            brain_status = "[yellow]⚠ Mode mock[/yellow]"
+            brain_detail = "[dim]Réponses simulées[/dim]"
+    except Exception as e:
+        brain_status = f"[red]✗ Erreur[/red]"
+        brain_detail = f"[dim]{e}[/dim]"
+
+    try:
+        from neo_core.core.vox import Vox
+        vox = Vox(config=config)
+        vox.connect(brain=brain, memory=memory)
+        vox_status = "[green]✓ Opérationnel[/green]"
+        vox_detail = "[dim]Interface active[/dim]"
+    except Exception as e:
+        vox_status = f"[red]✗ Erreur[/red]"
+        vox_detail = f"[dim]{e}[/dim]"
+
+    agents_table = Table(title="Agents", show_header=True, border_style="dim")
+    agents_table.add_column("Agent", style="bold")
+    agents_table.add_column("Statut")
+    agents_table.add_column("Détails")
+
+    agents_table.add_row("Memory", memory_status, memory_detail)
+    agents_table.add_row("Brain", brain_status, brain_detail)
+    agents_table.add_row("Vox", vox_status, vox_detail)
+
+    console.print(agents_table)
+
+    # ─── Health Monitor (si disponible) ────────────────────────
+    try:
+        health = brain.get_system_health()
+        if health:
+            console.print()
+            health_table = Table(title="Health Monitor", show_header=False, border_style="dim")
+            health_table.add_column("Métrique", style="bold")
+            health_table.add_column("Valeur")
+
+            status_color = "green" if health.get("status") == "healthy" else "yellow"
+            health_table.add_row("État", f"[{status_color}]{health.get('status', '?')}[/{status_color}]")
+            health_table.add_row("Appels API", str(health.get("total_calls", 0)))
+            health_table.add_row("Taux d'erreur", f"{health.get('error_rate', 0):.1%}")
+            health_table.add_row("Temps moyen", f"{health.get('avg_response_time', 0):.2f}s")
+            health_table.add_row("Circuit Breaker", health.get("circuit_state", "?"))
+
+            console.print(health_table)
+    except Exception:
+        pass
+
+    console.print(
+        f"\n[dim]  Pour lancer le chat : python3 neo.py chat[/dim]\n"
+    )

@@ -1,9 +1,10 @@
 """
-Neo Core — Point d'entrée principal
-=====================================
-Boucle conversationnelle CLI pour interagir avec le système Neo Core.
-Utilise Rich pour un affichage terminal soigné.
-Détecte si le wizard d'installation a été exécuté.
+Neo Core — Chat : Boucle conversationnelle
+============================================
+Interface utilisateur avec Rich.
+Bootstrap les 3 agents (Memory, Brain, Vox) puis lance la boucle de chat.
+
+Usage : python3 neo.py chat
 """
 
 import asyncio
@@ -14,9 +15,6 @@ from rich.panel import Panel
 from rich.text import Text
 
 from neo_core.config import NeoConfig
-from neo_core.core.brain import Brain
-from neo_core.core.memory_agent import MemoryAgent
-from neo_core.core.vox import Vox
 
 console = Console()
 
@@ -35,14 +33,53 @@ def print_banner(config: NeoConfig):
     console.print(banner)
 
 
-def print_status(vox: Vox):
+def print_status(vox):
     """Affiche le statut des agents."""
     status = vox.get_system_status()
     console.print(Panel(status, title="[bold]État du système[/bold]", border_style="dim"))
 
 
+def print_health(vox):
+    """Affiche le rapport de santé détaillé (Stage 5)."""
+    if not vox.brain:
+        console.print("[yellow]  ⚠ Brain non connecté[/yellow]")
+        return
+
+    try:
+        health = vox.brain.get_system_health()
+        lines = [
+            f"[bold]Santé du système[/bold]",
+            f"",
+            f"  État global    : {health.get('status', 'inconnu')}",
+            f"  Appels API     : {health.get('total_calls', 0)}",
+            f"  Taux d'erreur  : {health.get('error_rate', 0):.1%}",
+            f"  Temps moyen    : {health.get('avg_response_time', 0):.2f}s",
+            f"  Circuit breaker: {health.get('circuit_state', 'inconnu')}",
+        ]
+        console.print(Panel(
+            "\n".join(lines),
+            title="[bold cyan]Health Report[/bold cyan]",
+            border_style="cyan",
+        ))
+    except Exception as e:
+        console.print(f"[red]  Erreur health check: {e}[/red]")
+
+
+def print_help():
+    """Affiche les commandes disponibles."""
+    console.print(Panel(
+        "[bold]Commandes disponibles :[/bold]\n\n"
+        "  [cyan]/help[/cyan]     — Affiche cette aide\n"
+        "  [cyan]/status[/cyan]   — État des agents\n"
+        "  [cyan]/health[/cyan]   — Rapport de santé détaillé\n"
+        "  [cyan]/quit[/cyan]     — Quitter le chat\n",
+        title="[bold]Aide[/bold]",
+        border_style="dim",
+    ))
+
+
 def check_installation(config: NeoConfig) -> bool:
-    """Vérifie si le wizard a été exécuté, sinon propose de le lancer."""
+    """Vérifie si le setup a été exécuté, sinon propose de le lancer."""
     if config.is_installed():
         return True
 
@@ -50,22 +87,31 @@ def check_installation(config: NeoConfig) -> bool:
         "\n[yellow]⚠ Neo Core n'a pas encore été configuré.[/yellow]"
     )
     console.print(
-        "[dim]Lancez le wizard d'installation :[/dim] "
-        "[bold cyan]python3 setup_wizard.py[/bold cyan]\n"
+        "[dim]Lancez le setup :[/dim] "
+        "[bold cyan]python3 neo.py setup[/bold cyan]\n"
     )
 
     response = console.input(
-        "[bold]Continuer sans configuration ? [/bold][dim][o/N][/dim] "
+        "[bold]Lancer le setup maintenant ? [/bold][dim][O/n][/dim] "
     ).strip().lower()
 
-    return response in ("o", "oui", "y", "yes")
+    if response in ("", "o", "oui", "y", "yes"):
+        from neo_core.cli.setup import run_setup
+        run_setup()
+        return False  # Le setup lance lui-même le chat à la fin
+
+    return False
 
 
-def bootstrap() -> Vox:
+def bootstrap():
     """
     Initialise et connecte les 3 agents du Neo Core.
     Retourne l'agent Vox prêt à communiquer.
     """
+    from neo_core.core.brain import Brain
+    from neo_core.core.memory_agent import MemoryAgent
+    from neo_core.core.vox import Vox
+
     config = NeoConfig()
 
     # Instanciation des 3 agents
@@ -81,14 +127,9 @@ def bootstrap() -> Vox:
     return vox
 
 
-async def conversation_loop(vox: Vox):
+async def conversation_loop(vox):
     """Boucle principale de conversation."""
     config = vox.config
-
-    # Vérification installation
-    if not check_installation(config):
-        console.print("[dim]Au revoir ![/dim]")
-        return
 
     print_banner(config)
 
@@ -104,7 +145,6 @@ async def conversation_loop(vox: Vox):
             "Les réponses sont simulées.[/yellow]\n"
         )
     else:
-        # Afficher la méthode d'auth utilisée par Brain
         auth_method = getattr(vox.brain, "_auth_method", "unknown") if vox.brain else "unknown"
         auth_labels = {
             "oauth_bearer": "OAuth Bearer + beta header",
@@ -117,8 +157,7 @@ async def conversation_loop(vox: Vox):
         )
 
     console.print(
-        "[dim]  Commandes : 'quit' pour quitter, "
-        "'status' pour l'état du système.[/dim]\n"
+        "[dim]  Tapez /help pour les commandes disponibles.[/dim]\n"
     )
 
     while True:
@@ -134,12 +173,22 @@ async def conversation_loop(vox: Vox):
         if not user_input:
             continue
 
-        if user_input.lower() in ("quit", "exit", "q"):
+        # Commandes spéciales (avec ou sans /)
+        cmd = user_input.lower()
+        if cmd in ("/quit", "/exit", "quit", "exit", "q"):
             console.print("[dim]  Au revoir ![/dim]")
             break
 
-        if user_input.lower() == "status":
+        if cmd in ("/status", "status"):
             print_status(vox)
+            continue
+
+        if cmd in ("/health", "health"):
+            print_health(vox)
+            continue
+
+        if cmd in ("/help", "help"):
+            print_help()
             continue
 
         # Process via Vox → Brain → Vox
@@ -151,15 +200,12 @@ async def conversation_loop(vox: Vox):
             console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
 
 
-def main():
-    """Point d'entrée (déprécié — utilisez python3 neo.py chat)."""
-    console.print(
-        "\n[yellow bold]⚠ Ce point d'entrée est déprécié.[/yellow bold]"
-        "\n[dim]Utilisez plutôt :[/dim] [bold cyan]python3 neo.py chat[/bold cyan]\n"
-    )
+def run_chat():
+    """Point d'entrée du chat."""
+    config = NeoConfig()
+
+    if not check_installation(config):
+        return
+
     vox = bootstrap()
     asyncio.run(conversation_loop(vox))
-
-
-if __name__ == "__main__":
-    main()
