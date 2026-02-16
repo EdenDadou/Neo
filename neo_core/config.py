@@ -46,6 +46,9 @@ class LLMConfig:
     def __post_init__(self):
         if self.api_key is None:
             self.api_key = os.getenv("ANTHROPIC_API_KEY")
+        # Toujours strip la clé (espaces, newlines, guillemets résiduels)
+        if self.api_key:
+            self.api_key = self.api_key.strip().strip('"').strip("'")
 
 
 @dataclass

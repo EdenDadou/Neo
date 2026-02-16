@@ -103,6 +103,12 @@ async def conversation_loop(vox: Vox):
             "[yellow]  ⚠ Mode mock actif (pas de clé API). "
             "Les réponses sont simulées.[/yellow]\n"
         )
+    else:
+        key = config.llm.api_key
+        key_type = "OAuth" if key and key.startswith("sk-ant-oat") else "API Key"
+        console.print(
+            f"[green]  ✓ Connecté à Anthropic ({key_type})[/green]\n"
+        )
 
     console.print(
         "[dim]  Commandes : 'quit' pour quitter, "

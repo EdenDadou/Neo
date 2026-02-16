@@ -79,28 +79,34 @@ class Brain:
         Initialise le LLM réel via LangChain.
         Supporte les clés API classiques ET les tokens OAuth Anthropic.
 
-        Pour les tokens OAuth (sk-ant-oat...), on sous-classe ChatAnthropic
-        pour injecter auth_token au lieu de api_key dans les clients internes.
-        C'est nécessaire car _client/_async_client sont des cached_property
-        qui recréent le client à chaque accès.
+        Pour les tokens OAuth (sk-ant-oat...), on crée le client Anthropic
+        directement avec auth_token et on le passe à ChatAnthropic.
         """
         try:
             from langchain_anthropic import ChatAnthropic
+            import anthropic
+
             api_key = self.config.llm.api_key
 
             if self._is_oauth_token(api_key):
-                # Token OAuth → sous-classe qui injecte auth_token
+                # Token OAuth → créer le client Anthropic directement
                 oauth_token = api_key
+                if self.config.debug:
+                    print(f"[Brain] Mode OAuth détecté (token: {api_key[:15]}...)")
 
                 class _ChatAnthropicOAuth(ChatAnthropic):
                     """ChatAnthropic modifié pour l'authentification OAuth Bearer."""
 
                     @property
-                    def _client_params(self):
-                        params = super()._client_params
-                        params["api_key"] = None  # Désactive x-api-key
-                        params["auth_token"] = oauth_token  # Active Bearer
-                        return params
+                    def _client_params(self) -> dict:
+                        return {
+                            "api_key": None,
+                            "auth_token": oauth_token,
+                            "base_url": self.anthropic_api_url,
+                            "max_retries": self.max_retries,
+                            "default_headers": (self.default_headers or None),
+                            "timeout": self.default_request_timeout,
+                        }
 
                 self._llm = _ChatAnthropicOAuth(
                     model=self.config.llm.model,
@@ -110,6 +116,8 @@ class Brain:
                 )
             else:
                 # Clé API classique
+                if self.config.debug:
+                    print(f"[Brain] Mode API Key classique (clé: {api_key[:10]}...)")
                 self._llm = ChatAnthropic(
                     model=self.config.llm.model,
                     api_key=api_key,
