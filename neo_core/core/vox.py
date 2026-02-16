@@ -60,6 +60,27 @@ Règles :
 - Réponds UNIQUEMENT avec la requête reformulée, rien d'autre.
 """
 
+# Prompt pour l'accusé de réception instantané
+VOX_ACK_PROMPT = """Tu es Vox, l'interface du système Neo Core.
+L'utilisateur vient d'envoyer un message. Génère un court accusé de réception
+(max 15 mots) pour lui dire que tu as compris et que Brain travaille dessus.
+
+Message : {user_message}
+
+Règles :
+- Sois naturel et rassurant
+- Maximum 15 mots
+- Pas de markdown, pas d'emojis
+- Montre que tu as compris le sujet
+- Réponds UNIQUEMENT avec l'accusé de réception, rien d'autre.
+"""
+
+# Acks statiques (fallback si LLM échoue)
+STATIC_ACKS = [
+    "Je transmets à Brain, un instant...",
+    "Compris, Brain analyse votre demande...",
+    "Bien reçu, je traite votre requête...",
+]
 
 
 @dataclass
@@ -87,6 +108,7 @@ class Vox:
     Possède son propre LLM (Haiku) pour :
     - Reformuler les requêtes avant transmission à Brain
     - Restituer les réponses de Brain de manière naturelle
+    - Générer des accusés de réception instantanés
     """
     config: NeoConfig = field(default_factory=lambda: default_config)
     brain: Optional[Brain] = None
@@ -96,6 +118,7 @@ class Vox:
     _llm: Optional[object] = None
     _mock_mode: bool = False
     _model_config: Optional[object] = None
+    _on_thinking_callback: Optional[object] = None  # Callable[[str], None]
 
     def __post_init__(self):
         self._agent_statuses = {
@@ -170,6 +193,43 @@ class Vox:
         self.brain = brain
         self.memory = memory
 
+    def set_thinking_callback(self, callback) -> None:
+        """
+        Définit un callback appelé quand Vox envoie un ack
+        pendant que Brain réfléchit.
+
+        Le callback reçoit un str (message d'accusé de réception).
+        """
+        self._on_thinking_callback = callback
+
+    async def _generate_ack(self, user_message: str) -> str:
+        """
+        Génère un accusé de réception instantané via LLM.
+        Fallback sur un ack statique si le LLM échoue ou est trop lent.
+        """
+        import random
+
+        if self._mock_mode:
+            return random.choice(STATIC_ACKS)
+
+        try:
+            import asyncio
+            prompt = VOX_ACK_PROMPT.format(user_message=user_message[:100])
+
+            # Timeout court pour ne pas bloquer — l'ack doit être rapide
+            ack = await asyncio.wait_for(
+                self._vox_llm_call(prompt),
+                timeout=3.0,
+            )
+
+            if ack and len(ack.strip()) < 100:
+                return ack.strip()
+
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+        return random.choice(STATIC_ACKS)
+
     def get_system_status(self) -> str:
         """Génère un résumé de l'état de tous les agents."""
         lines = [status.to_string() for status in self._agent_statuses.values()]
@@ -211,8 +271,9 @@ class Vox:
 
         1. Reçoit le message humain
         2. Vox reformule intelligemment la requête (Haiku)
-        3. Transmet à Brain (Sonnet)
-        4. Retourne la réponse de Brain telle quelle
+        3. Envoie un accusé de réception instantané (callback)
+        4. Transmet à Brain (Sonnet)
+        5. Retourne la réponse de Brain telle quelle
         """
         if not self.brain:
             return "[Erreur] Brain n'est pas connecté à Vox."
@@ -225,6 +286,14 @@ class Vox:
 
         # Vox reformule intelligemment la requête
         formatted_request = await self.format_request_async(human_message)
+
+        # Accusé de réception instantané — feedback immédiat à l'utilisateur
+        if self._on_thinking_callback:
+            try:
+                ack = await self._generate_ack(human_message)
+                self._on_thinking_callback(ack)
+            except Exception:
+                pass
 
         self.update_agent_status("Vox", active=False, task="communication", progress=0.0)
         self.update_agent_status("Brain", active=True, task="analyse de la requête", progress=0.5)

@@ -22,7 +22,10 @@ Stage 5 : Résilience (retry, circuit breaker, health monitoring)
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 from typing import TYPE_CHECKING, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -691,62 +694,191 @@ class Brain:
                                     analysis: TaskAnalysis | None = None) -> str:
         """
         Crée, exécute et détruit un Worker pour une tâche.
+        Avec retry persistant (max 3 tentatives) guidé par Memory.
 
-        Cycle de vie garanti :
+        Cycle de vie garanti par tentative :
         1. Factory crée le Worker
         2. Worker enregistré dans le WorkerLifecycleManager
-        3. execute() → Memory récupère l'apprentissage (report_to_memory)
+        3. execute() → Memory récupère l'apprentissage
         4. Brain._learn_from_result() → LearningEngine apprend
-        5. Worker.cleanup() → ressources libérées
-        6. Worker retiré du registre
-
-        Le `async with` garantit que cleanup() est TOUJOURS appelé,
-        même si une exception survient pendant l'exécution.
+        5. Si échec → améliore la stratégie via Memory et retente
+        6. Worker.cleanup() → ressources libérées
         """
-        try:
-            worker_type = WorkerType(decision.worker_type)
-        except (ValueError, TypeError):
-            worker_type = WorkerType.GENERIC
+        max_attempts = 3
+        errors_so_far = []
 
-        if analysis:
-            worker = self.factory.create_worker(analysis)
-        else:
-            worker = self.factory.create_worker_for_type(
-                worker_type=worker_type,
-                task=request,
-                subtasks=decision.subtasks,
-            )
+        # Enregistrer la tâche dans le TaskRegistry
+        task_record = None
+        if self.memory and self.memory.is_initialized:
+            try:
+                task_record = self.memory.create_task(
+                    description=request[:200],
+                    worker_type=decision.worker_type or "generic",
+                )
+            except Exception:
+                pass
 
-        # Stage 5 : Passer le health monitor au Worker
-        worker.health_monitor = self._health
-
-        # ── Lifecycle géré par context manager ──
-        # Garantit : execute → learn → cleanup, quoi qu'il arrive
-        async with worker:
-            # 1. Enregistrer dans le registre (RUNNING)
-            self.worker_manager.register(worker)
+        for attempt in range(1, max_attempts + 1):
+            # Si retry → améliorer la stratégie via Memory
+            if attempt > 1:
+                decision, analysis = self._improve_strategy(
+                    request, decision, errors_so_far, attempt
+                )
+                logger.info(
+                    f"[Brain] Retry {attempt}/{max_attempts} — "
+                    f"stratégie: {decision.worker_type} ({decision.reasoning})"
+                )
 
             try:
-                # 2. Exécuter (Memory.report_to_memory fait DANS execute)
-                result = await worker.execute()
+                worker_type = WorkerType(decision.worker_type)
+            except (ValueError, TypeError):
+                worker_type = WorkerType.GENERIC
 
-                # 3. Brain apprend du résultat (LearningEngine)
-                await self._learn_from_result(request, decision, result)
+            if analysis:
+                worker = self.factory.create_worker(analysis)
+            else:
+                worker = self.factory.create_worker_for_type(
+                    worker_type=worker_type,
+                    task=request,
+                    subtasks=decision.subtasks,
+                )
 
-                if result.success:
-                    output = result.output
-                else:
-                    output = f"[Worker {worker_type.value} échoué] {result.output}"
+            # Stage 5 : Passer le health monitor au Worker
+            worker.health_monitor = self._health
 
-            except Exception as e:
-                output = f"[Worker {worker_type.value} crash] {type(e).__name__}: {e}"
+            # Mettre à jour la tâche en "in_progress"
+            if task_record:
+                try:
+                    self.memory.update_task_status(task_record.id, "in_progress")
+                except Exception:
+                    pass
 
-            finally:
-                # 4. Retirer du registre (APRÈS apprentissage, AVANT cleanup)
-                # Note: cleanup() sera appelé par __aexit__ juste après
-                self.worker_manager.unregister(worker)
+            # ── Lifecycle géré par context manager ──
+            async with worker:
+                self.worker_manager.register(worker)
 
-            return output
+                try:
+                    result = await worker.execute()
+                    await self._learn_from_result(request, decision, result)
+
+                    if result.success:
+                        # Marquer la tâche comme terminée
+                        if task_record:
+                            try:
+                                self.memory.update_task_status(
+                                    task_record.id, "done",
+                                    result=result.output[:500],
+                                )
+                            except Exception:
+                                pass
+                        return result.output
+
+                    # Échec → collecter l'erreur pour le prochain essai
+                    errors_so_far.append({
+                        "attempt": attempt,
+                        "worker_type": decision.worker_type,
+                        "error": result.output[:200],
+                        "errors": result.errors or [],
+                    })
+
+                except Exception as e:
+                    errors_so_far.append({
+                        "attempt": attempt,
+                        "worker_type": decision.worker_type,
+                        "error": f"{type(e).__name__}: {str(e)[:200]}",
+                        "errors": [str(e)],
+                    })
+
+                finally:
+                    self.worker_manager.unregister(worker)
+
+        # Toutes les tentatives épuisées
+        if task_record:
+            try:
+                last_err = errors_so_far[-1]["error"] if errors_so_far else "inconnu"
+                self.memory.update_task_status(
+                    task_record.id, "failed",
+                    result=f"Échec après {max_attempts} tentatives: {last_err}",
+                )
+            except Exception:
+                pass
+
+        last_error = errors_so_far[-1]["error"] if errors_so_far else "erreur inconnue"
+        return (
+            f"[Brain] Échec après {max_attempts} tentatives. "
+            f"Dernière erreur: {last_error}"
+        )
+
+    def _improve_strategy(
+        self,
+        request: str,
+        current_decision: BrainDecision,
+        errors_so_far: list[dict],
+        attempt: int,
+    ) -> tuple[BrainDecision, TaskAnalysis | None]:
+        """
+        Améliore la stratégie d'exécution en se basant sur les erreurs passées
+        et les conseils de Memory.
+
+        Stratégie progressive :
+        - Tentative 2 : changer de worker_type si Memory recommande un alternatif
+        - Tentative 3 : simplifier la requête (moins de subtasks)
+        """
+        new_decision = BrainDecision(
+            action=current_decision.action,
+            subtasks=list(current_decision.subtasks),
+            confidence=current_decision.confidence * 0.8,
+            worker_type=current_decision.worker_type,
+            reasoning=current_decision.reasoning,
+        )
+        new_analysis = None
+
+        # Consulter Memory pour des conseils de retry
+        retry_advice = None
+        if self.memory and self.memory.is_initialized and self.memory.learning:
+            try:
+                previous_errors = []
+                for e in errors_so_far:
+                    previous_errors.extend(e.get("errors", []))
+                retry_advice = self.memory.learning.get_retry_advice(
+                    request,
+                    current_decision.worker_type or "generic",
+                    previous_errors,
+                )
+            except Exception:
+                pass
+
+        if attempt == 2:
+            # Stratégie 2 : Changer de worker_type si recommandé
+            if retry_advice and retry_advice.get("recommended_worker"):
+                alt_worker = retry_advice["recommended_worker"]
+                try:
+                    alt_type = WorkerType(alt_worker)
+                    new_decision.worker_type = alt_worker
+                    new_decision.subtasks = self.factory._basic_decompose(request, alt_type)
+                    new_decision.reasoning = (
+                        f"Retry: changement {current_decision.worker_type} → {alt_worker} "
+                        f"(conseil Memory)"
+                    )
+                except ValueError:
+                    pass
+
+            if new_decision.worker_type == current_decision.worker_type:
+                # Pas de recommandation → simplifier la requête
+                if new_decision.subtasks and len(new_decision.subtasks) > 1:
+                    # Garder uniquement la tâche principale
+                    new_decision.subtasks = [new_decision.subtasks[0]]
+                    new_decision.reasoning = "Retry: simplification (1 seule sous-tâche)"
+
+        elif attempt == 3:
+            # Stratégie 3 : Worker generic avec décomposition minimale
+            new_decision.worker_type = "generic"
+            new_decision.subtasks = [request[:200]]
+            new_decision.reasoning = (
+                "Retry final: worker generic, requête simplifiée"
+            )
+
+        return new_decision, new_analysis
 
     async def _learn_from_result(self, request: str, decision: BrainDecision,
                                   result: WorkerResult) -> None:

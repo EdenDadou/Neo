@@ -65,6 +65,109 @@ def print_health(vox):
         console.print(f"[red]  Erreur health check: {e}[/red]")
 
 
+def print_skills(vox):
+    """Affiche les compétences acquises par le système."""
+    if not vox.memory or not vox.memory.is_initialized:
+        console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
+        return
+
+    report = vox.memory.get_skills_report()
+
+    lines = [f"[bold]Compétences acquises[/bold] ({report['total_skills']})\n"]
+
+    if report["skills"]:
+        for s in report["skills"][:15]:
+            count = s.get("success_count", 0)
+            avg_t = s.get("avg_execution_time", 0)
+            lines.append(
+                f"  [green]✓[/green] {s['name']} "
+                f"[dim]({s['worker_type']}, ×{count}, {avg_t:.1f}s)[/dim]"
+            )
+    else:
+        lines.append("  [dim]Aucune compétence acquise pour le moment.[/dim]")
+
+    if report["error_patterns"]:
+        lines.append(f"\n[bold]Patterns d'erreur[/bold] ({report['total_error_patterns']})\n")
+        for e in report["error_patterns"][:10]:
+            lines.append(
+                f"  [red]✗[/red] {e['worker_type']}/{e['error_type']} "
+                f"[dim](×{e['count']})[/dim]"
+            )
+            if e.get("avoidance_rule"):
+                lines.append(f"    [dim]→ {e['avoidance_rule'][:80]}[/dim]")
+
+    if report["performance"]:
+        lines.append(f"\n[bold]Performance par worker[/bold]\n")
+        for wtype, perf in report["performance"].items():
+            lines.append(
+                f"  [{wtype}] {perf['success_rate']} succès "
+                f"({perf['total_tasks']} tâches, avg {perf['avg_time']})"
+            )
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold cyan]Skills & Learning[/bold cyan]",
+        border_style="cyan",
+    ))
+
+
+def print_tasks(vox):
+    """Affiche le registre des tâches."""
+    if not vox.memory or not vox.memory.is_initialized:
+        console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
+        return
+
+    report = vox.memory.get_tasks_report()
+    summary = report.get("summary", {})
+
+    lines = [f"[bold]Registre des tâches[/bold]\n"]
+
+    if report["tasks"]:
+        for t_str in report["tasks"][:20]:
+            lines.append(f"  {t_str}")
+    else:
+        lines.append("  [dim]Aucune tâche enregistrée.[/dim]")
+
+    if summary:
+        lines.append(f"\n[bold]Résumé[/bold]")
+        lines.append(
+            f"  Total : {summary.get('total_tasks', 0)} tâches, "
+            f"{summary.get('total_epics', 0)} epics"
+        )
+        if summary.get("tasks_by_status"):
+            parts = [f"{k}: {v}" for k, v in summary["tasks_by_status"].items()]
+            lines.append(f"  Statuts : {', '.join(parts)}")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold cyan]Task Registry[/bold cyan]",
+        border_style="cyan",
+    ))
+
+
+def print_epics(vox):
+    """Affiche le registre des epics."""
+    if not vox.memory or not vox.memory.is_initialized:
+        console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
+        return
+
+    report = vox.memory.get_tasks_report()
+
+    lines = [f"[bold]Registre des Epics[/bold]\n"]
+
+    if report["epics"]:
+        for e_str in report["epics"][:10]:
+            lines.append(f"  {e_str}")
+    else:
+        lines.append("  [dim]Aucun epic enregistré.[/dim]")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold cyan]Epic Registry[/bold cyan]",
+        border_style="cyan",
+    ))
+
+
 def print_help():
     """Affiche les commandes disponibles."""
     console.print(Panel(
@@ -72,6 +175,9 @@ def print_help():
         "  [cyan]/help[/cyan]     — Affiche cette aide\n"
         "  [cyan]/status[/cyan]   — État des agents\n"
         "  [cyan]/health[/cyan]   — Rapport de santé détaillé\n"
+        "  [cyan]/skills[/cyan]   — Compétences acquises\n"
+        "  [cyan]/tasks[/cyan]    — Registre des tâches\n"
+        "  [cyan]/epics[/cyan]    — Registre des epics\n"
         "  [cyan]/quit[/cyan]     — Quitter le chat\n",
         title="[bold]Aide[/bold]",
         border_style="dim",
@@ -196,10 +302,34 @@ async def conversation_loop(vox):
             print_help()
             continue
 
+        if cmd in ("/skills", "skills"):
+            print_skills(vox)
+            continue
+
+        if cmd in ("/tasks", "tasks"):
+            print_tasks(vox)
+            continue
+
+        if cmd in ("/epics", "epics"):
+            print_epics(vox)
+            continue
+
         # Process via Vox → Brain → Vox
         try:
+            # Callback pour l'accusé de réception instantané de Vox
+            ack_displayed = False
+
+            def on_thinking(ack_text: str):
+                nonlocal ack_displayed
+                if not ack_displayed:
+                    console.print(f"\n  [dim cyan]Vox >[/dim cyan] [dim]{ack_text}[/dim]")
+                    ack_displayed = True
+
+            vox.set_thinking_callback(on_thinking)
+
             with console.status("[bold cyan]  Brain analyse...[/bold cyan]"):
                 response = await vox.process_message(user_input)
+
             console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response}\n")
         except Exception as e:
             console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")

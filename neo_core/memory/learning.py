@@ -396,6 +396,74 @@ class LearningEngine:
 
         return advice
 
+    def get_retry_advice(
+        self,
+        request: str,
+        current_worker_type: str,
+        previous_errors: list[str],
+    ) -> dict:
+        """
+        Conseils spécifiques pour une tentative de retry.
+
+        Analyse les erreurs passées et retourne :
+        - recommended_worker: type de worker alternatif à essayer
+        - simplify: True si la requête devrait être simplifiée
+        - warnings: avertissements basés sur l'historique
+
+        Appelé par Brain._improve_strategy() lors des retries.
+        """
+        result = {
+            "recommended_worker": None,
+            "simplify": False,
+            "warnings": [],
+        }
+
+        # 1. Analyser les erreurs actuelles
+        error_types = [self._classify_error([e]) for e in previous_errors if e]
+
+        # Si erreur de timeout → simplifier
+        if "timeout" in error_types:
+            result["simplify"] = True
+            result["warnings"].append("Timeout détecté → simplifier la requête")
+
+        # Si erreur d'outil → changer de worker
+        if "tool_failure" in error_types:
+            result["warnings"].append("Échec d'outil → essayer un worker différent")
+
+        # 2. Consulter l'historique des compétences
+        advice = self.get_advice(request, current_worker_type)
+
+        if advice.recommended_worker and advice.recommended_worker != current_worker_type:
+            result["recommended_worker"] = advice.recommended_worker
+
+        # 3. Chercher un worker avec meilleur taux de succès
+        if not result["recommended_worker"]:
+            best_alternative = None
+            best_rate = 0.0
+
+            for wtype, perf in self._performance_cache.items():
+                if wtype == current_worker_type:
+                    continue
+                if perf.total_tasks >= 2 and perf.success_rate > best_rate:
+                    best_rate = perf.success_rate
+                    best_alternative = wtype
+
+            if best_alternative and best_rate > 0.6:
+                result["recommended_worker"] = best_alternative
+                result["warnings"].append(
+                    f"Worker '{best_alternative}' a {best_rate:.0%} de succès"
+                )
+
+        # 4. Vérifier si le worker actuel a un taux d'échec élevé
+        current_perf = self._performance_cache.get(current_worker_type)
+        if current_perf and current_perf.failure_rate > 0.5 and current_perf.total_tasks >= 3:
+            result["simplify"] = True
+            result["warnings"].append(
+                f"Worker '{current_worker_type}' a {current_perf.failure_rate:.0%} d'échec"
+            )
+
+        return result
+
     def get_performance_summary(self) -> dict:
         """Retourne un résumé des performances de tous les workers."""
         summary = {}

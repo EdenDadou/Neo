@@ -27,6 +27,7 @@ from neo_core.memory.store import MemoryStore, MemoryRecord
 from neo_core.memory.context import ContextEngine, ContextBlock
 from neo_core.memory.consolidator import MemoryConsolidator
 from neo_core.memory.learning import LearningEngine, LearningAdvice
+from neo_core.memory.task_registry import TaskRegistry, Task, Epic
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
 
 # Prompt pour la synthèse intelligente de conversations
@@ -77,6 +78,7 @@ class MemoryAgent:
     _context_engine: Optional[ContextEngine] = field(default=None, init=False)
     _consolidator: Optional[MemoryConsolidator] = field(default=None, init=False)
     _learning: Optional[LearningEngine] = field(default=None, init=False)
+    _task_registry: Optional[TaskRegistry] = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
     _turn_count: int = field(default=0, init=False)
     _consolidation_interval: int = 50  # Consolide tous les N tours
@@ -92,6 +94,7 @@ class MemoryAgent:
         self._context_engine = ContextEngine(self._store, self.config.memory)
         self._consolidator = MemoryConsolidator(self._store, self.config)
         self._learning = LearningEngine(self._store)
+        self._task_registry = TaskRegistry(self._store)
 
         self._initialized = True
         self._mock_mode = self.config.is_mock_mode()
@@ -205,16 +208,70 @@ class MemoryAgent:
     def on_conversation_turn(self, user_message: str, ai_response: str) -> None:
         """
         Appelé après chaque échange conversationnel.
-        Stocke l'échange et déclenche la consolidation si nécessaire.
+        Stocke l'échange, enrichit les tâches actives, et déclenche
+        la consolidation si nécessaire.
+
+        Memory est le garant du savoir et du progrès sur les missions.
         """
         if not self._initialized:
             return
 
         self._context_engine.store_conversation_turn(user_message, ai_response)
 
+        # Enrichir les tâches actives avec le contexte de la conversation
+        self._enrich_active_tasks(user_message, ai_response)
+
         self._turn_count += 1
         if self._turn_count % self._consolidation_interval == 0:
             self.consolidate()
+
+    def _enrich_active_tasks(self, user_message: str, ai_response: str) -> None:
+        """
+        Enrichit automatiquement les tâches in_progress avec le contexte
+        des conversations. Memory collecte les informations pertinentes
+        et les associe aux missions en cours.
+        """
+        if not self._task_registry:
+            return
+
+        try:
+            active_tasks = self._task_registry.get_active_tasks()
+            if not active_tasks:
+                return
+
+            # Extraire un résumé court de l'échange pour le contexte
+            exchange_summary = (
+                f"[{self._turn_count}] Q: {user_message[:100]} "
+                f"→ R: {ai_response[:150]}"
+            )
+
+            for task in active_tasks:
+                # Vérifier si l'échange est pertinent pour cette tâche
+                # (heuristique simple : mots clés en commun)
+                task_words = set(task.description.lower().split())
+                msg_words = set(user_message.lower().split())
+                common = task_words & msg_words
+
+                # Au moins 2 mots en commun (hors mots vides) → pertinent
+                stop_words = {"le", "la", "les", "de", "du", "des", "un", "une",
+                              "et", "est", "en", "pour", "dans", "sur", "avec",
+                              "que", "qui", "je", "tu", "il", "on", "ce", "ça"}
+                meaningful_common = common - stop_words
+
+                if len(meaningful_common) >= 2:
+                    self._task_registry.add_task_context(
+                        task.id, exchange_summary
+                    )
+
+                    # Si la tâche fait partie d'un epic, enrichir l'epic aussi
+                    if task.epic_id:
+                        self._task_registry.add_epic_context(
+                            task.epic_id,
+                            f"[Tâche {task.id[:8]}] {exchange_summary[:200]}"
+                        )
+
+        except Exception:
+            pass  # Ne jamais bloquer le flux principal
 
     async def smart_summarize(self, entries: list[MemoryRecord]) -> Optional[str]:
         """
@@ -355,4 +412,91 @@ class MemoryAgent:
             "has_llm": self._llm is not None or (
                 not self._mock_mode and is_oauth_token(self.config.llm.api_key or "")
             ),
+        }
+
+    # ─── Skills consultables ─────────────────────────────
+
+    def get_skills_report(self) -> dict:
+        """
+        Retourne un rapport complet des compétences acquises.
+
+        Inclut :
+        - Liste des skills avec stats (success_count, avg_time, best_approach)
+        - Patterns d'erreur identifiés
+        - Performance par type de worker
+        """
+        if not self._initialized or not self._learning:
+            return {
+                "skills": [],
+                "error_patterns": [],
+                "performance": {},
+                "total_skills": 0,
+            }
+
+        skills = self._learning.get_learned_skills()
+        error_patterns = self._learning.get_error_patterns()
+        performance = self._learning.get_performance_summary()
+
+        return {
+            "skills": [s.to_dict() for s in skills],
+            "error_patterns": [e.to_dict() for e in error_patterns],
+            "performance": performance,
+            "total_skills": len(skills),
+            "total_error_patterns": len(error_patterns),
+        }
+
+    # ─── Task Registry (Tâches et Epics) ─────────────────
+
+    @property
+    def task_registry(self) -> Optional[TaskRegistry]:
+        """Accès au registre de tâches."""
+        return self._task_registry
+
+    def create_task(self, description: str, worker_type: str,
+                    epic_id: str | None = None) -> Task | None:
+        """Crée une nouvelle tâche dans le registre."""
+        if not self._initialized or not self._task_registry:
+            return None
+        return self._task_registry.create_task(description, worker_type, epic_id)
+
+    def create_epic(self, description: str,
+                    subtask_descriptions: list[tuple[str, str]],
+                    strategy: str = "") -> Epic | None:
+        """Crée un Epic avec ses sous-tâches."""
+        if not self._initialized or not self._task_registry:
+            return None
+        return self._task_registry.create_epic(description, subtask_descriptions, strategy)
+
+    def update_task_status(self, task_id: str, status: str,
+                           result: str = "") -> Task | None:
+        """Met à jour le statut d'une tâche."""
+        if not self._initialized or not self._task_registry:
+            return None
+        return self._task_registry.update_task_status(task_id, status, result)
+
+    def add_task_context(self, task_id: str, note: str) -> Task | None:
+        """Ajoute une note de contexte à une tâche active."""
+        if not self._initialized or not self._task_registry:
+            return None
+        return self._task_registry.add_task_context(task_id, note)
+
+    def add_epic_context(self, epic_id: str, note: str) -> Epic | None:
+        """Ajoute une note de contexte à un epic actif."""
+        if not self._initialized or not self._task_registry:
+            return None
+        return self._task_registry.add_epic_context(epic_id, note)
+
+    def get_tasks_report(self) -> dict:
+        """Retourne un rapport du registre de tâches."""
+        if not self._initialized or not self._task_registry:
+            return {"tasks": [], "epics": [], "summary": {}}
+
+        tasks = self._task_registry.get_all_tasks(limit=30)
+        epics = self._task_registry.get_all_epics(limit=10)
+        summary = self._task_registry.get_summary()
+
+        return {
+            "tasks": [str(t) for t in tasks],
+            "epics": [str(e) for e in epics],
+            "summary": summary,
         }
