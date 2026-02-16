@@ -40,6 +40,9 @@ class AgentModelConfig:
     model: str = "claude-sonnet-4-5-20250929"
     temperature: float = 0.7
     max_tokens: int = 4096
+    # ── Champs multi-provider (remplis par le ModelRegistry) ──
+    provider: str = "anthropic"      # "anthropic" | "ollama" | "groq" | "gemini"
+    model_id: str = ""               # "provider:model_name" (ex: "groq:llama-3.3-70b")
 
 
 # ─── Modèles par agent ──────────────────────────────────
@@ -109,7 +112,35 @@ AGENT_MODELS = {
 
 
 def get_agent_model(agent_name: str) -> AgentModelConfig:
-    """Récupère la config modèle pour un agent donné."""
+    """
+    Récupère la config modèle pour un agent donné.
+
+    Stratégie :
+    1. Si le ModelRegistry a des modèles testés → routing dynamique
+       (local gratuit > cloud gratuit > cloud payant)
+    2. Sinon → fallback aux modèles hardcodés (Anthropic)
+    """
+    try:
+        from neo_core.providers.registry import get_model_registry
+        registry = get_model_registry()
+        stats = registry.get_stats()
+
+        if stats.get("available_models", 0) > 0:
+            model = registry.get_best_for(agent_name)
+            if model:
+                # Récupérer la temperature/max_tokens de la config hardcodée
+                defaults = AGENT_MODELS.get(agent_name, AGENT_MODELS["brain"])
+                return AgentModelConfig(
+                    model=model.model_name,
+                    temperature=defaults.temperature,
+                    max_tokens=min(defaults.max_tokens, model.max_output_tokens),
+                    provider=model.provider,
+                    model_id=model.model_id,
+                )
+    except Exception:
+        pass
+
+    # Fallback : modèles hardcodés (Anthropic)
     return AGENT_MODELS.get(agent_name, AGENT_MODELS["brain"])
 
 
@@ -188,8 +219,25 @@ class NeoConfig:
         return True
 
     def is_mock_mode(self) -> bool:
-        """Indique si on fonctionne sans clé API (mode mock pour les tests)."""
-        return not self.llm.api_key
+        """
+        Indique si on fonctionne en mode mock (réponses simulées).
+
+        Le mode mock est désactivé si au moins un provider est disponible :
+        - Anthropic (ANTHROPIC_API_KEY)
+        - Groq (GROQ_API_KEY)
+        - Gemini (GEMINI_API_KEY)
+        - Ollama (serveur local)
+        """
+        # Si une clé Anthropic existe, pas mock
+        if self.llm.api_key:
+            return False
+        # Vérifier les autres providers via le .env
+        if os.getenv("GROQ_API_KEY"):
+            return False
+        if os.getenv("GEMINI_API_KEY"):
+            return False
+        # Pas de vérification Ollama ici (trop lent au startup)
+        return True
 
     def is_installed(self) -> bool:
         """Vérifie si le wizard d'installation a été exécuté."""

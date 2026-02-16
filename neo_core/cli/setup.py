@@ -286,7 +286,8 @@ def test_connection(api_key: str) -> bool:
         return False
 
 
-def save_config(core_name: str, user_name: str, api_key: str, python_path: str):
+def save_config(core_name: str, user_name: str, api_key: str,
+                python_path: str, provider_keys: dict | None = None):
     """Sauvegarde la configuration."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -294,29 +295,230 @@ def save_config(core_name: str, user_name: str, api_key: str, python_path: str):
         "core_name": core_name,
         "user_name": user_name,
         "python_path": python_path,
-        "version": "0.5",
-        "stage": 5,
+        "version": "0.6",
+        "stage": 6,
     }
+
+    # Sauvegarder les providers configurés (sans les clés)
+    if provider_keys:
+        config["providers"] = {
+            k: {"enabled": bool(v)}
+            for k, v in provider_keys.items()
+        }
+
+    # Fusionner avec la config existante (tests, routing)
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                existing = json.load(f)
+            # Garder les résultats de tests et le routing existants
+            for key in ("tested_models", "model_routing"):
+                if key in existing and key not in config:
+                    config[key] = existing[key]
+        except (json.JSONDecodeError, IOError):
+            pass
 
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
     print(f"  {GREEN}✓{RESET} Configuration sauvegardée: {CONFIG_FILE}")
 
-    env_content = f"""# Neo Core — Configuration Environnement
-# Généré par neo.py setup
+    # .env avec toutes les clés
+    env_lines = [
+        "# Neo Core — Configuration Environnement",
+        "# Généré par neo.py setup",
+        "",
+        f"ANTHROPIC_API_KEY={api_key}",
+    ]
 
-ANTHROPIC_API_KEY={api_key}
-NEO_CORE_NAME={core_name}
-NEO_USER_NAME={user_name}
-NEO_DEBUG=false
-NEO_LOG_LEVEL=INFO
-"""
+    if provider_keys:
+        if provider_keys.get("groq") and provider_keys["groq"] != "local":
+            env_lines.append(f"GROQ_API_KEY={provider_keys['groq']}")
+        if provider_keys.get("gemini") and provider_keys["gemini"] != "local":
+            env_lines.append(f"GEMINI_API_KEY={provider_keys['gemini']}")
+
+    env_lines.extend([
+        "",
+        f"NEO_CORE_NAME={core_name}",
+        f"NEO_USER_NAME={user_name}",
+        "NEO_DEBUG=false",
+        "NEO_LOG_LEVEL=INFO",
+        "",
+    ])
+
     with open(ENV_FILE, "w") as f:
-        f.write(env_content)
+        f.write("\n".join(env_lines))
 
     os.chmod(ENV_FILE, 0o600)
     print(f"  {GREEN}✓{RESET} Variables d'environnement: {ENV_FILE}")
+
+
+def configure_hardware_and_providers(api_key: str) -> dict:
+    """
+    Étape 5 du wizard : détection hardware + configuration des providers.
+
+    Retourne un dict avec les clés API et modèles configurés.
+    """
+    provider_keys = {"anthropic": api_key}
+
+    # ── 5a. Détection hardware ──
+    print(f"  {DIM}⧗ Détection du hardware...{RESET}", end="", flush=True)
+    try:
+        from neo_core.providers.hardware import HardwareDetector
+        profile = HardwareDetector.detect()
+        print(f"\r  {GREEN}✓{RESET} {profile.summary()}")
+    except Exception as e:
+        print(f"\r  {YELLOW}⚠{RESET} Impossible de détecter le hardware: {e}")
+        profile = None
+
+    # ── 5b. Modèles locaux (Ollama) ──
+    print()
+    if profile and profile.max_model_size() != "none":
+        models = profile.recommend_ollama_models()
+        model_names = ", ".join(m["model"] for m in models[:2])
+        print(f"  {BOLD}Modèles locaux (Ollama) :{RESET}")
+        print(f"  {DIM}Votre machine peut faire tourner des modèles jusqu'à {profile.max_model_size()}{RESET}")
+        print(f"  {DIM}Recommandé : {model_names}{RESET}")
+        print()
+
+        if ask_confirm("Installer Ollama et les modèles recommandés ?"):
+            # Vérifier si Ollama est déjà installé
+            ollama_installed = HardwareDetector.is_ollama_installed()
+            if not ollama_installed:
+                print(f"  {DIM}⧗ Installation d'Ollama...{RESET}", end="", flush=True)
+                success = run_command(
+                    "curl -fsSL https://ollama.com/install.sh | sh",
+                    "Installation d'Ollama"
+                )
+                if not success:
+                    print(f"  {YELLOW}⚠{RESET} Installation Ollama échouée. Vous pouvez l'installer manuellement :")
+                    print(f"  {CYAN}curl -fsSL https://ollama.com/install.sh | sh{RESET}")
+                    ollama_installed = False
+                else:
+                    ollama_installed = True
+
+            if ollama_installed:
+                # Démarrer Ollama en arrière-plan si pas encore lancé
+                if not HardwareDetector.is_ollama_running():
+                    run_command("ollama serve &", "Démarrage du serveur Ollama")
+                    import time
+                    time.sleep(2)  # Attendre le démarrage
+
+                # Télécharger les modèles recommandés
+                for m in models[:2]:
+                    print(f"  {DIM}⧗ Téléchargement de {m['model']}...{RESET}", end="", flush=True)
+                    success = run_command(
+                        f"ollama pull {m['model']}",
+                        f"Téléchargement de {m['model']}"
+                    )
+                    if success:
+                        print(f"\r  {GREEN}✓{RESET} {m['model']} prêt ({m['size']}, {m['role']})")
+                    else:
+                        print(f"\r  {YELLOW}⚠{RESET} Échec du téléchargement de {m['model']}")
+
+                provider_keys["ollama"] = "local"  # Marqueur pour Ollama
+    else:
+        print(f"  {DIM}Modèles locaux : hardware insuffisant, utilisation cloud uniquement.{RESET}")
+
+    # ── 5c. Groq (cloud gratuit) ──
+    print()
+    print(f"  {BOLD}Modèles cloud gratuits :{RESET}")
+    print()
+    print(f"  {DIM}Groq — Llama 3.3 70B, ultra-rapide, 14 400 req/jour{RESET}")
+    print(f"  {DIM}Clé gratuite : https://console.groq.com/keys{RESET}")
+
+    if ask_confirm("Configurer Groq (gratuit) ?"):
+        groq_key = ask("Clé Groq (gsk_...)", secret=True)
+        if groq_key:
+            provider_keys["groq"] = groq_key
+            print(f"  {GREEN}✓{RESET} Groq configuré")
+        else:
+            print(f"  {DIM}  (ignoré){RESET}")
+
+    # ── 5d. Gemini (cloud gratuit) ──
+    print()
+    print(f"  {DIM}Gemini — 1M tokens contexte, 250 req/jour{RESET}")
+    print(f"  {DIM}Clé gratuite : https://aistudio.google.com/apikey{RESET}")
+
+    if ask_confirm("Configurer Gemini (gratuit) ?"):
+        gemini_key = ask("Clé Gemini", secret=True)
+        if gemini_key:
+            provider_keys["gemini"] = gemini_key
+            print(f"  {GREEN}✓{RESET} Gemini configuré")
+        else:
+            print(f"  {DIM}  (ignoré){RESET}")
+
+    # ── 5e. Test des modèles configurés ──
+    print()
+    print(f"  {DIM}⧗ Test des modèles configurés...{RESET}")
+
+    test_results = _test_providers(provider_keys)
+
+    for model_id, result in test_results.items():
+        if result["success"]:
+            print(f"  {GREEN}✓{RESET} {model_id} → {result['latency_ms']:.0f}ms")
+        else:
+            print(f"  {RED}✗{RESET} {model_id} → {result['error'][:60]}")
+
+    return provider_keys
+
+
+def _test_providers(provider_keys: dict) -> dict:
+    """Teste les providers configurés (sync wrapper)."""
+    import asyncio
+
+    async def _run_tests():
+        results = {}
+
+        try:
+            from neo_core.providers.registry import ModelRegistry
+            from neo_core.providers.anthropic_provider import AnthropicProvider
+            from neo_core.providers.groq_provider import GroqProvider
+            from neo_core.providers.gemini_provider import GeminiProvider
+            from neo_core.providers.ollama_provider import OllamaProvider
+
+            registry = ModelRegistry()
+
+            if provider_keys.get("anthropic"):
+                registry.register_provider(AnthropicProvider(api_key=provider_keys["anthropic"]))
+            if provider_keys.get("groq"):
+                registry.register_provider(GroqProvider(api_key=provider_keys["groq"]))
+            if provider_keys.get("gemini"):
+                registry.register_provider(GeminiProvider(api_key=provider_keys["gemini"]))
+            if provider_keys.get("ollama"):
+                ollama = OllamaProvider()
+                if ollama.is_configured():
+                    registry.register_provider(ollama)
+
+            registry.discover_models()
+
+            for model_id, model in registry._models.items():
+                try:
+                    result = await registry.test_model(model_id)
+                    results[model_id] = result.to_dict()
+                except Exception as e:
+                    results[model_id] = {
+                        "success": False,
+                        "error": str(e),
+                        "latency_ms": 0,
+                    }
+
+        except Exception as e:
+            results["__error__"] = {
+                "success": False,
+                "error": f"Erreur d'initialisation: {e}",
+                "latency_ms": 0,
+            }
+
+        return results
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            return {}
+        return loop.run_until_complete(_run_tests())
+    except RuntimeError:
+        return asyncio.run(_run_tests())
 
 
 def run_setup():
@@ -327,7 +529,7 @@ def run_setup():
     print(f"  {DIM}Ce wizard va tout configurer en quelques étapes.{RESET}\n")
 
     # ─── Étape 1 : Vérifications système ─────────────────────────
-    print_step(1, 5, "Vérifications système")
+    print_step(1, 7, "Vérifications système")
 
     if not check_python_version():
         sys.exit(1)
@@ -335,7 +537,7 @@ def run_setup():
     python_path = setup_venv()
 
     # ─── Étape 2 : Installation des dépendances ─────────────────
-    print_step(2, 5, "Installation des dépendances")
+    print_step(2, 7, "Installation des dépendances")
 
     if not install_dependencies(python_path):
         print(f"\n  {RED}⚠ L'installation a rencontré des erreurs.{RESET}")
@@ -345,7 +547,7 @@ def run_setup():
             sys.exit(1)
 
     # ─── Étape 3 : Identité du Core ─────────────────────────────
-    print_step(3, 5, "Identité du Core")
+    print_step(3, 7, "Identité du Core")
 
     print(f"  {DIM}Donnez un nom à votre système IA.{RESET}")
     print(f"  {DIM}Ce nom sera utilisé par les agents pour se référencer.{RESET}\n")
@@ -359,18 +561,30 @@ def run_setup():
 
     print(f"\n  {GREEN}✓{RESET} Core: {BOLD}{core_name}{RESET} — Utilisateur: {BOLD}{user_name}{RESET}")
 
-    # ─── Étape 4 : Connexion Anthropic ───────────────────────────
-    print_step(4, 5, "Connexion Anthropic")
+    # ─── Étape 4 : Connexion Anthropic (optionnel) ───────────────
+    print_step(4, 7, "Connexion Anthropic (payant, optionnel)")
 
     api_key = configure_auth()
 
-    # ─── Étape 5 : Sauvegarde et vérification ────────────────────
-    print_step(5, 5, "Finalisation")
+    # ─── Étape 5 : Modèles LLM (hardware + providers gratuits) ───
+    print_step(5, 7, "Configuration des modèles LLM")
 
-    save_config(core_name, user_name, api_key, python_path)
+    provider_keys = configure_hardware_and_providers(api_key)
 
-    # Test de connexion
-    test_connection(api_key)
+    # ─── Étape 6 : Sauvegarde ────────────────────────────────────
+    print_step(6, 7, "Sauvegarde")
+
+    save_config(core_name, user_name, api_key, python_path, provider_keys)
+
+    # ─── Étape 7 : Test final ────────────────────────────────────
+    print_step(7, 7, "Vérification finale")
+
+    if api_key:
+        test_connection(api_key)
+
+    # Compter les providers configurés
+    active_providers = [k for k, v in provider_keys.items() if v]
+    provider_list = ", ".join(active_providers) if active_providers else "Mode mock"
 
     # ─── Résumé + lancement du chat ──────────────────────────────
     print(f"""
@@ -379,9 +593,9 @@ def run_setup():
   ╚═══════════════════════════════════════════════╝{RESET}
 
   {BOLD}Configuration :{RESET}
-    Nom du Core  : {GREEN}{core_name}{RESET}
-    Utilisateur  : {GREEN}{user_name}{RESET}
-    Auth         : {GREEN}{'API Key / OAuth' if api_key else 'Mode mock'}{RESET}
+    Nom du Core   : {GREEN}{core_name}{RESET}
+    Utilisateur   : {GREEN}{user_name}{RESET}
+    Providers LLM : {GREEN}{provider_list}{RESET}
 """)
 
     print(f"\n  {CYAN}Démarrage de {core_name}...{RESET}\n")

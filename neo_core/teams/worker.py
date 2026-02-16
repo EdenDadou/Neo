@@ -347,15 +347,13 @@ class Worker:
         """
         Exécution réelle via le LLM avec boucle tool_use native.
 
-        Stage 5 : Le LLM contrôle ses outils :
+        Stage 6 : Route via le système multi-provider.
+        Le LLM contrôle ses outils :
         1. On envoie la requête + définitions d'outils
         2. Si stop_reason == "tool_use" → on exécute l'outil demandé
         3. On renvoie le résultat au LLM
         4. On boucle jusqu'à stop_reason == "end_turn" (max N itérations)
         """
-        import httpx
-
-        api_key = self.config.llm.api_key
         memory_context = ""
         if self.memory:
             memory_context = self.memory.get_context(self.task)
@@ -363,7 +361,7 @@ class Worker:
         # Construire le prompt système avec la date réelle
         from datetime import datetime
         now = datetime.now()
-        date_str = now.strftime("%A %d %B %Y")  # ex: "Monday 16 February 2026"
+        date_str = now.strftime("%A %d %B %Y")
         time_str = now.strftime("%H:%M")
 
         prompt = self.system_prompt.format(
@@ -372,19 +370,6 @@ class Worker:
             current_date=date_str,
             current_time=time_str,
         )
-
-        # Headers d'auth
-        headers = {
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-
-        if is_oauth_token(api_key):
-            valid_token = get_valid_access_token() or api_key
-            headers["Authorization"] = f"Bearer {valid_token}"
-            headers["anthropic-beta"] = OAUTH_BETA_HEADER
-        else:
-            headers["x-api-key"] = api_key
 
         # Message initial
         user_message = self.task
@@ -399,8 +384,8 @@ class Worker:
         # Messages conversationnels (accumule les tool_use)
         messages = [{"role": "user", "content": user_message}]
 
-        # Config retry
-        retry_config = RetryConfig.from_resilience_config(self.config.resilience)
+        # Nom d'agent pour le routing multi-provider
+        agent_name = f"worker:{self.worker_type.value}"
 
         # Tracking des tool calls
         tool_calls = []
@@ -408,22 +393,14 @@ class Worker:
         total_text_parts = []
 
         for iteration in range(max_iterations):
-            # Payload — utilise le modèle dédié au type de Worker
-            payload = {
-                "model": self._model_config.model,
-                "max_tokens": self._model_config.max_tokens,
-                "temperature": self._model_config.temperature,
-                "system": prompt,
-                "messages": messages,
-            }
-
-            # N'inclure les outils que s'il y en a
-            if tool_schemas:
-                payload["tools"] = tool_schemas
-
-            # Appel API avec retry
-            response_data = await self._api_call_with_retry(
-                headers, payload, retry_config
+            # Appel via le router multi-provider
+            response_data = await self._provider_call(
+                agent_name=agent_name,
+                messages=messages,
+                system=prompt,
+                tools=tool_schemas if tool_schemas else None,
+                max_tokens=self._model_config.max_tokens,
+                temperature=self._model_config.temperature,
             )
 
             if response_data is None:
@@ -504,65 +481,43 @@ class Worker:
             metadata={"iterations": max_iterations, "max_reached": True},
         )
 
-    async def _api_call_with_retry(
+    async def _provider_call(
         self,
-        headers: dict,
-        payload: dict,
-        retry_config: RetryConfig,
+        agent_name: str,
+        messages: list[dict],
+        system: str = "",
+        tools: list[dict] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
     ) -> dict | None:
         """
-        Appel API Anthropic avec retry et exponential backoff.
+        Appel LLM via le router multi-provider.
 
-        Retourne le JSON de réponse ou None si toutes les tentatives échouent.
+        Retourne le dict brut de la réponse (compatible boucle tool_use)
+        ou None si toutes les tentatives échouent.
         """
-        import httpx
+        try:
+            from neo_core.providers.router import route_chat_raw
 
-        timeout = self.config.resilience.api_timeout
-
-        async def _do_call():
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers=headers,
-                    json=payload,
-                    timeout=timeout,
-                )
-
-            status = response.status_code
+            response_data = await route_chat_raw(
+                agent_name=agent_name,
+                messages=messages,
+                system=system,
+                tools=tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
 
             # Record dans le health monitor
             if self.health_monitor:
-                self.health_monitor.record_api_call(
-                    success=(status == 200),
-                    error=f"HTTP {status}" if status != 200 else "",
-                )
+                success = response_data is not None
+                self.health_monitor.record_api_call(success=success)
 
-            if status == 200:
-                return response.json()
+            return response_data
 
-            # Erreurs retryables
-            if status in retry_config.retryable_status_codes:
-                error_msg = response.text[:300]
-                raise RetryableError(f"HTTP {status}: {error_msg}", status_code=status)
-
-            # Erreurs non retryables (400, 401, 403, 404)
-            error_data = {}
-            try:
-                error_data = response.json()
-            except Exception:
-                pass
-            error_msg = error_data.get("error", {}).get("message", response.text[:300])
-            raise NonRetryableError(f"HTTP {status}: {error_msg}", status_code=status)
-
-        try:
-            return await retry_with_backoff(_do_call, retry_config)
-        except NonRetryableError as e:
-            # Erreur définitive, pas de retry
-            return None
-        except RetryableError:
-            # Toutes les tentatives épuisées
-            return None
         except Exception:
+            if self.health_monitor:
+                self.health_monitor.record_api_call(success=False)
             return None
 
     def _mock_execute(self) -> WorkerResult:

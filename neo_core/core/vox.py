@@ -130,44 +130,38 @@ class Vox:
             self._llm = None
 
     async def _vox_llm_call(self, prompt: str) -> str:
-        """Appel LLM dédié pour Vox (reformulation/restitution)."""
+        """
+        Appel LLM dédié pour Vox (reformulation/restitution).
+
+        Route via le système multi-provider (Ollama, Groq, Gemini, Anthropic).
+        Fallback automatique vers Anthropic direct si aucun provider configuré.
+        """
         if self._mock_mode:
             return prompt  # Passthrough en mock
 
-        api_key = self.config.llm.api_key
+        try:
+            from neo_core.providers.router import route_chat
 
-        if is_oauth_token(api_key):
-            # Mode OAuth direct
-            import httpx
-            valid_token = get_valid_access_token() or api_key
-            headers = {
-                "Authorization": f"Bearer {valid_token}",
-                "anthropic-beta": OAUTH_BETA_HEADER,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            }
-            payload = {
-                "model": self._model_config.model,
-                "max_tokens": self._model_config.max_tokens,
-                "temperature": self._model_config.temperature,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers=headers,
-                    json=payload,
-                    timeout=30.0,
-                )
-            if response.status_code == 200:
-                data = response.json()
-                return data["content"][0]["text"]
+            response = await route_chat(
+                agent_name="vox",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self._model_config.max_tokens,
+                temperature=self._model_config.temperature,
+            )
+
+            if response.text and not response.text.startswith("[Erreur"):
+                return response.text
             # Fallback : retourne le prompt original
             return prompt
 
-        elif self._llm:
-            result = await self._llm.ainvoke(prompt)
-            return result.content
+        except Exception:
+            # Fallback LangChain legacy
+            if self._llm:
+                try:
+                    result = await self._llm.ainvoke(prompt)
+                    return result.content
+                except Exception:
+                    pass
 
         return prompt  # Passthrough si pas de LLM
 

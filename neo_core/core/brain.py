@@ -813,68 +813,47 @@ class Brain:
     async def _raw_llm_call(self, prompt: str) -> str:
         """
         Appel LLM brut (sans historique ni system prompt Brain).
-        Stage 5 : Avec retry et health monitoring.
+
+        Stage 6 : Route via le système multi-provider.
+        Fallback automatique vers Anthropic direct.
         """
-        if self._oauth_mode:
-            import httpx as _httpx
+        try:
+            from neo_core.providers.router import route_chat
 
-            valid_token = get_valid_access_token()
-            token = valid_token or getattr(self, "_current_token", None)
-            if not token:
-                raise Exception("Aucun token OAuth valide")
+            response = await route_chat(
+                agent_name="brain",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1024,
+                temperature=0.3,
+            )
 
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "anthropic-beta": OAUTH_BETA_HEADER,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            }
-
-            payload = {
-                "model": self._model_config.model,
-                "max_tokens": 1024,
-                "temperature": 0.3,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-
-            timeout = self.config.resilience.api_timeout
-
-            async def _do_call():
-                async with _httpx.AsyncClient() as client:
-                    response = await client.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers=headers,
-                        json=payload,
-                        timeout=timeout,
-                    )
-
-                status = response.status_code
-                if self._health:
-                    self._health.record_api_call(success=(status == 200))
-
-                if status == 200:
-                    data = response.json()
-                    return data["content"][0]["text"]
-
-                if status in self._retry_config.retryable_status_codes:
-                    raise RetryableError(f"API {status}", status_code=status)
-
-                error_data = response.json() if "json" in response.headers.get("content-type", "") else {}
-                error_msg = error_data.get("error", {}).get("message", response.text[:300])
-                raise NonRetryableError(f"API {status}: {error_msg}", status_code=status)
-
-            return await retry_with_backoff(_do_call, self._retry_config)
-        else:
-            result = await self._llm.ainvoke(prompt)
             if self._health:
-                self._health.record_api_call(success=True)
-            return result.content
+                self._health.record_api_call(
+                    success=not response.text.startswith("[Erreur")
+                )
+
+            if response.text and not response.text.startswith("[Erreur"):
+                return response.text
+
+            raise Exception(response.text)
+
+        except Exception as e:
+            # Fallback LangChain legacy
+            if self._llm:
+                result = await self._llm.ainvoke(prompt)
+                if self._health:
+                    self._health.record_api_call(success=True)
+                return result.content
+            raise
 
     async def _oauth_response(self, request: str, memory_context: str,
                               conversation_history: list[BaseMessage] | None = None) -> str:
-        """Génère une réponse via OAuth Bearer + beta header."""
-        import httpx as _httpx
+        """
+        Génère une réponse Brain complète (avec historique + system prompt).
 
+        Stage 6 : Route via le système multi-provider.
+        Compatible OAuth, API key, et providers alternatifs.
+        """
         messages = []
         if conversation_history:
             for msg in conversation_history:
@@ -892,56 +871,31 @@ class Brain:
             current_time=now.strftime("%H:%M"),
         )
 
-        valid_token = get_valid_access_token()
-        if valid_token:
-            token = valid_token
-        else:
-            token = getattr(self, "_current_token", None)
-            if not token:
-                return "[Brain Erreur] Aucun token OAuth valide disponible"
+        try:
+            from neo_core.providers.router import route_chat
 
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "anthropic-beta": OAUTH_BETA_HEADER,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
+            response = await route_chat(
+                agent_name="brain",
+                messages=messages,
+                system=system_prompt,
+                max_tokens=self._model_config.max_tokens,
+                temperature=self._model_config.temperature,
+            )
 
-        payload = {
-            "model": self._model_config.model,
-            "max_tokens": self._model_config.max_tokens,
-            "temperature": self._model_config.temperature,
-            "system": system_prompt,
-            "messages": messages,
-        }
-
-        timeout = self.config.resilience.api_timeout
-
-        async def _do_call():
-            async with _httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers=headers,
-                    json=payload,
-                    timeout=timeout,
+            if self._health:
+                self._health.record_api_call(
+                    success=not response.text.startswith("[Erreur")
                 )
 
-            status = response.status_code
+            if response.text and not response.text.startswith("[Erreur"):
+                return response.text
+
+            return f"[Brain Erreur] {response.text}"
+
+        except Exception as e:
             if self._health:
-                self._health.record_api_call(success=(status == 200))
-
-            if status == 200:
-                data = response.json()
-                return data["content"][0]["text"]
-
-            if status in self._retry_config.retryable_status_codes:
-                raise RetryableError(f"API {status}", status_code=status)
-
-            error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
-            error_msg = error_data.get("error", {}).get("message", response.text[:300])
-            raise Exception(f"API {status}: {error_msg}")
-
-        return await retry_with_backoff(_do_call, self._retry_config)
+                self._health.record_api_call(success=False)
+            return f"[Brain Erreur] {type(e).__name__}: {str(e)[:200]}"
 
     async def _llm_response(self, request: str, memory_context: str,
                             conversation_history: list[BaseMessage] | None = None) -> str:

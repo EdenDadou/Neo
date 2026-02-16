@@ -1,0 +1,259 @@
+"""
+Neo Core — LLM Router : Couche unifiée de routing des appels LLM
+================================================================
+Point d'entrée unique pour tous les agents (Brain, Worker, Vox, Memory).
+
+Le router :
+1. Consulte le ModelRegistry pour le meilleur modèle disponible
+2. Route vers le bon provider (Ollama, Groq, Gemini, Anthropic)
+3. Gère le fallback OAuth/API key si aucun provider n'est disponible
+4. Retourne un format unifié (ChatResponse)
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from neo_core.providers.base import ChatResponse
+
+logger = logging.getLogger(__name__)
+
+
+async def route_chat(
+    agent_name: str,
+    messages: list[dict],
+    system: str = "",
+    tools: list[dict] | None = None,
+    max_tokens: int = 4096,
+    temperature: float = 0.7,
+) -> ChatResponse:
+    """
+    Route un appel LLM vers le meilleur provider disponible.
+
+    Stratégie :
+    1. Si le ModelRegistry a un modèle testé pour cet agent → l'utiliser
+    2. Sinon → fallback Anthropic direct (OAuth ou API key)
+
+    Args:
+        agent_name: Nom de l'agent ("brain", "vox", "memory", "worker:coder", etc.)
+        messages: Messages au format [{"role": "user", "content": "..."}]
+        system: System prompt
+        tools: Schémas d'outils (format Anthropic, convertis automatiquement)
+        max_tokens: Max tokens de sortie
+        temperature: Température de génération
+
+    Returns:
+        ChatResponse unifiée
+    """
+    # Essayer le registry d'abord
+    try:
+        from neo_core.providers.registry import get_model_registry
+
+        registry = get_model_registry()
+        stats = registry.get_stats()
+
+        if stats.get("available_models", 0) > 0:
+            # Choisir le modèle : avec tools si requis
+            if tools:
+                model = registry.get_model_for_worker_with_tools(agent_name)
+            else:
+                model = registry.get_best_for(agent_name)
+
+            if model:
+                provider = registry.get_provider(model.provider)
+                if provider:
+                    logger.debug(
+                        f"[Router] {agent_name} → {model.model_id} "
+                        f"({model.provider})"
+                    )
+                    response = await provider.chat(
+                        messages=messages,
+                        model=model.model_name,
+                        system=system,
+                        tools=tools,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    return response
+
+    except Exception as e:
+        logger.debug(f"[Router] Registry indisponible: {e}")
+
+    # Fallback : Anthropic direct (OAuth ou API key)
+    return await _fallback_anthropic(
+        agent_name=agent_name,
+        messages=messages,
+        system=system,
+        tools=tools,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+
+async def route_chat_raw(
+    agent_name: str,
+    messages: list[dict],
+    system: str = "",
+    tools: list[dict] | None = None,
+    max_tokens: int = 4096,
+    temperature: float = 0.7,
+) -> dict | None:
+    """
+    Comme route_chat(), mais retourne le dict brut de la réponse.
+
+    Utilisé par Worker pour sa boucle tool_use native qui a besoin
+    du format brut (content blocks, stop_reason, etc.).
+
+    Returns:
+        Dict brut de la réponse, ou None si échec.
+    """
+    response = await route_chat(
+        agent_name=agent_name,
+        messages=messages,
+        system=system,
+        tools=tools,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+    # Convertir ChatResponse → format dict brut Anthropic-like
+    content = []
+
+    # Texte
+    if response.text:
+        content.append({"type": "text", "text": response.text})
+
+    # Tool calls
+    for tc in response.tool_calls:
+        content.append({
+            "type": "tool_use",
+            "id": tc.get("id", ""),
+            "name": tc.get("name", ""),
+            "input": tc.get("input", {}),
+        })
+
+    return {
+        "content": content,
+        "stop_reason": response.stop_reason,
+        "model": response.model,
+        "usage": response.usage,
+    }
+
+
+async def _fallback_anthropic(
+    agent_name: str,
+    messages: list[dict],
+    system: str = "",
+    tools: list[dict] | None = None,
+    max_tokens: int = 4096,
+    temperature: float = 0.7,
+) -> ChatResponse:
+    """
+    Fallback Anthropic direct via httpx.
+
+    Supporte OAuth Bearer et API key classique.
+    """
+    import httpx
+    import os
+
+    from neo_core.config import get_agent_model
+
+    model_config = get_agent_model(agent_name)
+
+    # Récupérer la clé API
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ChatResponse(
+            text="[Erreur] Aucune clé API disponible",
+            model=model_config.model,
+            provider="anthropic",
+            stop_reason="error",
+        )
+
+    # Headers
+    headers = {
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    try:
+        from neo_core.core.oauth_manager import is_oauth_token, get_valid_access_token
+        OAUTH_BETA_HEADER = "oauth-2025-04-20"
+
+        if is_oauth_token(api_key):
+            valid_token = get_valid_access_token() or api_key
+            headers["Authorization"] = f"Bearer {valid_token}"
+            headers["anthropic-beta"] = OAUTH_BETA_HEADER
+        else:
+            headers["x-api-key"] = api_key
+    except ImportError:
+        headers["x-api-key"] = api_key
+
+    # Payload
+    payload = {
+        "model": model_config.model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": messages,
+    }
+
+    if system:
+        payload["system"] = system
+
+    if tools:
+        payload["tools"] = tools
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload,
+                timeout=60.0,
+            )
+
+        if response.status_code == 200:
+            data = response.json()
+            return _parse_anthropic_response(data, model_config.model)
+
+        return ChatResponse(
+            text=f"[Erreur API] HTTP {response.status_code}",
+            model=model_config.model,
+            provider="anthropic",
+            stop_reason="error",
+        )
+
+    except Exception as e:
+        return ChatResponse(
+            text=f"[Erreur] {type(e).__name__}: {str(e)[:200]}",
+            model=model_config.model,
+            provider="anthropic",
+            stop_reason="error",
+        )
+
+
+def _parse_anthropic_response(data: dict, model: str) -> ChatResponse:
+    """Parse une réponse brute Anthropic → ChatResponse."""
+    text_parts = []
+    tool_calls = []
+
+    for block in data.get("content", []):
+        if block.get("type") == "text":
+            text_parts.append(block.get("text", ""))
+        elif block.get("type") == "tool_use":
+            tool_calls.append({
+                "id": block.get("id", ""),
+                "name": block.get("name", ""),
+                "input": block.get("input", {}),
+            })
+
+    return ChatResponse(
+        text="\n".join(text_parts),
+        model=data.get("model", model),
+        provider="anthropic",
+        stop_reason=data.get("stop_reason", "end_turn"),
+        tool_calls=tool_calls,
+        usage=data.get("usage", {}),
+        raw_response=data,
+    )
