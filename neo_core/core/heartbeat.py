@@ -180,6 +180,9 @@ class HeartbeatManager:
                 self._pulse_count % self.config.consolidation_interval_pulses == 0):
             self._consolidate_memory()
 
+        # 4. Auto-réflexion de la personnalité (Stage 9)
+        await self._perform_personality_reflection()
+
     # ─── Avancement des Epics ─────────────────────────
 
     async def _advance_epics(self, registry) -> None:
@@ -345,6 +348,36 @@ class HeartbeatManager:
                 ))
         except Exception as e:
             logger.error("[Heartbeat] Erreur consolidation: %s", e)
+
+    # ─── Auto-réflexion personnalité (Stage 9) ────────
+
+    async def _perform_personality_reflection(self) -> None:
+        """
+        Effectue une auto-réflexion de la personnalité si c'est l'heure.
+        Vérifie via Memory.should_self_reflect() (intervalle 24h).
+        """
+        if not self.memory:
+            return
+
+        try:
+            if not self.memory.should_self_reflect():
+                return
+
+            result = await self.memory.perform_self_reflection()
+
+            if result.get("success"):
+                self._emit(HeartbeatEvent(
+                    event_type="persona_reflection",
+                    message=(
+                        f"Auto-réflexion: {result.get('traits_updated', 0)} traits ajustés, "
+                        f"{result.get('observations_recorded', 0)} observations — "
+                        f"{result.get('summary', '')[:100]}"
+                    ),
+                    data=result,
+                ))
+                logger.info("[Heartbeat] Auto-réflexion effectuée: %s", result.get("summary", ""))
+        except Exception as e:
+            logger.error("[Heartbeat] Erreur auto-réflexion: %s", e)
 
     # ─── Émission d'événements ────────────────────────
 

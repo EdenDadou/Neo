@@ -67,12 +67,15 @@ Ton rôle :
 Contexte mémoire :
 {memory_context}
 
+{user_context}
+
 Règles :
 - Sois précis, stratégique et orienté résultat.
 - Si une tâche est complexe, décompose-la en sous-tâches.
 - Indique clairement quand tu as besoin de plus d'informations.
 - Tu es le décideur final sur la stratégie d'exécution.
 - Réponds de manière concise et naturelle, pas de markdown excessif.
+- Adapte ton approche au profil de l'utilisateur (niveau technique, préférences).
 """
 
 # Prompt pour la décomposition LLM de tâches
@@ -997,10 +1000,20 @@ class Brain:
 
         from datetime import datetime
         now = datetime.now()
+
+        # Stage 9 — Injection du contexte utilisateur
+        user_context = ""
+        if self.memory and self.memory.persona_engine and self.memory.persona_engine.is_initialized:
+            try:
+                user_context = self.memory.persona_engine.get_brain_injection()
+            except Exception:
+                pass
+
         system_prompt = BRAIN_SYSTEM_PROMPT.format(
             memory_context=memory_context,
             current_date=now.strftime("%A %d %B %Y"),
             current_time=now.strftime("%H:%M"),
+            user_context=user_context,
         )
 
         try:
@@ -1035,6 +1048,14 @@ class Brain:
         from datetime import datetime
         now = datetime.now()
 
+        # Stage 9 — Injection du contexte utilisateur
+        user_context = ""
+        if self.memory and self.memory.persona_engine and self.memory.persona_engine.is_initialized:
+            try:
+                user_context = self.memory.persona_engine.get_brain_injection()
+            except Exception:
+                pass
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", BRAIN_SYSTEM_PROMPT),
             MessagesPlaceholder("conversation_history", optional=True),
@@ -1043,6 +1064,7 @@ class Brain:
         chain = prompt | self._llm
         result = await chain.ainvoke({
             "memory_context": memory_context,
+            "user_context": user_context,
             "current_date": now.strftime("%A %d %B %Y"),
             "current_time": now.strftime("%H:%M"),
             "conversation_history": conversation_history or [],

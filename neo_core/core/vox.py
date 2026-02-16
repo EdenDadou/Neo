@@ -41,6 +41,8 @@ Règles :
 - Tu peux signaler à l'humain quand Brain travaille sur une tâche longue.
 - Réponds de manière concise et naturelle, pas de markdown excessif.
 
+{personality}
+
 État actuel du système :
 {system_status}
 """
@@ -230,6 +232,15 @@ class Vox:
 
         return random.choice(STATIC_ACKS)
 
+    def _get_personality_injection(self) -> str:
+        """Récupère l'injection de personnalité depuis le PersonaEngine."""
+        if self.memory and self.memory.persona_engine and self.memory.persona_engine.is_initialized:
+            try:
+                return self.memory.persona_engine.get_vox_injection()
+            except Exception:
+                pass
+        return ""
+
     def get_system_status(self) -> str:
         """Génère un résumé de l'état de tous les agents."""
         lines = [status.to_string() for status in self._agent_statuses.values()]
@@ -322,9 +333,11 @@ class Vox:
         return final_response
 
     def get_prompt_template(self) -> ChatPromptTemplate:
-        """Retourne le template de prompt pour Vox."""
+        """Retourne le template de prompt pour Vox avec personnalité injectée."""
+        personality = self._get_personality_injection()
+        prompt = VOX_SYSTEM_PROMPT.replace("{personality}", personality)
         return ChatPromptTemplate.from_messages([
-            ("system", VOX_SYSTEM_PROMPT),
+            ("system", prompt),
             MessagesPlaceholder("conversation_history"),
             ("human", "{input}"),
         ])

@@ -192,6 +192,113 @@ def print_heartbeat(heartbeat_manager):
     ))
 
 
+def print_persona(vox):
+    """Affiche la personnalité actuelle de Neo."""
+    if not vox.memory or not vox.memory.persona_engine:
+        console.print("[yellow]  ⚠ PersonaEngine non disponible[/yellow]")
+        return
+
+    persona_data = vox.memory.get_neo_persona()
+    if not persona_data:
+        console.print("[yellow]  ⚠ Persona non initialisée[/yellow]")
+        return
+
+    lines = [f"[bold]Identité de Neo[/bold]\n"]
+
+    # Commandements
+    if persona_data.get("commandments"):
+        lines.append("[bold cyan]Commandements (immuables) :[/bold cyan]")
+        for cmd in persona_data["commandments"]:
+            lines.append(f"  ⚡ {cmd['french']}  [dim]({cmd['english']})[/dim]")
+
+    # Traits évolutifs
+    if persona_data.get("traits"):
+        lines.append(f"\n[bold cyan]Traits évolutifs :[/bold cyan]")
+        for name, trait in persona_data["traits"].items():
+            bar_len = 15
+            filled = int(bar_len * trait["value"])
+            bar = "█" * filled + "░" * (bar_len - filled)
+            lines.append(
+                f"  {name:22} [{bar}] {trait['value']:.2f} "
+                f"[dim](conf: {trait['confidence']:.2f})[/dim]"
+            )
+
+    # Dernière réflexion
+    if persona_data.get("last_reflection"):
+        lines.append(f"\n[dim]Dernière réflexion: {persona_data['last_reflection'][:19]}[/dim]")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold cyan]Neo Persona[/bold cyan]",
+        border_style="cyan",
+    ))
+
+
+def print_user_profile(vox):
+    """Affiche le profil utilisateur appris par Neo."""
+    if not vox.memory or not vox.memory.persona_engine:
+        console.print("[yellow]  ⚠ PersonaEngine non disponible[/yellow]")
+        return
+
+    profile_data = vox.memory.get_user_profile()
+    if not profile_data:
+        console.print("[yellow]  ⚠ Profil non initialisé[/yellow]")
+        return
+
+    lines = [f"[bold]Profil Utilisateur[/bold]\n"]
+
+    # Préférences
+    prefs = profile_data.get("preferences", {})
+    if prefs:
+        lines.append("[bold cyan]Préférences détectées :[/bold cyan]")
+        lines.append(f"  Langue        : {prefs.get('language', 'auto')}")
+        lines.append(f"  Longueur rép. : {prefs.get('response_length', 'medium')}")
+        lines.append(f"  Niveau tech.  : {prefs.get('technical_level', 'intermediate')}")
+        lines.append(f"  Ton           : {prefs.get('tone', 'professional')}")
+
+        topics = prefs.get("preferred_topics", [])
+        if topics:
+            lines.append(f"  Sujets        : {', '.join(topics[:5])}")
+
+    # Patterns
+    patterns = profile_data.get("patterns", {})
+    if patterns:
+        lines.append(f"\n[bold cyan]Patterns observés :[/bold cyan]")
+        avg_len = patterns.get("average_message_length", 0)
+        total = patterns.get("total_messages", 0)
+        lines.append(f"  Messages total  : {total}")
+        lines.append(f"  Longueur moy.   : {avg_len:.0f} caractères")
+
+        interests = patterns.get("topic_interests", {})
+        if interests:
+            top = sorted(interests.items(), key=lambda x: x[1], reverse=True)[:5]
+            topics_str = ", ".join(f"{t} (×{c})" for t, c in top)
+            lines.append(f"  Sujets favoris  : {topics_str}")
+
+        langs = patterns.get("languages_used", {})
+        if langs:
+            lines.append(f"  Langues         : {', '.join(f'{l} (×{c})' for l, c in langs.items())}")
+
+    # Satisfaction
+    observations = profile_data.get("observations", [])
+    if observations:
+        positive = sum(1 for o in observations if o.get("polarity") == "positive")
+        negative = sum(1 for o in observations if o.get("polarity") == "negative")
+        total_obs = len(observations)
+        lines.append(f"\n[bold cyan]Satisfaction :[/bold cyan]")
+        lines.append(f"  Score : {positive}/{total_obs} positif ({positive/max(total_obs,1):.0%})")
+        if negative > 0:
+            lines.append(f"  [dim]({negative} observations négatives)[/dim]")
+
+    lines.append(f"\n[dim]Interactions: {profile_data.get('interaction_count', 0)}[/dim]")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold cyan]User Profile[/bold cyan]",
+        border_style="cyan",
+    ))
+
+
 def print_help():
     """Affiche les commandes disponibles."""
     console.print(Panel(
@@ -203,6 +310,9 @@ def print_help():
         "  [cyan]/tasks[/cyan]     — Registre des tâches\n"
         "  [cyan]/epics[/cyan]     — Registre des epics\n"
         "  [cyan]/heartbeat[/cyan] — Statut du heartbeat\n"
+        "  [cyan]/persona[/cyan]   — Personnalité de Neo\n"
+        "  [cyan]/profile[/cyan]   — Profil utilisateur\n"
+        "  [cyan]/reflect[/cyan]   — Force une auto-réflexion\n"
         "  [cyan]/quit[/cyan]      — Quitter le chat\n",
         title="[bold]Aide[/bold]",
         border_style="dim",
@@ -274,7 +384,7 @@ async def conversation_loop(vox):
 
         def on_heartbeat_event(event):
             """Affiche les événements importants du heartbeat."""
-            important = {"task_completed", "task_failed", "epic_done", "task_stale"}
+            important = {"task_completed", "task_failed", "epic_done", "task_stale", "persona_reflection"}
             if event.event_type in important:
                 console.print(
                     f"\n  [dim magenta]♥ {event.message}[/dim magenta]"
@@ -368,6 +478,32 @@ async def conversation_loop(vox):
 
         if cmd in ("/heartbeat", "heartbeat"):
             print_heartbeat(heartbeat_manager)
+            continue
+
+        if cmd in ("/persona", "persona"):
+            print_persona(vox)
+            continue
+
+        if cmd in ("/profile", "profile"):
+            print_user_profile(vox)
+            continue
+
+        if cmd in ("/reflect", "reflect"):
+            console.print("[dim]  Lancement de l'auto-réflexion...[/dim]")
+            try:
+                result = await vox.memory.perform_self_reflection()
+                if result.get("success"):
+                    console.print(
+                        f"[green]  ✓ Réflexion effectuée : "
+                        f"{result.get('traits_updated', 0)} traits ajustés, "
+                        f"{result.get('observations_recorded', 0)} observations[/green]"
+                    )
+                    if result.get("summary"):
+                        console.print(f"  [dim]{result['summary'][:200]}[/dim]")
+                else:
+                    console.print(f"[yellow]  ⚠ {result.get('reason', 'Erreur')}[/yellow]")
+            except Exception as e:
+                console.print(f"[red]  Erreur: {e}[/red]")
             continue
 
         # Process via Vox → Brain → Vox

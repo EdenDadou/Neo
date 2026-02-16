@@ -28,6 +28,7 @@ from neo_core.memory.context import ContextEngine, ContextBlock
 from neo_core.memory.consolidator import MemoryConsolidator
 from neo_core.memory.learning import LearningEngine, LearningAdvice
 from neo_core.memory.task_registry import TaskRegistry, Task, Epic
+from neo_core.core.persona import PersonaEngine
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
 
 # Prompt pour la synthèse intelligente de conversations
@@ -79,6 +80,7 @@ class MemoryAgent:
     _consolidator: Optional[MemoryConsolidator] = field(default=None, init=False)
     _learning: Optional[LearningEngine] = field(default=None, init=False)
     _task_registry: Optional[TaskRegistry] = field(default=None, init=False)
+    _persona_engine: Optional[PersonaEngine] = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
     _turn_count: int = field(default=0, init=False)
     _consolidation_interval: int = 50  # Consolide tous les N tours
@@ -95,6 +97,9 @@ class MemoryAgent:
         self._consolidator = MemoryConsolidator(self._store, self.config)
         self._learning = LearningEngine(self._store)
         self._task_registry = TaskRegistry(self._store)
+
+        # Stage 9 — PersonaEngine (identité + profil utilisateur)
+        self._init_persona_engine()
 
         self._initialized = True
         self._mock_mode = self.config.is_mock_mode()
@@ -121,6 +126,16 @@ class MemoryAgent:
         except Exception as e:
             print(f"[Memory] LLM non disponible ({e}), mode heuristique")
             self._llm = None
+
+    def _init_persona_engine(self) -> None:
+        """Initialise le moteur de personnalité et d'empathie (Stage 9)."""
+        try:
+            self._persona_engine = PersonaEngine(store=self._store)
+            self._persona_engine.initialize()
+            print("[Memory] PersonaEngine initialisé")
+        except Exception as e:
+            print(f"[Memory] PersonaEngine non disponible ({e})")
+            self._persona_engine = None
 
     async def _memory_llm_call(self, prompt: str) -> Optional[str]:
         """
@@ -220,6 +235,9 @@ class MemoryAgent:
 
         # Enrichir les tâches actives avec le contexte de la conversation
         self._enrich_active_tasks(user_message, ai_response)
+
+        # Stage 9 — Analyse automatique pour apprentissage persona/user
+        self.analyze_conversation(user_message, ai_response)
 
         self._turn_count += 1
         if self._turn_count % self._consolidation_interval == 0:
@@ -500,3 +518,48 @@ class MemoryAgent:
             "epics": [str(e) for e in epics],
             "summary": summary,
         }
+
+    # ─── Persona Engine (Stage 9 — Empathie) ─────────────
+
+    @property
+    def persona_engine(self) -> Optional[PersonaEngine]:
+        """Accès au moteur de personnalité."""
+        return self._persona_engine
+
+    def get_neo_persona(self) -> Optional[dict]:
+        """Retourne la personnalité actuelle de Neo."""
+        if not self._persona_engine or not self._persona_engine.is_initialized:
+            return None
+        return self._persona_engine.persona.to_dict()
+
+    def get_user_profile(self) -> Optional[dict]:
+        """Retourne le profil utilisateur appris."""
+        if not self._persona_engine or not self._persona_engine.is_initialized:
+            return None
+        return self._persona_engine.user_profile.to_dict()
+
+    def record_user_observation(self, observation_type: str, content: str,
+                                polarity: str = "neutral") -> None:
+        """Enregistre une observation sur l'utilisateur."""
+        if not self._persona_engine or not self._persona_engine.is_initialized:
+            return
+        self._persona_engine.record_user_observation(observation_type, content, polarity)
+
+    def analyze_conversation(self, user_message: str, neo_response: str) -> dict:
+        """Analyse automatiquement une conversation pour apprentissage."""
+        if not self._persona_engine or not self._persona_engine.is_initialized:
+            return {}
+        return self._persona_engine.analyze_conversation(user_message, neo_response)
+
+    def should_self_reflect(self) -> bool:
+        """Indique si Neo devrait effectuer une auto-réflexion."""
+        if not self._persona_engine or not self._persona_engine.is_initialized:
+            return False
+        return self._persona_engine.should_reflect()
+
+    async def perform_self_reflection(self, llm_call=None) -> dict:
+        """Lance une auto-réflexion de la personnalité."""
+        if not self._persona_engine or not self._persona_engine.is_initialized:
+            return {"success": False, "reason": "PersonaEngine non disponible"}
+        call = llm_call or self._memory_llm_call
+        return await self._persona_engine.perform_self_reflection(call)
