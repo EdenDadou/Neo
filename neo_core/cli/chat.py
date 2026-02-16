@@ -301,6 +301,75 @@ def print_user_profile(vox):
     ))
 
 
+def print_history(vox, limit: int = 10):
+    """Affiche les derniers messages de la conversation courante."""
+    session_info = vox.get_session_info()
+    if not session_info:
+        console.print("[yellow]  ⚠ Pas de session active[/yellow]")
+        return
+
+    if not vox._conversation_store:
+        console.print("[yellow]  ⚠ Store de conversation non disponible[/yellow]")
+        return
+
+    try:
+        history = vox._conversation_store.get_history(
+            session_info["session_id"],
+            limit=limit,
+        )
+        if not history:
+            console.print("[dim]  Aucun message dans cette session.[/dim]")
+            return
+
+        lines = [f"[bold]Historique - Derniers {limit} messages[/bold]\n"]
+        for turn in history:
+            role_label = "[bold cyan]Vous[/bold cyan]" if turn.role == "human" else "[bold yellow]Neo[/bold yellow]"
+            timestamp = turn.timestamp.split("T")[1][:8] if "T" in turn.timestamp else turn.timestamp
+            lines.append(f"[dim]{timestamp}[/dim] {role_label}")
+            # Truncate long messages
+            content = turn.content[:200] + "..." if len(turn.content) > 200 else turn.content
+            lines.append(f"  {content}\n")
+
+        console.print(Panel(
+            "\n".join(lines),
+            title="[bold cyan]Historique[/bold cyan]",
+            border_style="cyan",
+        ))
+    except Exception as e:
+        console.print(f"[red]  Erreur: {e}[/red]")
+
+
+def print_sessions(vox):
+    """Affiche les sessions récentes."""
+    if not vox._conversation_store:
+        console.print("[yellow]  ⚠ Store de conversation non disponible[/yellow]")
+        return
+
+    try:
+        sessions = vox._conversation_store.get_sessions(limit=10)
+        if not sessions:
+            console.print("[dim]  Aucune session enregistrée.[/dim]")
+            return
+
+        lines = [f"[bold]Sessions récentes ({len(sessions)})[/bold]\n"]
+        for session in sessions:
+            created = session.created_at.split("T")[0] if "T" in session.created_at else session.created_at
+            updated = session.updated_at.split("T")[1][:8] if "T" in session.updated_at else ""
+            is_current = " [green]←[/green]" if session.session_id == vox.get_session_info().get("session_id") else ""
+            lines.append(
+                f"  [cyan]{session.session_id[:8]}...[/cyan] "
+                f"{session.user_name} | {session.message_count} msgs | {created} {updated}{is_current}"
+            )
+
+        console.print(Panel(
+            "\n".join(lines),
+            title="[bold cyan]Historique des sessions[/bold cyan]",
+            border_style="cyan",
+        ))
+    except Exception as e:
+        console.print(f"[red]  Erreur: {e}[/red]")
+
+
 def print_help():
     """Affiche les commandes disponibles."""
     console.print(Panel(
@@ -314,6 +383,8 @@ def print_help():
         "  [cyan]/heartbeat[/cyan] — Statut du heartbeat\n"
         "  [cyan]/persona[/cyan]   — Personnalité de Neo\n"
         "  [cyan]/profile[/cyan]   — Profil utilisateur\n"
+        "  [cyan]/history[/cyan]   — Historique de la conversation\n"
+        "  [cyan]/sessions[/cyan]  — Lister les sessions\n"
         "  [cyan]/reflect[/cyan]   — Force une auto-réflexion\n"
         "  [cyan]/restart[/cyan]   — Redémarrer Neo (Guardian)\n"
         "  [cyan]/quit[/cyan]      — Quitter le chat\n",
@@ -407,6 +478,14 @@ async def conversation_loop(vox):
         # Nettoyer le state après chargement
         StateSnapshot.clear(state_dir)
 
+    # --- Conversation : Démarrer ou reprendre une session ---
+    if previous_state and previous_state.session_id:
+        # Reprendre la session précédente
+        vox.resume_session(previous_state.session_id)
+    else:
+        # Nouvelle session
+        vox.start_new_session(config.user_name)
+
     # Démarrer le heartbeat en arrière-plan
     try:
         from neo_core.core.heartbeat import HeartbeatManager, HeartbeatConfig
@@ -499,10 +578,12 @@ async def conversation_loop(vox):
             if heartbeat_manager:
                 heartbeat_manager.stop()
             # Sauvegarder le state et nettoyer
+            session_id = vox.get_session_info().get("session_id", "") if vox.get_session_info() else ""
             shutdown_handler.save_state(
                 shutdown_reason="user_quit",
                 turn_count=0,
                 heartbeat_pulse_count=heartbeat_manager.get_status()["pulse_count"] if heartbeat_manager else 0,
+                session_id=session_id,
             )
             shutdown_handler.clear_state()  # Quit normal → pas besoin du state
             console.print("[dim]  Au revoir ![/dim]")
@@ -512,10 +593,12 @@ async def conversation_loop(vox):
             console.print("[bold yellow]  ⟳ Redémarrage de Neo...[/bold yellow]")
             if heartbeat_manager:
                 heartbeat_manager.stop()
+            session_id = vox.get_session_info().get("session_id", "") if vox.get_session_info() else ""
             shutdown_handler.save_state(
                 shutdown_reason="guardian_restart",
                 turn_count=0,
                 heartbeat_pulse_count=heartbeat_manager.get_status()["pulse_count"] if heartbeat_manager else 0,
+                session_id=session_id,
             )
             sys.exit(EXIT_CODE_RESTART)  # Code 42 → Guardian relance immédiatement
 
@@ -529,6 +612,14 @@ async def conversation_loop(vox):
 
         if cmd in ("/help", "help"):
             print_help()
+            continue
+
+        if cmd in ("/history", "history"):
+            print_history(vox, limit=10)
+            continue
+
+        if cmd in ("/sessions", "sessions"):
+            print_sessions(vox)
             continue
 
         if cmd in ("/skills", "skills"):

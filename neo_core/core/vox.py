@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from neo_core.config import NeoConfig, default_config, get_agent_model
+from neo_core.memory.conversation import ConversationStore, ConversationSession
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
 from neo_core.validation import validate_message, ValidationError
 
@@ -125,6 +127,8 @@ class Vox:
     _mock_mode: bool = False
     _model_config: Optional[object] = None
     _on_thinking_callback: Optional[object] = None  # Callable[[str], None]
+    _conversation_store: Optional[ConversationStore] = None
+    _current_session: Optional[ConversationSession] = None
 
     def __post_init__(self):
         self._agent_statuses = {
@@ -134,6 +138,10 @@ class Vox:
         }
         self._mock_mode = self.config.is_mock_mode()
         self._model_config = get_agent_model("vox")
+
+        # Initialiser le conversation store
+        db_path = Path("data/memory/conversations.db")
+        self._conversation_store = ConversationStore(db_path)
 
         if not self._mock_mode:
             self._init_llm()
@@ -198,6 +206,48 @@ class Vox:
         """Connecte Vox aux autres agents du Neo Core."""
         self.brain = brain
         self.memory = memory
+
+    def start_new_session(self, user_name: str = "User") -> ConversationSession:
+        """Démarre une nouvelle session de conversation."""
+        if not self._conversation_store:
+            return None
+        self._current_session = self._conversation_store.start_session(user_name)
+        logger.info(f"Started new conversation session: {self._current_session.session_id}")
+        return self._current_session
+
+    def resume_session(self, session_id: str) -> Optional[ConversationSession]:
+        """Charge une session existante et restaure son historique."""
+        if not self._conversation_store:
+            return None
+        session = self._conversation_store.get_session_by_id(session_id)
+        if not session:
+            logger.warning(f"Session not found: {session_id}")
+            return None
+
+        # Charger l'historique
+        history = self._conversation_store.get_history(session_id, limit=10000)
+        self.conversation_history = []
+        for turn in history:
+            if turn.role == "human":
+                self.conversation_history.append(HumanMessage(content=turn.content))
+            else:
+                self.conversation_history.append(AIMessage(content=turn.content))
+
+        self._current_session = session
+        logger.info(f"Resumed session: {session_id} with {len(history)} messages")
+        return self._current_session
+
+    def get_session_info(self) -> Optional[dict]:
+        """Retourne les infos de la session courante."""
+        if not self._current_session:
+            return None
+        return {
+            "session_id": self._current_session.session_id,
+            "user_name": self._current_session.user_name,
+            "created_at": self._current_session.created_at,
+            "updated_at": self._current_session.updated_at,
+            "message_count": self._current_session.message_count,
+        }
 
     def set_thinking_callback(self, callback) -> None:
         """
@@ -337,6 +387,22 @@ class Vox:
 
         # Enregistre la réponse dans l'historique
         self.conversation_history.append(AIMessage(content=final_response))
+
+        # Sauvegarde dans le ConversationStore
+        if self._conversation_store and self._current_session:
+            try:
+                self._conversation_store.append_turn(
+                    self._current_session.session_id,
+                    "human",
+                    human_message,
+                )
+                self._conversation_store.append_turn(
+                    self._current_session.session_id,
+                    "assistant",
+                    final_response,
+                )
+            except Exception as e:
+                logger.error(f"Failed to save conversation turn: {e}")
 
         # Stocke l'échange en mémoire persistante
         if self.memory and self.memory.is_initialized:

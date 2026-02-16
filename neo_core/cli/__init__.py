@@ -25,11 +25,12 @@ def print_usage():
     neo {CYAN}<commande>{RESET}
 
   {BOLD}Commandes :{RESET}
-    {CYAN}setup{RESET}      Onboarding complet (install deps + config + lance le chat)
-    {CYAN}chat{RESET}       Lancer le chat directement
-    {CYAN}status{RESET}     Afficher la santé du système
-    {CYAN}guardian{RESET}    Lancer Neo avec le Guardian (auto-restart)
-    {CYAN}version{RESET}    Afficher la version
+    {CYAN}setup{RESET}       Onboarding complet (install deps + config + lance le chat)
+    {CYAN}chat{RESET}        Lancer le chat directement
+    {CYAN}status{RESET}      Afficher la santé du système
+    {CYAN}guardian{RESET}     Lancer Neo avec le Guardian (auto-restart)
+    {CYAN}history{RESET}     Lister les sessions de conversation
+    {CYAN}version{RESET}     Afficher la version
 
   {BOLD}Première utilisation :{RESET}
     {DIM}git clone https://github.com/EdenDadou/Neo.git && cd Neo{RESET}
@@ -57,6 +58,10 @@ def main():
     elif command == "status":
         from neo_core.cli.status import run_status
         run_status()
+
+    elif command == "history":
+        from neo_core.cli.history import run_history
+        run_history()
 
     elif command in ("help", "h"):
         print_usage()

@@ -94,6 +94,7 @@ class StateSnapshot:
     shutdown_reason: str = "unknown"  # signal | crash | user_quit | guardian_restart
     uptime_seconds: float = 0.0
     restart_count: int = 0
+    session_id: str = ""  # Session ID for conversation persistence
 
     def to_dict(self) -> dict:
         return {
@@ -104,6 +105,7 @@ class StateSnapshot:
             "shutdown_reason": self.shutdown_reason,
             "uptime_seconds": round(self.uptime_seconds, 1),
             "restart_count": self.restart_count,
+            "session_id": self.session_id,
         }
 
     @classmethod
