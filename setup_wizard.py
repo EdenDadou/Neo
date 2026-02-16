@@ -294,18 +294,48 @@ def main():
 
     print(f"  {DIM}La clé Anthropic permet à Brain de fonctionner avec Claude.{RESET}")
     print(f"  {DIM}Sans clé, le système tourne en mode mock (réponses simulées).{RESET}")
-    print(f"  {DIM}Deux types de clés sont supportés :{RESET}")
-    print(f"  {DIM}  • API Key classique : sk-ant-api...{RESET}")
-    print(f"  {DIM}  • Token OAuth       : sk-ant-oat...{RESET}")
-    print(f"  {DIM}Obtenez votre clé sur : https://console.anthropic.com/keys{RESET}\n")
+    print()
+    print(f"  {DIM}Trois méthodes supportées :{RESET}")
+    print(f"  {DIM}  1. Claude Code : si vous avez 'claude' installé (auto-import){RESET}")
+    print(f"  {DIM}  2. API Key     : sk-ant-api... (console.anthropic.com/keys){RESET}")
+    print(f"  {DIM}  3. Token OAuth : sk-ant-oat... (claude setup-token){RESET}")
+    print()
 
-    api_key = ask("Clé Anthropic (laisser vide pour mode mock)", secret=True)
+    # Tenter l'import automatique depuis Claude Code
+    api_key = None
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from neo_core.oauth import import_claude_code_credentials, setup_oauth_from_token
+
+        claude_creds = import_claude_code_credentials()
+        if claude_creds:
+            print(f"  {GREEN}✓{RESET} Credentials Claude Code détectées automatiquement !")
+            token = claude_creds["access_token"]
+            print(f"  {DIM}  Token: {token[:12]}...{token[-4:]}{RESET}")
+            if ask_confirm("Utiliser ces credentials ?"):
+                api_key = token
+                print(f"  {GREEN}✓{RESET} Credentials Claude Code importées (avec refresh automatique)")
+            else:
+                print(f"  {DIM}OK, saisie manuelle...{RESET}")
+    except Exception:
+        pass
+
+    if not api_key:
+        api_key = ask("Clé Anthropic (laisser vide pour mode mock)", secret=True)
 
     if api_key:
-        # Afficher les premiers caractères pour confirmer la capture
         masked = api_key[:12] + "..." + api_key[-4:]
         if api_key.startswith("sk-ant-oat"):
-            print(f"  {GREEN}✓{RESET} Token OAuth détecté : {DIM}{masked}{RESET}")
+            # Token OAuth → stocker dans le système OAuth avec gestion refresh
+            try:
+                from neo_core.oauth import setup_oauth_from_token
+                result = setup_oauth_from_token(api_key)
+                if result["success"]:
+                    print(f"  {GREEN}✓{RESET} {result['message']} : {DIM}{masked}{RESET}")
+                else:
+                    print(f"  {YELLOW}⚠{RESET} {result['message']}")
+            except Exception as e:
+                print(f"  {GREEN}✓{RESET} Token OAuth stocké : {DIM}{masked}{RESET}")
         elif api_key.startswith("sk-ant-api") or api_key.startswith("sk-"):
             print(f"  {GREEN}✓{RESET} Clé API classique : {DIM}{masked}{RESET}")
         else:
