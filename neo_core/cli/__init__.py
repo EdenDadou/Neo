@@ -7,11 +7,15 @@ Usage :
     neo setup     Onboarding complet
     neo chat      Lancer le chat
     neo status    Health check
+    neo start     Démarrer le daemon
+    neo stop      Arrêter le daemon
 """
 
 import sys
 
 CYAN = "\033[96m"
+GREEN = "\033[92m"
+RED = "\033[91m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
 RESET = "\033[0m"
@@ -25,14 +29,24 @@ def print_usage():
     neo {CYAN}<commande>{RESET}
 
   {BOLD}Commandes :{RESET}
-    {CYAN}setup{RESET}       Onboarding complet (install deps + config + lance le chat)
-    {CYAN}chat{RESET}        Lancer le chat directement
-    {CYAN}api{RESET}         Lancer le serveur REST API
-    {CYAN}status{RESET}      Afficher la santé du système
-    {CYAN}guardian{RESET}     Lancer Neo avec le Guardian (auto-restart)
-    {CYAN}history{RESET}     Lister les sessions de conversation
-    {CYAN}providers{RESET}   Afficher les providers LLM configurés
-    {CYAN}version{RESET}     Afficher la version
+    {CYAN}setup{RESET}             Onboarding complet (install deps + config + lance le chat)
+    {CYAN}chat{RESET}              Lancer le chat directement
+    {CYAN}api{RESET}               Lancer le serveur REST API
+
+  {BOLD}Daemon :{RESET}
+    {CYAN}start{RESET}             Démarrer Neo en arrière-plan (heartbeat + API)
+    {CYAN}start --foreground{RESET} Démarrer au premier plan (bloquant)
+    {CYAN}stop{RESET}              Arrêter le daemon
+    {CYAN}restart{RESET}           Redémarrer le daemon
+    {CYAN}status{RESET}            Afficher la santé du système + état daemon
+    {CYAN}logs{RESET}              Afficher les logs du daemon
+
+  {BOLD}Système :{RESET}
+    {CYAN}guardian{RESET}          Lancer Neo avec le Guardian (auto-restart)
+    {CYAN}history{RESET}           Lister les sessions de conversation
+    {CYAN}providers{RESET}         Afficher les providers LLM configurés
+    {CYAN}install-service{RESET}   Générer/installer le service systemd
+    {CYAN}version{RESET}           Afficher la version
 
   {BOLD}Première utilisation :{RESET}
     {DIM}git clone https://github.com/EdenDadou/Neo.git && cd Neo{RESET}
@@ -67,9 +81,92 @@ def main():
         app = create_app()
         uvicorn.run(app, host=host, port=port)
 
+    # ─── Daemon commands ──────────────────────────────
+    elif command == "start":
+        from neo_core.core.daemon import start
+        foreground = "--foreground" in sys.argv or "-f" in sys.argv
+        host = "0.0.0.0"
+        port = 8000
+        # Parser --port et --host
+        for i, arg in enumerate(sys.argv):
+            if arg == "--port" and i + 1 < len(sys.argv):
+                port = int(sys.argv[i + 1])
+            elif arg == "--host" and i + 1 < len(sys.argv):
+                host = sys.argv[i + 1]
+
+        if foreground:
+            print(f"\n  {CYAN}{BOLD}Neo Core{RESET} — Démarrage en mode foreground")
+            print(f"  {DIM}Ctrl+C pour arrêter.{RESET}\n")
+        else:
+            print(f"\n  {CYAN}{BOLD}Neo Core{RESET} — Démarrage du daemon...")
+
+        result = start(foreground=foreground, host=host, port=port)
+        if result["success"]:
+            print(f"  {GREEN}✓{RESET} {result['message']}")
+        else:
+            print(f"  {RED}✗{RESET} {result['message']}")
+
+    elif command == "stop":
+        from neo_core.core.daemon import stop
+        print(f"\n  {CYAN}{BOLD}Neo Core{RESET} — Arrêt du daemon...")
+        result = stop()
+        if result["success"]:
+            print(f"  {GREEN}✓{RESET} {result['message']}")
+        else:
+            print(f"  {RED}✗{RESET} {result['message']}")
+
+    elif command == "restart":
+        from neo_core.core.daemon import restart
+        print(f"\n  {CYAN}{BOLD}Neo Core{RESET} — Redémarrage du daemon...")
+        result = restart()
+        if result["success"]:
+            print(f"  {GREEN}✓{RESET} {result['message']}")
+        else:
+            print(f"  {RED}✗{RESET} {result['message']}")
+
+    elif command == "logs":
+        from neo_core.core.daemon import _get_log_file
+        log_file = _get_log_file()
+        if log_file.exists():
+            # Afficher les N dernières lignes
+            n = 50
+            for i, arg in enumerate(sys.argv):
+                if arg == "-n" and i + 1 < len(sys.argv):
+                    n = int(sys.argv[i + 1])
+            lines = log_file.read_text().splitlines()
+            for line in lines[-n:]:
+                print(line)
+        else:
+            print(f"  {DIM}Aucun log — Neo n'a jamais été lancé en daemon.{RESET}")
+
+    elif command in ("install-service", "install_service"):
+        from neo_core.core.daemon import install_service, generate_systemd_service
+        if "--dry-run" in sys.argv:
+            print(generate_systemd_service())
+        else:
+            result = install_service()
+            if result["success"]:
+                print(f"  {GREEN}✓{RESET} {result['message']}")
+            else:
+                print(f"  {RED}✗{RESET} {result['message']}")
+            print(f"\n  {BOLD}Commandes :{RESET}")
+            for cmd in result.get("commands", []):
+                print(f"    {DIM}{cmd}{RESET}")
+
+    # ─── Existing commands ────────────────────────────
     elif command == "status":
         from neo_core.cli.status import run_status
+        from neo_core.core.daemon import get_status
         run_status()
+        # Ajouter le statut daemon
+        daemon = get_status()
+        if daemon["running"]:
+            uptime = daemon.get("uptime_seconds", 0)
+            hours = int(uptime // 3600)
+            minutes = int((uptime % 3600) // 60)
+            print(f"\n  {GREEN}●{RESET} Daemon actif — PID {daemon['pid']} — uptime {hours}h{minutes:02d}m — {daemon.get('memory_mb', '?')} MB RAM")
+        else:
+            print(f"\n  {DIM}○ Daemon inactif — `neo start` pour lancer{RESET}")
 
     elif command == "history":
         from neo_core.cli.history import run_history
@@ -109,7 +206,7 @@ def main():
         rc.print()
 
     elif command == "version":
-        print("Neo Core v1.3.0 — Stage 16")
+        print("Neo Core v1.4.0 — Stage 17")
 
     else:
         print(f"\n  Commande inconnue : '{sys.argv[1]}'")
