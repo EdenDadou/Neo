@@ -70,8 +70,18 @@ def ask(prompt: str, default: str = "", secret: bool = False) -> str:
         display = f"  {GREEN}▸{RESET} {prompt}: "
 
     if secret:
-        import getpass
-        value = getpass.getpass(display)
+        # getpass peut échouer dans certains terminaux (SSH, VPS)
+        # On essaie getpass d'abord, puis fallback sur input()
+        try:
+            import getpass
+            value = getpass.getpass(display)
+            if not value.strip():
+                # getpass a retourné vide — peut-être un bug terminal
+                # Réessayer avec input() classique
+                print(f"  {DIM}(saisie non détectée, réessai en mode visible){RESET}")
+                value = input(display)
+        except (EOFError, OSError):
+            value = input(display)
     else:
         value = input(display)
 
@@ -292,12 +302,14 @@ def main():
     api_key = ask("Clé Anthropic (laisser vide pour mode mock)", secret=True)
 
     if api_key:
+        # Afficher les premiers caractères pour confirmer la capture
+        masked = api_key[:12] + "..." + api_key[-4:]
         if api_key.startswith("sk-ant-oat"):
-            print(f"  {GREEN}✓{RESET} Token OAuth détecté et enregistré")
+            print(f"  {GREEN}✓{RESET} Token OAuth détecté : {DIM}{masked}{RESET}")
         elif api_key.startswith("sk-ant-api") or api_key.startswith("sk-"):
-            print(f"  {GREEN}✓{RESET} Clé API classique enregistrée")
+            print(f"  {GREEN}✓{RESET} Clé API classique : {DIM}{masked}{RESET}")
         else:
-            print(f"  {YELLOW}⚠{RESET} Format de clé non reconnu, mais on continue.")
+            print(f"  {YELLOW}⚠{RESET} Format non reconnu : {DIM}{masked}{RESET}")
     else:
         print(f"  {YELLOW}⚠{RESET} Mode mock activé — Brain simulera les réponses")
 
