@@ -4,10 +4,11 @@ Neo Core — LLM Router : Couche unifiée de routing des appels LLM
 Point d'entrée unique pour tous les agents (Brain, Worker, Vox, Memory).
 
 Le router :
-1. Consulte le ModelRegistry pour le meilleur modèle disponible
-2. Route vers le bon provider (Ollama, Groq, Gemini, Anthropic)
-3. Gère le fallback OAuth/API key si aucun provider n'est disponible
-4. Retourne un format unifié (ChatResponse)
+1. Consulte le ModelRegistry pour la chaîne de fallback ordonnée
+2. Tente chaque provider dans l'ordre de priorité
+3. Si un provider échoue (rate limit, timeout, erreur) → passe au suivant
+4. Dernier recours : fallback Anthropic direct (OAuth/API key)
+5. Retourne un format unifié (ChatResponse)
 """
 
 from __future__ import annotations
@@ -31,57 +32,69 @@ async def route_chat(
     """
     Route un appel LLM vers le meilleur provider disponible.
 
-    Stratégie :
-    1. Si le ModelRegistry a un modèle testé pour cet agent → l'utiliser
-    2. Sinon → fallback Anthropic direct (OAuth ou API key)
+    Chaîne de fallback :
+    1. Provider prioritaire selon le registry (ex: Ollama pour Workers simples)
+    2. Provider suivant dans la chaîne (ex: Groq)
+    3. Provider suivant (ex: Gemini)
+    4. Provider suivant (ex: Anthropic via registry)
+    5. Dernier recours : Anthropic direct (OAuth/API key)
 
-    Args:
-        agent_name: Nom de l'agent ("brain", "vox", "memory", "worker:coder", etc.)
-        messages: Messages au format [{"role": "user", "content": "..."}]
-        system: System prompt
-        tools: Schémas d'outils (format Anthropic, convertis automatiquement)
-        max_tokens: Max tokens de sortie
-        temperature: Température de génération
-
-    Returns:
-        ChatResponse unifiée
+    Chaque échec est loggué et le provider suivant est tenté.
     """
-    # Essayer le registry d'abord
+    errors = []
+
+    # Obtenir la chaîne de fallback depuis le registry
     try:
         from neo_core.providers.registry import get_model_registry
 
         registry = get_model_registry()
-        stats = registry.get_stats()
+        require_tools = bool(tools)
+        fallback_chain = registry.get_fallback_chain(
+            agent_name, require_tools=require_tools
+        )
 
-        if stats.get("available_models", 0) > 0:
-            # Choisir le modèle : avec tools si requis
-            if tools:
-                model = registry.get_model_for_worker_with_tools(agent_name)
-            else:
-                model = registry.get_best_for(agent_name)
+        # Tenter chaque modèle dans l'ordre
+        for model in fallback_chain:
+            provider = registry.get_provider(model.provider)
+            if not provider:
+                continue
 
-            if model:
-                provider = registry.get_provider(model.provider)
-                if provider:
-                    logger.debug(
-                        f"[Router] {agent_name} → {model.model_id} "
-                        f"({model.provider})"
-                    )
-                    response = await provider.chat(
-                        messages=messages,
-                        model=model.model_name,
-                        system=system,
-                        tools=tools,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                    )
+            try:
+                logger.debug(
+                    f"[Router] {agent_name} → {model.model_id} "
+                    f"({model.provider})"
+                )
+                response = await provider.chat(
+                    messages=messages,
+                    model=model.model_name,
+                    system=system,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+
+                # Vérifier que la réponse est valide (pas une erreur)
+                if response.text and not response.text.startswith("[Erreur"):
                     return response
 
+                # Réponse d'erreur du provider → noter et continuer
+                error_msg = f"{model.model_id}: {response.text[:100]}"
+                errors.append(error_msg)
+                logger.warning(f"[Router] Échec {error_msg}, fallback...")
+
+            except Exception as e:
+                error_msg = f"{model.model_id}: {type(e).__name__}: {str(e)[:100]}"
+                errors.append(error_msg)
+                logger.warning(f"[Router] Échec {error_msg}, fallback...")
+                continue
+
     except Exception as e:
+        errors.append(f"Registry: {e}")
         logger.debug(f"[Router] Registry indisponible: {e}")
 
-    # Fallback : Anthropic direct (OAuth ou API key)
-    return await _fallback_anthropic(
+    # Dernier recours : Anthropic direct (OAuth ou API key)
+    logger.debug(f"[Router] Tous les providers ont échoué, fallback Anthropic direct")
+    response = await _fallback_anthropic(
         agent_name=agent_name,
         messages=messages,
         system=system,
@@ -89,6 +102,13 @@ async def route_chat(
         max_tokens=max_tokens,
         temperature=temperature,
     )
+
+    # Si même Anthropic direct échoue, enrichir le message d'erreur
+    if response.text.startswith("[Erreur"):
+        all_errors = " | ".join(errors) if errors else "aucun provider disponible"
+        response.text = f"[Erreur] Chaîne de fallback épuisée: {all_errors}"
+
+    return response
 
 
 async def route_chat_raw(
@@ -150,9 +170,10 @@ async def _fallback_anthropic(
     temperature: float = 0.7,
 ) -> ChatResponse:
     """
-    Fallback Anthropic direct via httpx.
+    Dernier recours : Anthropic direct via httpx.
 
     Supporte OAuth Bearer et API key classique.
+    Utilisé uniquement si TOUS les providers du registry ont échoué.
     """
     import httpx
     import os

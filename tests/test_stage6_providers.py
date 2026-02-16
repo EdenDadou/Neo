@@ -472,6 +472,52 @@ class TestModelRegistry:
         """Sans modèles disponibles, get_best_for retourne None."""
         assert registry.get_best_for("brain") is None
 
+    @pytest.mark.asyncio
+    async def test_fallback_chain_returns_ordered_list(self, registry):
+        """get_fallback_chain() retourne tous les modèles dans l'ordre de priorité."""
+        ollama_model = ModelInfo(
+            model_id="ollama:llama",
+            provider="ollama",
+            model_name="llama",
+            display_name="Llama Local",
+            capability=ModelCapability.BASIC,
+            is_free=True,
+            is_local=True,
+        )
+        groq_model = ModelInfo(
+            model_id="groq:llama70b",
+            provider="groq",
+            model_name="llama70b",
+            display_name="Llama 70B Groq",
+            capability=ModelCapability.STANDARD,
+            is_free=True,
+        )
+        anthropic_model = ModelInfo(
+            model_id="anthropic:haiku",
+            provider="anthropic",
+            model_name="haiku",
+            display_name="Claude Haiku",
+            capability=ModelCapability.STANDARD,
+        )
+
+        registry.register_provider(MockProvider("ollama", models=[ollama_model]))
+        registry.register_provider(MockProvider("groq", models=[groq_model]))
+        registry.register_provider(MockProvider("anthropic", models=[anthropic_model]))
+        registry.discover_models()
+        await registry.test_all()
+
+        # Worker:summarizer (BASIC, économe) → Ollama > Groq > Anthropic
+        chain = registry.get_fallback_chain("worker:summarizer")
+        assert len(chain) == 3
+        assert chain[0].provider == "ollama"
+        assert chain[1].provider == "groq"
+        assert chain[2].provider == "anthropic"
+
+        # Memory (STANDARD, prefer_cloud) → Anthropic > Groq > Ollama(fallback)
+        chain_memory = registry.get_fallback_chain("memory")
+        assert len(chain_memory) >= 2
+        assert chain_memory[0].provider == "anthropic"
+
 
 # ═══════════════════════════════════════════════════════════
 # CONFIG INTEGRATION

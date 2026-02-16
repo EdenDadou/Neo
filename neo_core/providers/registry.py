@@ -291,6 +291,68 @@ class ModelRegistry:
         matching.sort(key=sort_key)
         return matching[0]
 
+    def get_fallback_chain(
+        self,
+        agent_name: str,
+        require_tools: bool = False,
+    ) -> list[ModelInfo]:
+        """
+        Retourne une chaîne ordonnée de modèles pour un agent.
+
+        Si le premier modèle échoue (rate limit, timeout, erreur),
+        le router essaie le suivant dans la liste.
+
+        Retourne tous les modèles disponibles, triés par priorité.
+        """
+        required = AGENT_REQUIREMENTS.get(agent_name, ModelCapability.STANDARD)
+        prefer_cloud = agent_name in PREFER_CLOUD_AGENTS
+
+        available = [
+            m for m in self._models.values()
+            if m.status == "available"
+        ]
+
+        if not available:
+            return []
+
+        # Filtrer par capability minimum
+        min_level = CAPABILITY_ORDER[required]
+        matching = [
+            m for m in available
+            if CAPABILITY_ORDER.get(m.capability, 0) >= min_level
+        ]
+
+        if require_tools:
+            matching = [m for m in matching if m.supports_tools]
+
+        # Si rien ne matche, tout prendre
+        if not matching:
+            matching = available
+
+        if prefer_cloud:
+            cloud_priority = {
+                "anthropic": 0,
+                "gemini": 1,
+                "groq": 2,
+                "ollama": 3,
+            }
+            def sort_key(m: ModelInfo) -> tuple:
+                return (
+                    cloud_priority.get(m.provider, 99),
+                    -CAPABILITY_ORDER.get(m.capability, 0),
+                    m.avg_latency_ms or 9999,
+                )
+        else:
+            def sort_key(m: ModelInfo) -> tuple:
+                return (
+                    PROVIDER_PRIORITY.get(m.provider, 99),
+                    CAPABILITY_ORDER.get(m.capability, 0),
+                    m.avg_latency_ms or 9999,
+                )
+
+        matching.sort(key=sort_key)
+        return matching
+
     def get_model_for_worker_with_tools(self, agent_name: str) -> ModelInfo | None:
         """
         Comme get_best_for, mais exige le support tool_use.
