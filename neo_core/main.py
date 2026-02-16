@@ -104,10 +104,16 @@ async def conversation_loop(vox: Vox):
             "Les réponses sont simulées.[/yellow]\n"
         )
     else:
-        key = config.llm.api_key
-        key_type = "OAuth" if key and key.startswith("sk-ant-oat") else "API Key"
+        # Afficher la méthode d'auth utilisée par Brain
+        auth_method = getattr(vox.brain, "_auth_method", "unknown") if vox.brain else "unknown"
+        auth_labels = {
+            "oauth_bearer": "OAuth Bearer + beta header",
+            "converted_api_key": "Clé API convertie depuis OAuth",
+            "langchain": "API Key classique",
+        }
+        auth_label = auth_labels.get(auth_method, auth_method)
         console.print(
-            f"[green]  ✓ Connecté à Anthropic ({key_type})[/green]\n"
+            f"[green]  ✓ Connecté à Anthropic ({auth_label})[/green]\n"
         )
 
     console.print(

@@ -8,6 +8,11 @@ Responsabilités :
 - Consulter le contexte enrichi par Memory
 - Déterminer l'action optimale
 - (Étape 3+) Générer dynamiquement des agents spécialisés
+
+Authentification OAuth (méthode OpenClaw) :
+- Méthode 1 : Bearer token + header beta "anthropic-beta: oauth-2025-04-20"
+- Méthode 2 : Conversion OAuth → API key via /claude_cli/create_api_key
+- Fallback : Clé API classique via LangChain
 """
 
 from __future__ import annotations
@@ -19,7 +24,13 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from neo_core.config import NeoConfig, default_config
-from neo_core.oauth import is_oauth_token, get_valid_access_token
+from neo_core.oauth import (
+    is_oauth_token,
+    get_valid_access_token,
+    get_best_auth,
+    get_api_key_from_oauth,
+    OAUTH_BETA_HEADER,
+)
 
 if TYPE_CHECKING:
     from neo_core.core.memory_agent import MemoryAgent
@@ -59,12 +70,18 @@ class Brain:
 
     Analyse les requêtes, consulte Memory, et détermine
     la meilleure action à entreprendre.
+
+    Supporte 3 modes d'authentification :
+    1. OAuth Bearer + beta header (méthode OpenClaw directe)
+    2. Clé API convertie depuis OAuth (méthode OpenClaw/pi-mono)
+    3. Clé API classique via LangChain
     """
     config: NeoConfig = field(default_factory=lambda: default_config)
     memory: Optional[MemoryAgent] = None
     _llm: Optional[object] = None
     _mock_mode: bool = False
     _oauth_mode: bool = False
+    _auth_method: str = ""  # "oauth_bearer" | "converted_api_key" | "langchain" | "mock"
     _anthropic_client: Optional[object] = None  # SDK Anthropic direct pour OAuth
 
     def __post_init__(self):
@@ -74,58 +91,112 @@ class Brain:
 
     def _init_llm(self) -> None:
         """
-        Initialise le LLM.
+        Initialise le LLM avec la meilleure méthode d'auth disponible.
 
-        - Clé API classique (sk-ant-api...) → LangChain ChatAnthropic
-        - Token OAuth (sk-ant-oat...) → SDK Anthropic direct (bypass LangChain)
+        Ordre de priorité pour les tokens OAuth :
+        1. Clé API déjà convertie (cache) → LangChain classique
+        2. Bearer + beta header → SDK Anthropic direct + httpx custom
+        3. Conversion OAuth → API Key → LangChain classique
+        4. Clé API classique → LangChain
+
+        Pour les clés API classiques :
+        → LangChain ChatAnthropic directement
         """
         try:
             api_key = self.config.llm.api_key
 
             if is_oauth_token(api_key):
-                self._oauth_mode = True
-                self._init_oauth_client(api_key)
+                self._init_oauth(api_key)
             else:
                 # Clé API classique → LangChain
-                from langchain_anthropic import ChatAnthropic
-                self._llm = ChatAnthropic(
-                    model=self.config.llm.model,
-                    api_key=api_key,
-                    temperature=self.config.llm.temperature,
-                    max_tokens=self.config.llm.max_tokens,
-                )
+                self._init_langchain(api_key)
         except Exception as e:
             print(f"[Brain] Impossible d'initialiser le LLM: {e}")
             self._mock_mode = True
+            self._auth_method = "mock"
 
-    def _init_oauth_client(self, token: str) -> None:
+    def _init_oauth(self, token: str) -> None:
         """
-        Initialise le client Anthropic direct avec Bearer auth.
-        Pas de LangChain — SDK Anthropic natif qui gère auth_token correctement.
+        Initialise l'authentification OAuth avec fallback automatique.
+
+        Essaie dans l'ordre :
+        1. Clé API convertie (cache) → LangChain
+        2. Bearer + beta header → httpx direct
+        3. Conversion OAuth → API Key → LangChain
+        """
+        # Essayer d'abord de récupérer une clé API convertie
+        converted_key = get_api_key_from_oauth()
+        if converted_key:
+            print(f"[Brain] Clé API convertie depuis OAuth détectée")
+            self._init_langchain(converted_key)
+            self._auth_method = "converted_api_key"
+            return
+
+        # Pas de clé convertie → Bearer + beta header (méthode OpenClaw)
+        self._oauth_mode = True
+        self._init_oauth_bearer(token)
+
+    def _init_oauth_bearer(self, token: str) -> None:
+        """
+        Initialise le client Anthropic avec Bearer auth + beta header.
+
+        C'est la méthode OpenClaw : on utilise le SDK Anthropic avec
+        auth_token et on ajoute le header beta "oauth-2025-04-20"
+        via un httpx custom qui injecte les headers nécessaires.
         """
         import anthropic
+        import httpx
 
-        # Tenter de récupérer un token valide (refresh si expiré)
+        # Récupérer un token valide (refresh si expiré)
         valid_token = get_valid_access_token()
         if not valid_token:
             valid_token = token
 
+        # Créer un httpx client custom qui ajoute le beta header OAuth
+        custom_transport = httpx.AsyncHTTPTransport()
+
         self._anthropic_client = anthropic.AsyncAnthropic(
-            api_key=None,
-            auth_token=valid_token,
+            api_key="dummy",  # Sera overridé par le header Authorization
+            default_headers={
+                "Authorization": f"Bearer {valid_token}",
+                "anthropic-beta": OAUTH_BETA_HEADER,
+            },
         )
+        # Supprimer x-api-key pour éviter le conflit
+        # Le SDK va utiliser notre header Authorization à la place
+        self._current_token = valid_token
+        self._auth_method = "oauth_bearer"
+        print(f"[Brain] Mode OAuth Bearer + beta header activé")
 
     def _refresh_oauth_client(self) -> bool:
         """Rafraîchit le client OAuth si le token a expiré."""
+        # D'abord, vérifier si une clé API convertie est apparue
+        converted_key = get_api_key_from_oauth()
+        if converted_key:
+            self._init_langchain(converted_key)
+            self._oauth_mode = False
+            self._auth_method = "converted_api_key"
+            return True
+
+        # Sinon, rafraîchir le token Bearer
         valid_token = get_valid_access_token()
         if valid_token:
-            import anthropic
-            self._anthropic_client = anthropic.AsyncAnthropic(
-                api_key=None,
-                auth_token=valid_token,
-            )
+            self._init_oauth_bearer(valid_token)
             return True
         return False
+
+    def _init_langchain(self, api_key: str) -> None:
+        """Initialise LangChain avec une clé API classique."""
+        from langchain_anthropic import ChatAnthropic
+        self._llm = ChatAnthropic(
+            model=self.config.llm.model,
+            api_key=api_key,
+            temperature=self.config.llm.temperature,
+            max_tokens=self.config.llm.max_tokens,
+        )
+        self._oauth_mode = False
+        if not self._auth_method:
+            self._auth_method = "langchain"
 
     def connect_memory(self, memory: MemoryAgent) -> None:
         """Connecte Brain au système mémoire."""
@@ -173,11 +244,31 @@ class Brain:
             error_type = type(e).__name__
             error_msg = str(e)
 
-            # Si erreur d'auth en mode OAuth → tenter refresh et retry
-            if self._oauth_mode and "authentication" in error_msg.lower():
+            # Si erreur d'auth en mode OAuth → tenter refresh/conversion et retry
+            if self._oauth_mode and ("authentication" in error_msg.lower()
+                                     or "unauthorized" in error_msg.lower()
+                                     or "401" in error_msg):
+                print(f"[Brain] Erreur auth OAuth, tentative de fallback...")
+
+                # Fallback 1 : Essayer la conversion en API key
+                converted_key = get_api_key_from_oauth()
+                if converted_key:
+                    print(f"[Brain] Conversion OAuth → API key réussie, retry...")
+                    self._init_langchain(converted_key)
+                    self._oauth_mode = False
+                    self._auth_method = "converted_api_key"
+                    try:
+                        return await self._llm_response(request, memory_context, conversation_history)
+                    except Exception as retry_e:
+                        return f"[Brain Erreur] Après conversion: {type(retry_e).__name__}: {str(retry_e)[:300]}"
+
+                # Fallback 2 : Refresh du token et retry Bearer
                 if self._refresh_oauth_client():
                     try:
-                        return await self._oauth_response(request, memory_context, conversation_history)
+                        if self._oauth_mode:
+                            return await self._oauth_response(request, memory_context, conversation_history)
+                        else:
+                            return await self._llm_response(request, memory_context, conversation_history)
                     except Exception as retry_e:
                         return f"[Brain Erreur] Après refresh: {type(retry_e).__name__}: {str(retry_e)[:300]}"
 
@@ -186,9 +277,13 @@ class Brain:
     async def _oauth_response(self, request: str, memory_context: str,
                               conversation_history: list[BaseMessage] | None = None) -> str:
         """
-        Génère une réponse via le SDK Anthropic direct (OAuth Bearer).
-        Pas de LangChain — appel direct à l'API Anthropic.
+        Génère une réponse via le SDK Anthropic avec OAuth Bearer + beta header.
+
+        C'est la méthode OpenClaw : Authorization: Bearer <token>
+        avec le header anthropic-beta: oauth-2025-04-20
         """
+        import httpx as _httpx
+
         # Construire les messages
         messages = []
 
@@ -206,21 +301,51 @@ class Brain:
         # System prompt avec contexte mémoire
         system_prompt = BRAIN_SYSTEM_PROMPT.replace("{memory_context}", memory_context)
 
-        # Appel API direct
-        response = await self._anthropic_client.messages.create(
-            model=self.config.llm.model,
-            max_tokens=self.config.llm.max_tokens,
-            temperature=self.config.llm.temperature,
-            system=system_prompt,
-            messages=messages,
-        )
+        # Rafraîchir le token si nécessaire
+        valid_token = get_valid_access_token()
+        if valid_token:
+            token = valid_token
+        else:
+            token = getattr(self, "_current_token", None)
+            if not token:
+                return "[Brain Erreur] Aucun token OAuth valide disponible"
 
-        # Extraire le texte de la réponse
-        return response.content[0].text
+        # Appel API direct via httpx (contournement complet du SDK pour contrôle total)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": OAUTH_BETA_HEADER,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+
+        payload = {
+            "model": self.config.llm.model,
+            "max_tokens": self.config.llm.max_tokens,
+            "temperature": self.config.llm.temperature,
+            "system": system_prompt,
+            "messages": messages,
+        }
+
+        async with _httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload,
+                timeout=120,
+            )
+
+        if response.status_code == 200:
+            data = response.json()
+            return data["content"][0]["text"]
+        else:
+            # Erreur → lever une exception pour déclencher le fallback
+            error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+            error_msg = error_data.get("error", {}).get("message", response.text[:300])
+            raise Exception(f"API {response.status_code}: {error_msg}")
 
     async def _llm_response(self, request: str, memory_context: str,
                             conversation_history: list[BaseMessage] | None = None) -> str:
-        """Génère une réponse via LangChain (clé API classique)."""
+        """Génère une réponse via LangChain (clé API classique ou convertie)."""
         prompt = ChatPromptTemplate.from_messages([
             ("system", BRAIN_SYSTEM_PROMPT),
             MessagesPlaceholder("conversation_history", optional=True),
