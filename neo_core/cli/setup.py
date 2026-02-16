@@ -535,7 +535,7 @@ def run_setup():
     print(f"  {DIM}Ce wizard va tout configurer en quelques étapes.{RESET}\n")
 
     # ─── Étape 1 : Vérifications système ─────────────────────────
-    print_step(1, 7, "Vérifications système")
+    print_step(1, 8, "Vérifications système")
 
     if not check_python_version():
         sys.exit(1)
@@ -543,7 +543,7 @@ def run_setup():
     python_path = setup_venv()
 
     # ─── Étape 2 : Installation des dépendances ─────────────────
-    print_step(2, 7, "Installation des dépendances")
+    print_step(2, 8, "Installation des dépendances")
 
     if not install_dependencies(python_path):
         print(f"\n  {RED}⚠ L'installation a rencontré des erreurs.{RESET}")
@@ -553,7 +553,7 @@ def run_setup():
             sys.exit(1)
 
     # ─── Étape 3 : Identité du Core ─────────────────────────────
-    print_step(3, 7, "Identité du Core")
+    print_step(3, 8, "Identité du Core")
 
     print(f"  {DIM}Donnez un nom à votre système IA.{RESET}")
     print(f"  {DIM}Ce nom sera utilisé par les agents pour se référencer.{RESET}\n")
@@ -568,22 +568,22 @@ def run_setup():
     print(f"\n  {GREEN}✓{RESET} Core: {BOLD}{core_name}{RESET} — Utilisateur: {BOLD}{user_name}{RESET}")
 
     # ─── Étape 4 : Connexion Anthropic (optionnel) ───────────────
-    print_step(4, 7, "Connexion Anthropic (payant, optionnel)")
+    print_step(4, 8, "Connexion Anthropic (payant, optionnel)")
 
     api_key = configure_auth()
 
     # ─── Étape 5 : Modèles LLM (hardware + providers gratuits) ───
-    print_step(5, 7, "Configuration des modèles LLM")
+    print_step(5, 8, "Configuration des modèles LLM")
 
     provider_keys = configure_hardware_and_providers(api_key)
 
     # ─── Étape 6 : Sauvegarde ────────────────────────────────────
-    print_step(6, 7, "Sauvegarde")
+    print_step(6, 8, "Sauvegarde")
 
     save_config(core_name, user_name, api_key, python_path, provider_keys)
 
     # ─── Étape 7 : Test final ────────────────────────────────────
-    print_step(7, 7, "Vérification finale")
+    print_step(7, 8, "Vérification finale")
 
     if api_key:
         test_connection(api_key)
@@ -592,7 +592,60 @@ def run_setup():
     active_providers = [k for k, v in provider_keys.items() if v]
     provider_list = ", ".join(active_providers) if active_providers else "Mode mock"
 
-    # ─── Résumé + lancement du chat ──────────────────────────────
+    # ─── Étape 8 : Démarrage du daemon ───────────────────────────
+    print_step(8, 8, "Démarrage du daemon Neo")
+
+    # Reload la config depuis le .env qu'on vient de créer
+    from dotenv import load_dotenv
+    load_dotenv(ENV_FILE, override=True)
+
+    # Installer les dépendances finales si nécessaire
+    print(f"  {DIM}⧗ Vérification des dépendances du daemon...{RESET}", end="", flush=True)
+    try:
+        import psutil
+        import cryptography
+        print(f"\r  {GREEN}✓{RESET} Dépendances daemon OK (psutil, cryptography)")
+    except ImportError as e:
+        print(f"\r  {YELLOW}⚠{RESET} Dépendance manquante: {e}")
+        run_command(
+            f"{python_path} -m pip install psutil cryptography -q",
+            "Installation des dépendances daemon"
+        )
+
+    # Démarrer le daemon
+    from neo_core.core.daemon import start, is_running, get_status
+
+    if is_running():
+        print(f"  {GREEN}✓{RESET} Neo daemon déjà en cours d'exécution")
+        status = get_status()
+        if status.get("pid"):
+            print(f"  {DIM}  PID {status['pid']} — {status.get('memory_mb', '?')} MB RAM{RESET}")
+    else:
+        print(f"  {DIM}⧗ Démarrage du daemon Neo (heartbeat + API)...{RESET}")
+        result = start(foreground=False)
+        if result["success"]:
+            print(f"  {GREEN}✓{RESET} {result['message']}")
+            print(f"  {DIM}  API disponible sur http://0.0.0.0:8000{RESET}")
+            print(f"  {DIM}  Logs : neo logs{RESET}")
+        else:
+            print(f"  {YELLOW}⚠{RESET} {result['message']}")
+            print(f"  {DIM}  Vous pouvez démarrer manuellement : neo start{RESET}")
+
+    # Proposer l'installation du service systemd
+    import platform
+    if platform.system() == "Linux":
+        print()
+        if ask_confirm("Installer le service systemd (démarrage automatique au boot) ?", default=False):
+            from neo_core.core.daemon import install_service
+            svc_result = install_service()
+            if svc_result["success"]:
+                print(f"  {GREEN}✓{RESET} {svc_result['message']}")
+            else:
+                print(f"  {YELLOW}⚠{RESET} {svc_result['message']}")
+                for cmd in svc_result.get("commands", []):
+                    print(f"    {DIM}{cmd}{RESET}")
+
+    # ─── Résumé final ─────────────────────────────────────────────
     print(f"""
 {CYAN}{BOLD}  ╔═══════════════════════════════════════════════╗
   ║          Installation terminée !               ║
@@ -602,13 +655,16 @@ def run_setup():
     Nom du Core   : {GREEN}{core_name}{RESET}
     Utilisateur   : {GREEN}{user_name}{RESET}
     Providers LLM : {GREEN}{provider_list}{RESET}
+
+  {BOLD}Commandes utiles :{RESET}
+    {CYAN}neo chat{RESET}        Discuter avec {core_name}
+    {CYAN}neo status{RESET}      État du système + daemon
+    {CYAN}neo logs{RESET}        Voir les logs du daemon
+    {CYAN}neo stop{RESET}        Arrêter le daemon
+    {CYAN}neo restart{RESET}     Redémarrer le daemon
 """)
 
-    print(f"\n  {CYAN}Démarrage de {core_name}...{RESET}\n")
-
-    # Reload la config depuis le .env qu'on vient de créer
-    from dotenv import load_dotenv
-    load_dotenv(ENV_FILE, override=True)
-
+    # Lancer le chat
+    print(f"  {CYAN}Démarrage du chat avec {core_name}...{RESET}\n")
     from neo_core.cli.chat import run_chat
     run_chat()
