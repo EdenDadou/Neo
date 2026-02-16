@@ -179,15 +179,7 @@ class Brain:
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)
-            # Extraire le message utile des erreurs Anthropic
-            if "authentication_error" in error_msg.lower():
-                return f"[Brain Erreur] Authentification échouée. Vérifiez votre clé API/OAuth. ({error_type})"
-            elif "rate_limit" in error_msg.lower():
-                return f"[Brain Erreur] Limite de requêtes atteinte. Réessayez dans quelques secondes."
-            elif "overloaded" in error_msg.lower():
-                return f"[Brain Erreur] L'API Anthropic est surchargée. Réessayez dans un instant."
-            else:
-                return f"[Brain Erreur] {error_type}: {error_msg[:200]}"
+            return f"[Brain Erreur] {error_type}: {error_msg[:500]}"
 
     async def _llm_response(self, request: str, memory_context: str,
                             conversation_history: list[BaseMessage] | None = None) -> str:
