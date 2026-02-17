@@ -637,7 +637,9 @@ def run_setup(auto_mode: bool = False):
             pass
 
         if not api_key:
-            api_key = ask("Clé Anthropic (Entrée pour ignorer)", secret=True)
+            # En mode auto (sudo -u neo), getpass hang car /dev/tty
+            # n'est pas accessible au user neo → utiliser input() direct
+            api_key = ask("Clé Anthropic (Entrée pour ignorer)", secret=False)
 
         if api_key:
             masked = api_key[:12] + "..." + api_key[-4:]
