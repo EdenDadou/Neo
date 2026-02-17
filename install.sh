@@ -172,6 +172,11 @@ else
     log_info "Utilisateur '$NEO_USER' créé"
 fi
 
+# Donner les droits sudo sans mot de passe à Neo (autonomie complète)
+echo "${NEO_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/neo
+chmod 440 /etc/sudoers.d/neo
+log_info "Droits sudo accordés à '$NEO_USER' (NOPASSWD)"
+
 # ═══════════════════════════════════════════════════════════
 #  Étape 3 : Cloner le dépôt
 # ═══════════════════════════════════════════════════════════
