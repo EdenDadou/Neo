@@ -140,8 +140,8 @@ def get_agent_model(agent_name: str) -> AgentModelConfig:
                     provider=model.provider,
                     model_id=model.model_id,
                 )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Provider registry lookup failed for '%s': %s", agent_name, e)
 
     # Fallback : modèles hardcodés (Anthropic)
     return AGENT_MODELS.get(agent_name, AGENT_MODELS["brain"])

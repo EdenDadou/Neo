@@ -9,8 +9,9 @@ Uses CoreRegistry for a single shared instance of Vox/Brain/Memory.
 import time
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +75,21 @@ def create_app(config=None) -> FastAPI:
     app = FastAPI(
         title="Neo Core API",
         description="API REST pour Neo Core — Écosystème IA Multi-Agents",
-        version="0.8.1",
+        version="0.8.2",
         lifespan=lifespan,
     )
+
+    # Global exception handler — retourne du JSON propre au lieu d'un stacktrace
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        logger.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "internal_server_error",
+                "message": f"{type(exc).__name__}: {str(exc)[:200]}",
+            },
+        )
 
     # CORS middleware
     app.add_middleware(

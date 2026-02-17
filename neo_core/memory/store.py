@@ -91,6 +91,13 @@ class MemoryStore:
 
         self._db_conn.commit()
 
+        # Appliquer les migrations
+        try:
+            from neo_core.memory.migrations import run_migrations
+            run_migrations(self._db_conn)
+        except Exception as e:
+            logger.debug("Migrations skipped: %s", e)
+
     def _init_chromadb(self) -> None:
         """Initialise ChromaDB pour le stockage vectoriel."""
         try:

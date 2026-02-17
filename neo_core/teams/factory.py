@@ -9,9 +9,12 @@ La Factory est stateless — elle ne conserve aucun état entre les créations.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
+
+logger = logging.getLogger(__name__)
 
 from neo_core.config import NeoConfig
 from neo_core.teams.worker import Worker, WorkerType
@@ -245,8 +248,8 @@ class WorkerFactory:
                     enriched_subtasks.insert(0,
                         f"[Mémoire] {learning_context}"
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Learning context enrichment failed: %s", e)
 
         return Worker(
             config=self.config,

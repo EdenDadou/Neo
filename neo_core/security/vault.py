@@ -59,8 +59,8 @@ def _get_machine_id() -> str:
             for line in result.stdout.splitlines():
                 if "IOPlatformUUID" in line:
                     return line.split('"')[-2]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("macOS IOPlatformUUID read failed: %s", e)
 
     # Fallback : hostname + user
     return f"{platform.node()}-{os.getenv('USER', 'neo')}"

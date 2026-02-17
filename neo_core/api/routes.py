@@ -59,12 +59,67 @@ async def chat(request: ChatRequest):
 @router.get("/health")
 async def health():
     """
-    Health check endpoint.
+    Health check enrichi — vérifie tous les composants.
 
     Returns:
-        Status and timestamp
+        Status, composants, et timestamp.
     """
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+    checks = {}
+
+    # 1. Core initialisé ?
+    checks["core"] = "ok" if neo_core._initialized else "not_initialized"
+
+    # 2. Vox/Brain/Memory
+    if neo_core.vox:
+        checks["vox"] = "ok"
+        checks["brain"] = "ok" if neo_core.vox.brain else "disconnected"
+        checks["memory"] = (
+            "ok" if neo_core.vox.memory and neo_core.vox.memory.is_initialized
+            else "not_initialized"
+        )
+    else:
+        checks["vox"] = "not_initialized"
+
+    # 3. ChromaDB
+    try:
+        if neo_core.vox and neo_core.vox.memory and neo_core.vox.memory._store:
+            store = neo_core.vox.memory._store
+            if store._collection:
+                count = store._collection.count()
+                checks["chromadb"] = f"ok ({count} vectors)"
+            else:
+                checks["chromadb"] = "no_collection"
+        else:
+            checks["chromadb"] = "unavailable"
+    except Exception as e:
+        checks["chromadb"] = f"error: {e}"
+
+    # 4. KeyVault
+    try:
+        from neo_core.security.vault import KeyVault
+        data_dir = neo_core.config.data_dir if neo_core.config else None
+        if data_dir:
+            vault = KeyVault(data_dir=data_dir)
+            vault.initialize()
+            vault.close()
+            checks["vault"] = "ok"
+        else:
+            checks["vault"] = "no_config"
+    except Exception as e:
+        checks["vault"] = f"error: {e}"
+
+    # Statut global
+    all_ok = all(
+        v == "ok" or v.startswith("ok ")
+        for k, v in checks.items()
+        if k in ("core", "vox", "brain", "memory")
+    )
+
+    return {
+        "status": "healthy" if all_ok else "degraded",
+        "checks": checks,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 @router.get("/status", response_model=StatusResponse)

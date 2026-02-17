@@ -24,12 +24,15 @@ Le flow OAuth Anthropic :
 """
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 # Client ID officiel du Claude Code CLI
 CLAUDE_CODE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -43,7 +46,19 @@ OAUTH_BETA_HEADER = "oauth-2025-04-20"
 
 # Fichier de stockage des credentials OAuth
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CREDENTIALS_FILE = _PROJECT_ROOT / "data" / ".oauth_credentials.json"
+_DATA_DIR = _PROJECT_ROOT / "data"
+CREDENTIALS_FILE = _DATA_DIR / ".oauth_credentials.json"
+
+
+def _get_vault():
+    """Retourne une instance du KeyVault (best-effort)."""
+    try:
+        from neo_core.security.vault import KeyVault
+        vault = KeyVault(data_dir=_DATA_DIR)
+        vault.initialize()
+        return vault
+    except Exception:
+        return None
 
 
 def is_oauth_token(key: str) -> bool:
@@ -61,7 +76,38 @@ def is_refresh_token(key: str) -> bool:
 
 
 def load_credentials() -> dict:
-    """Charge les credentials OAuth depuis le fichier."""
+    """
+    Charge les credentials OAuth.
+
+    Priorité :
+    1. KeyVault (chiffré AES) pour access_token et refresh_token
+    2. Fallback fichier JSON legacy (.oauth_credentials.json)
+    """
+    # 1. Essayer le vault
+    vault = _get_vault()
+    if vault:
+        try:
+            access = vault.retrieve("oauth_access_token")
+            refresh = vault.retrieve("oauth_refresh_token")
+            meta_raw = vault.retrieve("oauth_meta")
+            vault.close()
+
+            if access:
+                meta = json.loads(meta_raw) if meta_raw else {}
+                return {
+                    "access_token": access,
+                    "refresh_token": refresh or "",
+                    "expires_at": meta.get("expires_at", 0),
+                    "api_key": meta.get("api_key", ""),
+                }
+        except Exception as e:
+            logger.debug("Vault read for OAuth failed: %s", e)
+            try:
+                vault.close()
+            except Exception:
+                pass
+
+    # 2. Fallback : fichier JSON legacy
     if CREDENTIALS_FILE.exists():
         try:
             with open(CREDENTIALS_FILE) as f:
@@ -73,7 +119,33 @@ def load_credentials() -> dict:
 
 def save_credentials(access_token: str, refresh_token: str, expires_at: float,
                      api_key: str = ""):
-    """Sauvegarde les credentials OAuth (+ clé API convertie si disponible)."""
+    """
+    Sauvegarde les credentials OAuth.
+
+    Les tokens sont chiffrés dans le KeyVault (AES).
+    Un fichier JSON legacy est aussi écrit en fallback.
+    """
+    # 1. Vault (chiffré)
+    vault = _get_vault()
+    if vault:
+        try:
+            vault.store("oauth_access_token", access_token)
+            if refresh_token:
+                vault.store("oauth_refresh_token", refresh_token)
+            meta = {"expires_at": expires_at}
+            if api_key:
+                meta["api_key"] = api_key
+            vault.store("oauth_meta", json.dumps(meta))
+            vault.close()
+            logger.debug("OAuth credentials saved to vault (encrypted)")
+        except Exception as e:
+            logger.debug("Vault write for OAuth failed: %s — fallback to JSON", e)
+            try:
+                vault.close()
+            except Exception:
+                pass
+
+    # 2. Fichier JSON legacy (backward compat + fallback)
     CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
     creds = {
         "access_token": access_token,
