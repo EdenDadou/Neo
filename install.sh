@@ -347,8 +347,9 @@ echo -e "  ${DIM}Sans clé API, Neo fonctionne en mode démo (réponses simulée
 echo
 
 # Lancer le wizard en mode auto (minimal questions)
+# IMPORTANT : < /dev/tty pour que input() lise le clavier et pas le pipe du curl
 echo -e "  ${DIM}Lancement du wizard...${RESET}\n"
-sudo -u $NEO_USER bash -c "cd ${INSTALL_DIR} && source ${VENV_DIR}/bin/activate && neo setup --auto"
+sudo -u $NEO_USER bash -c "cd ${INSTALL_DIR} && source ${VENV_DIR}/bin/activate && neo setup --auto" < /dev/tty
 WIZARD_EXIT=$?
 
 # Si le wizard réussit, démarrer le service
