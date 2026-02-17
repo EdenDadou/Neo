@@ -98,6 +98,61 @@ check_root
 # Initialiser le fichier de log
 echo "=== Neo Core Install — $(date) ===" > "$LOG_FILE"
 
+# ─── Vérification de l'espace disque ─────────────────────
+check_disk_space() {
+    local required_mb=3000  # 3GB minimum
+    local available_mb
+    available_mb=$(df -BM / | awk 'NR==2{gsub(/M/,"",$4); print $4}')
+
+    if [[ -z "$available_mb" ]]; then
+        log_warn "Impossible de vérifier l'espace disque — on continue"
+        return 0
+    fi
+
+    echo -e "  ${DIM}Espace disque disponible : ${available_mb}MB${RESET}"
+
+    if [[ $available_mb -lt $required_mb ]]; then
+        log_error "Espace disque insuffisant : ${available_mb}MB disponibles, ${required_mb}MB requis"
+        echo -e "  ${YELLOW}Nettoyage automatique en cours...${RESET}"
+
+        # Nettoyer le cache apt
+        apt-get clean >> "$LOG_FILE" 2>&1 || true
+        apt-get autoremove -y -qq >> "$LOG_FILE" 2>&1 || true
+
+        # Nettoyer les anciens backups Neo s'ils existent
+        rm -rf /tmp/neo-data-backup 2>/dev/null || true
+        rm -f /tmp/neo-env-backup 2>/dev/null || true
+        rm -f /tmp/neo-install.log 2>/dev/null || true
+
+        # Nettoyer les anciens logs
+        journalctl --vacuum-size=50M >> "$LOG_FILE" 2>&1 || true
+
+        # Nettoyer pip cache (peut être volumineux)
+        pip cache purge >> "$LOG_FILE" 2>&1 || true
+        rm -rf /root/.cache/pip 2>/dev/null || true
+        rm -rf /home/*/.cache/pip 2>/dev/null || true
+
+        # Nettoyer le cache Rust/Cargo si présent
+        rm -rf /root/.cargo/registry/cache 2>/dev/null || true
+
+        # Re-vérifier
+        available_mb=$(df -BM / | awk 'NR==2{gsub(/M/,"",$4); print $4}')
+        if [[ $available_mb -lt 1500 ]]; then
+            log_error "Toujours pas assez d'espace : ${available_mb}MB (minimum 1.5GB)"
+            echo -e "  ${DIM}Conseils :${RESET}"
+            echo -e "  ${DIM}  - Vérifiez avec : df -h${RESET}"
+            echo -e "  ${DIM}  - Supprimez les fichiers inutiles${RESET}"
+            echo -e "  ${DIM}  - Si swap prend de la place : sudo swapoff /swapfile && sudo rm /swapfile${RESET}"
+            exit 1
+        fi
+        log_info "Espace récupéré : ${available_mb}MB disponibles"
+    else
+        log_info "Espace disque OK : ${available_mb}MB disponibles"
+    fi
+}
+
+check_disk_space
+
 TOTAL_STEPS=6
 
 # ═══════════════════════════════════════════════════════════
@@ -147,16 +202,40 @@ log_info "Python $PYTHON_VERSION détecté"
 
 # Swap file si RAM < 2GB (aide à la compilation de chromadb)
 TOTAL_RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
-if [[ $TOTAL_RAM_MB -lt 2048 ]] && [[ ! -f /swapfile ]]; then
-    echo -e "  ${DIM}⧗ RAM faible (${TOTAL_RAM_MB}MB) — création d'un swap de 2GB...${RESET}"
-    fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 >> "$LOG_FILE" 2>&1
-    chmod 600 /swapfile
-    mkswap /swapfile >> "$LOG_FILE" 2>&1
-    swapon /swapfile >> "$LOG_FILE" 2>&1
-    echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    log_info "Swap 2GB activé (aide à la compilation)"
+SWAP_ACTIVE=$(swapon --show --noheadings 2>/dev/null | wc -l)
+if [[ $TOTAL_RAM_MB -lt 2048 ]] && [[ $SWAP_ACTIVE -eq 0 ]]; then
+    # Vérifier si un swapfile existe déjà mais n'est pas actif
+    if [[ -f /swapfile ]]; then
+        swapon /swapfile >> "$LOG_FILE" 2>&1 && log_info "Swap existant réactivé" || {
+            rm -f /swapfile
+            log_warn "Ancien swapfile corrompu — recréation"
+        }
+    fi
+    # Créer seulement si toujours pas de swap
+    if [[ $(swapon --show --noheadings 2>/dev/null | wc -l) -eq 0 ]]; then
+        # Utiliser 1GB si l'espace est limité (< 5GB libre), sinon 2GB
+        AVAIL_MB=$(df -BM / | awk 'NR==2{gsub(/M/,"",$4); print $4}')
+        if [[ $AVAIL_MB -lt 5000 ]]; then
+            SWAP_SIZE="1G"
+            SWAP_BYTES=$((1024*1024*1024))
+        else
+            SWAP_SIZE="2G"
+            SWAP_BYTES=$((2*1024*1024*1024))
+        fi
+        echo -e "  ${DIM}⧗ RAM faible (${TOTAL_RAM_MB}MB) — création d'un swap de ${SWAP_SIZE}...${RESET}"
+        fallocate -l "$SWAP_SIZE" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=$((SWAP_BYTES/1024/1024)) >> "$LOG_FILE" 2>&1
+        chmod 600 /swapfile
+        mkswap /swapfile >> "$LOG_FILE" 2>&1
+        swapon /swapfile >> "$LOG_FILE" 2>&1
+        # Ajouter à fstab seulement si pas déjà présent
+        grep -qF '/swapfile' /etc/fstab 2>/dev/null || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        log_info "Swap ${SWAP_SIZE} activé (aide à la compilation)"
+    fi
+elif [[ $SWAP_ACTIVE -gt 0 ]]; then
+    SWAP_TOTAL=$(free -m | awk '/^Swap:/{print $2}')
+    log_info "RAM: ${TOTAL_RAM_MB}MB + Swap: ${SWAP_TOTAL}MB (déjà actif)"
 else
-    log_info "RAM: ${TOTAL_RAM_MB}MB"
+    log_info "RAM: ${TOTAL_RAM_MB}MB (suffisant)"
 fi
 
 # ═══════════════════════════════════════════════════════════
@@ -200,6 +279,10 @@ log_step 3 $TOTAL_STEPS "Téléchargement de Neo Core"
 # Toujours supprimer et re-cloner pour garantir un code à jour
 # (évite les problèmes de safe.directory quand le dossier appartient à un autre user)
 if [[ -d "$INSTALL_DIR" ]]; then
+    # Nettoyer d'anciens backups avant d'en créer de nouveaux
+    rm -rf /tmp/neo-data-backup 2>/dev/null || true
+    rm -f /tmp/neo-env-backup 2>/dev/null || true
+
     # Sauvegarder les données utilisateur si elles existent
     if [[ -d "${INSTALL_DIR}/data" ]]; then
         cp -r "${INSTALL_DIR}/data" /tmp/neo-data-backup 2>/dev/null || true
@@ -209,6 +292,8 @@ if [[ -d "$INSTALL_DIR" ]]; then
         cp "${INSTALL_DIR}/.env" /tmp/neo-env-backup 2>/dev/null || true
         log_info "Configuration .env sauvegardée"
     fi
+    # Arrêter le service avant suppression
+    systemctl stop neo-guardian 2>/dev/null || true
     rm -rf "$INSTALL_DIR"
 fi
 
@@ -221,14 +306,19 @@ fi
 
 # Restaurer les données si backup existe
 if [[ -d /tmp/neo-data-backup ]]; then
-    cp -r /tmp/neo-data-backup "${INSTALL_DIR}/data"
-    rm -rf /tmp/neo-data-backup
+    cp -r /tmp/neo-data-backup "${INSTALL_DIR}/data" 2>/dev/null || true
+    rm -rf /tmp/neo-data-backup 2>/dev/null || true
     log_info "Données restaurées"
 fi
 if [[ -f /tmp/neo-env-backup ]]; then
-    cp /tmp/neo-env-backup "${INSTALL_DIR}/.env"
-    rm -f /tmp/neo-env-backup
+    cp /tmp/neo-env-backup "${INSTALL_DIR}/.env" 2>/dev/null || true
+    rm -f /tmp/neo-env-backup 2>/dev/null || true
     log_info "Configuration .env restaurée"
+fi
+
+# Nettoyer le log précédent s'il est volumineux (> 10MB)
+if [[ -f "$LOG_FILE" ]] && [[ $(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) -gt 10485760 ]]; then
+    tail -1000 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
 fi
 
 cd "$INSTALL_DIR"
@@ -292,6 +382,13 @@ run_optional "Installation de Groq (LLM cloud gratuit)" pip install groq
 run_optional "Installation de Gemini (LLM cloud gratuit)" pip install google-generativeai
 run_optional "Installation de Ollama (LLM local)" pip install ollama
 run_optional "Installation du bot Telegram" pip install python-telegram-bot
+
+# Nettoyer les caches pour libérer de l'espace disque
+echo -e "  ${DIM}⧗ Nettoyage des caches...${RESET}"
+pip cache purge >> "$LOG_FILE" 2>&1 || true
+apt-get clean >> "$LOG_FILE" 2>&1 || true
+rm -rf /root/.cache/pip 2>/dev/null || true
+log_info "Caches nettoyés"
 
 # Vérifier que la commande neo fonctionne
 if "${VENV_DIR}/bin/neo" version > /dev/null 2>&1; then
@@ -396,10 +493,11 @@ echo -e "  ${DIM}Il va vous demander votre nom et optionnellement vos clés API.
 echo -e "  ${DIM}Sans clé API, Neo fonctionne en mode démo (réponses simulées).${RESET}"
 echo
 
-# Lancer le wizard en tant que root (le user neo n'a pas accès au TTY)
+# Lancer le wizard directement via le venv (PAS via le wrapper /usr/local/bin/neo
+# qui fait sudo -u neo, car sudo peut échouer si le disque est plein ou le PTY indisponible)
 # On chown les fichiers de config après
 echo -e "  ${DIM}Lancement du wizard...${RESET}\n"
-cd "${INSTALL_DIR}" && source "${VENV_DIR}/bin/activate" && neo setup --auto < /dev/tty
+cd "${INSTALL_DIR}" && "${VENV_DIR}/bin/neo" setup --auto < /dev/tty
 WIZARD_EXIT=$?
 
 # Rendre les fichiers de config accessibles à l'utilisateur neo
