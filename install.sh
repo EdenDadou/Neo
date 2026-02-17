@@ -177,6 +177,20 @@ echo "${NEO_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/neo
 chmod 440 /etc/sudoers.d/neo
 log_info "Droits sudo accordés à '$NEO_USER' (NOPASSWD)"
 
+# Ajouter le venv au PATH du user neo et du user courant
+NEO_PATH_LINE='export PATH="/opt/neo-core/.venv/bin:/usr/local/bin:$PATH"'
+if [[ -d /home/${NEO_USER} ]]; then
+    grep -qF "/opt/neo-core/.venv/bin" /home/${NEO_USER}/.bashrc 2>/dev/null || \
+        echo "$NEO_PATH_LINE" >> /home/${NEO_USER}/.bashrc
+fi
+# Aussi pour l'utilisateur qui lance l'install (souvent ubuntu)
+REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
+if [[ "$REAL_USER" != "root" ]] && [[ -f "/home/${REAL_USER}/.bashrc" ]]; then
+    grep -qF "/opt/neo-core/.venv/bin" "/home/${REAL_USER}/.bashrc" 2>/dev/null || \
+        echo "$NEO_PATH_LINE" >> "/home/${REAL_USER}/.bashrc"
+    log_info "PATH mis à jour pour l'utilisateur '${REAL_USER}'"
+fi
+
 # ═══════════════════════════════════════════════════════════
 #  Étape 3 : Cloner le dépôt
 # ═══════════════════════════════════════════════════════════
@@ -287,6 +301,10 @@ else
     log_warn "La commande 'neo' n'est pas encore fonctionnelle — le wizard la configurera"
 fi
 
+# Créer un symlink global pour que 'neo' soit accessible de partout
+ln -sf "${VENV_DIR}/bin/neo" /usr/local/bin/neo
+log_info "Commande 'neo' ajoutée au PATH (/usr/local/bin/neo)"
+
 # ═══════════════════════════════════════════════════════════
 #  Étape 5 : Permissions + dossier data
 # ═══════════════════════════════════════════════════════════
@@ -310,7 +328,7 @@ log_step 6 $TOTAL_STEPS "Installation du service systemd"
 
 cat > /etc/systemd/system/neo-guardian.service << 'EOF'
 [Unit]
-Description=Neo Core Guardian — AI Multi-Agent System
+Description=Neo Core — AI Multi-Agent System
 Documentation=https://github.com/EdenDadou/Neo
 After=network.target
 StartLimitIntervalSec=3600
@@ -321,26 +339,27 @@ Type=simple
 User=neo
 Group=neo
 WorkingDirectory=/opt/neo-core
-ExecStart=/opt/neo-core/.venv/bin/neo guardian
+ExecStart=/opt/neo-core/.venv/bin/neo start --foreground
 Restart=always
-RestartSec=5
+RestartSec=10
 Environment=PYTHONUNBUFFERED=1
 Environment=NEO_ENV=production
+EnvironmentFile=-/opt/neo-core/.env
 
 # Timeouts
-TimeoutStartSec=30
+TimeoutStartSec=60
 TimeoutStopSec=30
 
-# Security hardening
+# Security hardening (lecture seule sauf data + fichiers Neo)
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/neo-core/data /opt/neo-core/.env /opt/neo-core/.venv
+ReadWritePaths=/opt/neo-core
 
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=neo-guardian
+SyslogIdentifier=neo-core
 
 [Install]
 WantedBy=multi-user.target
@@ -380,36 +399,36 @@ WIZARD_EXIT=$?
 chown -R ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/data" 2>/dev/null || true
 chown ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/.env" 2>/dev/null || true
 
-# Si le wizard réussit, démarrer le service
+# Si le wizard réussit, démarrer le service systemd
 if [[ $WIZARD_EXIT -eq 0 ]]; then
     echo
-    echo -e "  ${DIM}⧗ Démarrage de Neo...${RESET}"
+    echo -e "  ${DIM}⧗ Démarrage du service Neo...${RESET}"
+
+    # S'assurer que le .env est chargé par systemd
+    systemctl daemon-reload 2>/dev/null || true
     systemctl start neo-guardian 2>/dev/null || true
-    sleep 2
+    sleep 3
 
     if systemctl is-active --quiet neo-guardian; then
-        log_info "Neo est en ligne !"
-        echo
-        echo -e "  ${BOLD}Commandes utiles :${RESET}"
-        echo -e "    ${CYAN}sudo -u neo ${VENV_DIR}/bin/neo chat${RESET}      Discuter avec Neo"
-        echo -e "    ${CYAN}sudo -u neo ${VENV_DIR}/bin/neo status${RESET}    État du système"
-        echo -e "    ${CYAN}sudo -u neo ${VENV_DIR}/bin/neo setup${RESET}     Relancer le wizard complet"
-        echo -e "    ${CYAN}sudo journalctl -u neo-guardian -f${RESET}        Voir les logs"
-        echo -e "    ${CYAN}sudo systemctl restart neo-guardian${RESET}       Redémarrer"
-        echo
-        echo -e "  ${DIM}Alias recommandé (ajoutez dans ~/.bashrc) :${RESET}"
-        echo -e "    ${CYAN}alias neo='sudo -u neo ${VENV_DIR}/bin/neo'${RESET}"
-        echo
+        log_info "Neo est en ligne ! (service systemd actif)"
     else
         log_warn "Le service n'a pas démarré automatiquement"
-        echo -e "  ${DIM}Lancez manuellement :${RESET}"
-        echo -e "    ${CYAN}sudo systemctl start neo-guardian${RESET}"
-        echo -e "    ${CYAN}sudo journalctl -u neo-guardian -f${RESET}"
+        echo -e "  ${DIM}Vérifiez les logs : sudo journalctl -u neo-guardian -n 30${RESET}"
     fi
+
+    echo
+    echo -e "  ${BOLD}Commandes utiles :${RESET}"
+    echo -e "    ${CYAN}neo chat${RESET}                            Discuter avec Neo"
+    echo -e "    ${CYAN}neo status${RESET}                          État du système"
+    echo -e "    ${CYAN}neo setup${RESET}                           Relancer le wizard complet"
+    echo -e "    ${CYAN}neo logs${RESET}                            Voir les logs Neo"
+    echo -e "    ${CYAN}sudo journalctl -u neo-guardian -f${RESET}  Logs systemd en temps réel"
+    echo -e "    ${CYAN}sudo systemctl restart neo-guardian${RESET} Redémarrer le service"
+    echo
 else
     log_warn "Le wizard a rencontré un problème"
     echo -e "  ${DIM}Relancez-le manuellement :${RESET}"
-    echo -e "    ${CYAN}sudo -u neo ${VENV_DIR}/bin/neo setup${RESET}"
+    echo -e "    ${CYAN}neo setup${RESET}"
 fi
 
 echo -e "\n${GREEN}${BOLD}  Installation terminée.${RESET}\n"

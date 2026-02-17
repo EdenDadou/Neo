@@ -223,28 +223,34 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
     async def run_heartbeat():
         """Lance le heartbeat si disponible."""
         try:
-            from neo_core.core.heartbeat import Heartbeat, HeartbeatConfig
+            from neo_core.core.heartbeat import HeartbeatManager, HeartbeatConfig
+
+            # Récupérer brain et memory depuis le CoreRegistry
+            brain = core_registry.get_brain()
+            memory = core_registry.get_memory()
+
             hb_config = HeartbeatConfig(interval_seconds=1800.0)
-            heartbeat = Heartbeat(config=hb_config)
+            heartbeat = HeartbeatManager(
+                brain=brain,
+                memory=memory,
+                config=hb_config,
+            )
+            heartbeat.start()
             logger.info("Heartbeat démarré — interval=%ds", hb_config.interval_seconds)
 
-            while not shutdown_event.is_set():
-                try:
-                    await heartbeat.pulse()
-                except Exception as e:
-                    logger.error("Heartbeat pulse error: %s", e)
-                try:
-                    await asyncio.wait_for(
-                        shutdown_event.wait(),
-                        timeout=hb_config.interval_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    pass
-        except ImportError:
-            logger.warning("Heartbeat non disponible — daemon en mode API seul")
+            # Attendre le shutdown
+            await shutdown_event.wait()
+
+            # Arrêt propre
+            heartbeat.stop()
+            logger.info("Heartbeat arrêté")
+
+        except ImportError as e:
+            logger.warning("Heartbeat non disponible (%s) — daemon en mode API seul", e)
             await shutdown_event.wait()
         except Exception as e:
             logger.error("Heartbeat fatal: %s", e)
+            await shutdown_event.wait()
 
     telegram_bot = None
 

@@ -28,6 +28,25 @@ import pytest
 from neo_core.tools.plugin_loader import PluginLoader, LoadedPlugin
 from neo_core.tools.base_tools import ToolRegistry, TOOL_SCHEMAS
 
+# Sauvegarde des états originaux pour nettoyage après les tests
+_ORIGINAL_TOOL_SCHEMAS = dict(TOOL_SCHEMAS)
+_ORIGINAL_TOOL_MAP = dict(ToolRegistry._TOOL_MAP)
+_ORIGINAL_WORKER_TOOLS = {k: list(v) for k, v in ToolRegistry.WORKER_TOOLS.items()}
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_global_registry():
+    """Clean up global TOOL_SCHEMAS and ToolRegistry after each test."""
+    yield
+    # Restaurer les schémas et outils originaux
+    TOOL_SCHEMAS.clear()
+    TOOL_SCHEMAS.update(_ORIGINAL_TOOL_SCHEMAS)
+    ToolRegistry._TOOL_MAP.clear()
+    ToolRegistry._TOOL_MAP.update(_ORIGINAL_TOOL_MAP)
+    ToolRegistry.WORKER_TOOLS.clear()
+    ToolRegistry.WORKER_TOOLS.update({k: list(v) for k, v in _ORIGINAL_WORKER_TOOLS.items()})
+    ToolRegistry._plugin_loader = None
+
 
 # ─── Fixtures ─────────────────────────────────────────────────────────
 

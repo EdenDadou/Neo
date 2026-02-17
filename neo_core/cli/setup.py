@@ -777,47 +777,71 @@ def run_setup(auto_mode: bool = False):
             print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
 
     # ─── Démarrage du daemon ──────────────────────────────────────
-    step_daemon = 5 if auto_mode else 9
-    print_step(step_daemon, total_steps, "Démarrage du daemon Neo")
+    if auto_mode:
+        # En mode auto (appelé par install.sh), le daemon est géré par systemd
+        # Ne PAS démarrer le daemon ici — install.sh s'en charge après le wizard
+        step_daemon = 5
+        print_step(step_daemon, total_steps, "Vérification finale")
 
-    # Reload la config depuis le .env qu'on vient de créer
-    from dotenv import load_dotenv
-    load_dotenv(ENV_FILE, override=True)
+        # Reload la config depuis le .env qu'on vient de créer
+        from dotenv import load_dotenv
+        load_dotenv(ENV_FILE, override=True)
 
-    # Installer les dépendances finales si nécessaire
-    print(f"  {DIM}⧗ Vérification des dépendances du daemon...{RESET}", end="", flush=True)
-    try:
-        import psutil
-        import cryptography
-        print(f"\r  {GREEN}✓{RESET} Dépendances daemon OK (psutil, cryptography)")
-    except ImportError as e:
-        print(f"\r  {YELLOW}⚠{RESET} Dépendance manquante: {e}")
-        run_command(
-            f"{python_path} -m pip install psutil cryptography -q",
-            "Installation des dépendances daemon"
-        )
+        # Vérifier les dépendances finales
+        print(f"  {DIM}⧗ Vérification des dépendances du daemon...{RESET}", end="", flush=True)
+        try:
+            import psutil
+            import cryptography
+            print(f"\r  {GREEN}✓{RESET} Dépendances daemon OK (psutil, cryptography)")
+        except ImportError as e:
+            print(f"\r  {YELLOW}⚠{RESET} Dépendance manquante: {e}")
+            run_command(
+                f"{python_path} -m pip install psutil cryptography -q",
+                "Installation des dépendances daemon"
+            )
 
-    # Démarrer le daemon
-    from neo_core.core.daemon import start, is_running, get_status
-
-    if is_running():
-        print(f"  {GREEN}✓{RESET} Neo daemon déjà en cours d'exécution")
-        status = get_status()
-        if status.get("pid"):
-            print(f"  {DIM}  PID {status['pid']} — {status.get('memory_mb', '?')} MB RAM{RESET}")
+        print(f"  {GREEN}✓{RESET} Configuration prête — le daemon sera lancé par systemd")
     else:
-        print(f"  {DIM}⧗ Démarrage du daemon Neo (heartbeat + API)...{RESET}")
-        result = start(foreground=False)
-        if result["success"]:
-            print(f"  {GREEN}✓{RESET} {result['message']}")
-            print(f"  {DIM}  API disponible sur http://0.0.0.0:8000{RESET}")
-            print(f"  {DIM}  Logs : neo logs{RESET}")
-        else:
-            print(f"  {YELLOW}⚠{RESET} {result['message']}")
-            print(f"  {DIM}  Vous pouvez démarrer manuellement : neo start{RESET}")
+        step_daemon = 9
+        print_step(step_daemon, total_steps, "Démarrage du daemon Neo")
 
-    # Proposer l'installation du service systemd (mode interactif seulement)
-    if not auto_mode:
+        # Reload la config depuis le .env qu'on vient de créer
+        from dotenv import load_dotenv
+        load_dotenv(ENV_FILE, override=True)
+
+        # Installer les dépendances finales si nécessaire
+        print(f"  {DIM}⧗ Vérification des dépendances du daemon...{RESET}", end="", flush=True)
+        try:
+            import psutil
+            import cryptography
+            print(f"\r  {GREEN}✓{RESET} Dépendances daemon OK (psutil, cryptography)")
+        except ImportError as e:
+            print(f"\r  {YELLOW}⚠{RESET} Dépendance manquante: {e}")
+            run_command(
+                f"{python_path} -m pip install psutil cryptography -q",
+                "Installation des dépendances daemon"
+            )
+
+        # Démarrer le daemon
+        from neo_core.core.daemon import start, is_running, get_status
+
+        if is_running():
+            print(f"  {GREEN}✓{RESET} Neo daemon déjà en cours d'exécution")
+            status = get_status()
+            if status.get("pid"):
+                print(f"  {DIM}  PID {status['pid']} — {status.get('memory_mb', '?')} MB RAM{RESET}")
+        else:
+            print(f"  {DIM}⧗ Démarrage du daemon Neo (heartbeat + API)...{RESET}")
+            result = start(foreground=False)
+            if result["success"]:
+                print(f"  {GREEN}✓{RESET} {result['message']}")
+                print(f"  {DIM}  API disponible sur http://0.0.0.0:8000{RESET}")
+                print(f"  {DIM}  Logs : neo logs{RESET}")
+            else:
+                print(f"  {YELLOW}⚠{RESET} {result['message']}")
+                print(f"  {DIM}  Vous pouvez démarrer manuellement : neo start{RESET}")
+
+        # Proposer l'installation du service systemd
         import platform
         if platform.system() == "Linux":
             print()
@@ -858,4 +882,4 @@ def run_setup(auto_mode: bool = False):
         run_chat()
     else:
         print(f"  {GREEN}{BOLD}Neo est prêt !{RESET}")
-        print(f"  {DIM}Lancez 'neo chat' pour discuter.{RESET}\n")
+        print(f"  {DIM}Le service systemd va être lancé par le script d'installation.{RESET}\n")
