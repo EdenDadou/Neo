@@ -120,6 +120,9 @@ class WorkerLifecycleManager:
     """
     Registre centralisé des Workers — garantit leur destruction.
 
+    Thread-safe : toutes les opérations sur _active et _history
+    sont protégées par un threading.Lock.
+
     Responsabilités :
     - Tracker tous les Workers actifs (en cours d'exécution)
     - Conserver l'historique des Workers terminés (pour stats)
@@ -127,6 +130,8 @@ class WorkerLifecycleManager:
     """
 
     def __init__(self, max_history: int = 50):
+        import threading
+        self._lock = threading.Lock()
         self._active: dict[str, object] = {}   # worker_id → Worker (en cours)
         self._history: list[dict] = []          # Historique des Workers terminés
         self._max_history = max_history
@@ -135,8 +140,9 @@ class WorkerLifecycleManager:
 
     def register(self, worker) -> str:
         """Enregistre un Worker dans le registre. Retourne son ID."""
-        self._active[worker.worker_id] = worker
-        self._total_created += 1
+        with self._lock:
+            self._active[worker.worker_id] = worker
+            self._total_created += 1
         return worker.worker_id
 
     def unregister(self, worker) -> None:
@@ -146,35 +152,39 @@ class WorkerLifecycleManager:
         IMPORTANT : Doit être appelé APRÈS que Memory a récupéré
         les apprentissages et APRÈS cleanup().
         """
-        # Sauvegarder les infos avant suppression
-        info = worker.get_lifecycle_info()
-        self._history.append(info)
+        with self._lock:
+            # Sauvegarder les infos avant suppression
+            info = worker.get_lifecycle_info()
+            self._history.append(info)
 
-        # Limiter l'historique
-        if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history:]
+            # Limiter l'historique
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history:]
 
-        # Retirer du registre actif
-        self._active.pop(worker.worker_id, None)
-        self._total_cleaned += 1
+            # Retirer du registre actif
+            self._active.pop(worker.worker_id, None)
+            self._total_cleaned += 1
 
     def get_active_workers(self) -> list[dict]:
         """Retourne la liste des Workers actuellement actifs."""
-        return [w.get_lifecycle_info() for w in self._active.values()]
+        with self._lock:
+            return [w.get_lifecycle_info() for w in self._active.values()]
 
     def get_history(self, limit: int = 10) -> list[dict]:
         """Retourne les N derniers Workers terminés."""
-        return self._history[-limit:]
+        with self._lock:
+            return self._history[-limit:]
 
     def get_stats(self) -> dict:
         """Statistiques du lifecycle manager."""
-        return {
-            "active_count": len(self._active),
-            "total_created": self._total_created,
-            "total_cleaned": self._total_cleaned,
-            "leaked": self._total_created - self._total_cleaned - len(self._active),
-            "history_size": len(self._history),
-        }
+        with self._lock:
+            return {
+                "active_count": len(self._active),
+                "total_created": self._total_created,
+                "total_cleaned": self._total_cleaned,
+                "leaked": self._total_created - self._total_cleaned - len(self._active),
+                "history_size": len(self._history),
+            }
 
     def cleanup_all(self) -> int:
         """
@@ -183,19 +193,21 @@ class WorkerLifecycleManager:
         Retourne le nombre de Workers nettoyés.
         Utile lors du shutdown du système.
         """
+        with self._lock:
+            workers_to_clean = list(self._active.items())
+
         count = 0
-        for worker_id in list(self._active.keys()):
-            worker = self._active.get(worker_id)
-            if worker:
-                try:
-                    worker.cleanup()
-                    self.unregister(worker)
-                    count += 1
-                except Exception as e:
-                    # Force la suppression même si cleanup échoue
-                    logger.debug("Erreur lors du cleanup du Worker %s: %s", worker_id, e)
+        for worker_id, worker in workers_to_clean:
+            try:
+                worker.cleanup()
+                self.unregister(worker)
+                count += 1
+            except Exception as e:
+                # Force la suppression même si cleanup échoue
+                logger.debug("Erreur lors du cleanup du Worker %s: %s", worker_id, e)
+                with self._lock:
                     self._active.pop(worker_id, None)
-                    count += 1
+                count += 1
         return count
 
 

@@ -64,6 +64,21 @@ class MemoryStore:
         """Initialise la base SQLite pour les métadonnées."""
         db_path = self.config.storage_path / "memory_meta.db"
         self._db_conn = sqlite3.connect(str(db_path))
+
+        # Vérifier l'intégrité
+        try:
+            result = self._db_conn.execute("PRAGMA integrity_check").fetchone()
+            if result and result[0] != "ok":
+                logger.error("Memory DB integrity check FAILED: %s — recreating", result[0])
+                self._db_conn.close()
+                db_path.unlink(missing_ok=True)
+                self._db_conn = sqlite3.connect(str(db_path))
+        except sqlite3.DatabaseError as e:
+            logger.error("Memory DB corrupted: %s — recreating", e)
+            self._db_conn.close()
+            db_path.unlink(missing_ok=True)
+            self._db_conn = sqlite3.connect(str(db_path))
+
         self._db_conn.row_factory = sqlite3.Row
 
         self._db_conn.execute("""
@@ -144,25 +159,35 @@ class MemoryStore:
         metadata = metadata or {}
 
         # SQLite
-        self._db_conn.execute(
-            "INSERT INTO memories (id, content, source, tags, importance, timestamp, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (record_id, content, source, json.dumps(tags), importance, timestamp, json.dumps(metadata))
-        )
-        self._db_conn.commit()
+        try:
+            self._db_conn.execute(
+                "INSERT INTO memories (id, content, source, tags, importance, timestamp, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (record_id, content, source, json.dumps(tags), importance, timestamp, json.dumps(metadata))
+            )
+            self._db_conn.commit()
+        except (sqlite3.OperationalError, OSError) as e:
+            err = str(e).lower()
+            if "disk" in err or "no space" in err or "i/o" in err:
+                logger.critical("DISK FULL — memory store write failed: %s", e)
+                return record_id  # Graceful degradation: return ID but don't crash
+            raise
 
         # ChromaDB (si disponible)
         if self._collection is not None:
-            self._collection.add(
-                ids=[record_id],
-                documents=[content],
-                metadatas=[{
-                    "source": source,
-                    "tags": json.dumps(tags),
-                    "importance": importance,
-                    "timestamp": timestamp,
-                }],
-            )
+            try:
+                self._collection.add(
+                    ids=[record_id],
+                    documents=[content],
+                    metadatas=[{
+                        "source": source,
+                        "tags": json.dumps(tags),
+                        "importance": importance,
+                        "timestamp": timestamp,
+                    }],
+                )
+            except OSError as e:
+                logger.critical("DISK FULL — ChromaDB write failed: %s", e)
 
         return record_id
 

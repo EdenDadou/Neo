@@ -145,17 +145,16 @@ def save_credentials(access_token: str, refresh_token: str, expires_at: float,
             except Exception:
                 pass
 
-    # 2. Fichier JSON legacy (backward compat + fallback)
+    # 2. Fichier JSON legacy — NE STOCKE PLUS les tokens en clair.
+    #    Écrit seulement un marqueur de présence (sans secrets).
     CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    creds = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
+    marker = {
+        "has_credentials": True,
         "expires_at": expires_at,
+        "note": "Tokens are stored in KeyVault (encrypted). This file is a legacy marker.",
     }
-    if api_key:
-        creds["api_key"] = api_key
     with open(CREDENTIALS_FILE, "w") as f:
-        json.dump(creds, f, indent=2)
+        json.dump(marker, f, indent=2)
     os.chmod(CREDENTIALS_FILE, 0o600)
 
 
@@ -213,35 +212,50 @@ def convert_oauth_to_api_key(access_token: str) -> Optional[str]:
 
     Retourne la clé API (sk-ant-api...) ou None si la conversion échoue.
     """
-    try:
-        response = httpx.post(
-            API_KEY_CREATE_ENDPOINT,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
-            json={},
-            timeout=30,
-        )
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = httpx.post(
+                API_KEY_CREATE_ENDPOINT,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                json={},
+                timeout=30,
+            )
 
-        if response.status_code == 200:
-            data = response.json()
-            # Réponse attendue: {"type": "success", "key": {"raw_key": "sk-ant-api03-..."}}
-            if data.get("type") == "success":
-                key_data = data.get("key", {})
-                raw_key = key_data.get("raw_key")
-                if raw_key:
-                    # Sauvegarder la clé dans les credentials
-                    creds = load_credentials()
-                    creds["api_key"] = raw_key
-                    with open(CREDENTIALS_FILE, "w") as f:
-                        json.dump(creds, f, indent=2)
-                    os.chmod(CREDENTIALS_FILE, 0o600)
-                    return raw_key
+            if response.status_code == 200:
+                data = response.json()
+                # Réponse attendue: {"type": "success", "key": {"raw_key": "sk-ant-api03-..."}}
+                if data.get("type") == "success":
+                    key_data = data.get("key", {})
+                    raw_key = key_data.get("raw_key")
+                    if raw_key:
+                        # Sauvegarder la clé dans le vault (chiffré)
+                        vault = _get_vault()
+                        if vault:
+                            try:
+                                vault.store("oauth_api_key", raw_key)
+                                vault.close()
+                            except Exception:
+                                pass
+                        return raw_key
 
-        return None
-    except Exception:
-        return None
+            if response.status_code >= 500 and attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return None
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            logger.debug("convert_oauth_to_api_key attempt %d failed: %s", attempt + 1, e)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return None
+        except Exception as e:
+            logger.debug("convert_oauth_to_api_key error: %s", e)
+            return None
+    return None
 
 
 def get_valid_access_token() -> Optional[str]:
@@ -281,9 +295,21 @@ def get_api_key_from_oauth() -> Optional[str]:
     2. Sinon, obtient un token valide et tente la conversion
     3. Retourne la clé API ou None
     """
-    creds = load_credentials()
+    # Vérifier si on a déjà une clé API convertie (vault)
+    vault = _get_vault()
+    if vault:
+        try:
+            cached_key = vault.retrieve("oauth_api_key")
+            vault.close()
+            if cached_key and cached_key.startswith("sk-ant-api"):
+                return cached_key
+        except Exception:
+            try:
+                vault.close()
+            except Exception:
+                pass
 
-    # Vérifier si on a déjà une clé API convertie
+    creds = load_credentials()
     existing_key = creds.get("api_key")
     if existing_key and existing_key.startswith("sk-ant-api"):
         return existing_key
@@ -314,9 +340,26 @@ def get_best_auth() -> dict:
     3. Conversion OAuth → API Key (appel réseau)
     4. Aucune auth disponible
     """
-    creds = load_credentials()
+    # 1. Clé API déjà convertie en cache (vault) ?
+    vault = _get_vault()
+    if vault:
+        try:
+            cached_key = vault.retrieve("oauth_api_key")
+            vault.close()
+            if cached_key and cached_key.startswith("sk-ant-api"):
+                return {
+                    "method": "converted_api_key",
+                    "key": cached_key,
+                    "beta_header": None,
+                    "message": "Clé API convertie depuis OAuth (vault cache)",
+                }
+        except Exception:
+            try:
+                vault.close()
+            except Exception:
+                pass
 
-    # 1. Clé API déjà convertie en cache ?
+    creds = load_credentials()
     existing_key = creds.get("api_key")
     if existing_key and existing_key.startswith("sk-ant-api"):
         return {

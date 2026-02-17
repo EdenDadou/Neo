@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,7 +57,26 @@ class TelegramBot:
         self._vox = vox
         self._app = None
         self._running = False
-        self._rate_limits: dict[int, list[float]] = {}
+        # Rate limit persistant via SQLite (survit aux redémarrages)
+        self._rate_db: Optional[sqlite3.Connection] = None
+        self._init_rate_db()
+
+    def _init_rate_db(self) -> None:
+        """Initialise la DB SQLite pour le rate limiting persistant."""
+        try:
+            self._rate_db = sqlite3.connect(":memory:", check_same_thread=False)
+            self._rate_db.execute("""
+                CREATE TABLE IF NOT EXISTS tg_rate_limits (
+                    user_id INTEGER NOT NULL,
+                    timestamp REAL NOT NULL
+                )
+            """)
+            self._rate_db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tg_rate ON tg_rate_limits(user_id, timestamp)
+            """)
+            self._rate_db.commit()
+        except Exception as e:
+            logger.debug("Rate limit DB init failed: %s — using in-memory fallback", e)
 
     @property
     def is_configured(self) -> bool:
@@ -72,23 +92,39 @@ class TelegramBot:
         return user_id in self._config.allowed_user_ids
 
     def _is_rate_limited(self, user_id: int) -> bool:
-        """Vérifie le rate limit par utilisateur."""
+        """Vérifie le rate limit par utilisateur (SQLite persistant)."""
         now = time.time()
         window = now - 60
 
-        if user_id not in self._rate_limits:
-            self._rate_limits[user_id] = []
+        if not self._rate_db:
+            return False
 
-        # Nettoyer les entrées > 60s
-        self._rate_limits[user_id] = [
-            t for t in self._rate_limits[user_id] if t > window
-        ]
+        try:
+            # Nettoyer les entrées > 60s
+            self._rate_db.execute(
+                "DELETE FROM tg_rate_limits WHERE timestamp < ?", (window,)
+            )
 
-        if len(self._rate_limits[user_id]) >= self._config.rate_limit_per_minute:
-            return True
+            # Compter les requêtes dans la fenêtre
+            row = self._rate_db.execute(
+                "SELECT COUNT(*) FROM tg_rate_limits WHERE user_id = ? AND timestamp >= ?",
+                (user_id, window),
+            ).fetchone()
+            count = row[0] if row else 0
 
-        self._rate_limits[user_id].append(now)
-        return False
+            if count >= self._config.rate_limit_per_minute:
+                return True
+
+            # Enregistrer
+            self._rate_db.execute(
+                "INSERT INTO tg_rate_limits (user_id, timestamp) VALUES (?, ?)",
+                (user_id, now),
+            )
+            self._rate_db.commit()
+            return False
+        except Exception as e:
+            logger.debug("Rate limit check failed: %s", e)
+            return False
 
     def _sanitize_message(self, text: str) -> tuple[bool, str]:
         """
@@ -163,8 +199,11 @@ class TelegramBot:
                 action="typing",
             )
 
-            # Appel Vox → Brain → réponse
-            response = await self._vox.process_message(cleaned)
+            # Appel Vox → Brain → réponse (timeout 60s)
+            response = await asyncio.wait_for(
+                self._vox.process_message(cleaned),
+                timeout=60.0,
+            )
 
             # Telegram limite à 4096 chars par message
             if len(response) > 4096:
@@ -180,11 +219,15 @@ class TelegramBot:
                 user_name, user_id, cleaned[:50], len(response),
             )
 
+        except asyncio.TimeoutError:
+            logger.warning("Telegram process timeout for user %d", user_id)
+            await message.reply_text(
+                "⏱ Délai d'attente dépassé. Réessayez avec une demande plus courte."
+            )
         except Exception as e:
             logger.error("Telegram process error: %s", e)
             await message.reply_text(
-                f"❌ Erreur de traitement. Réessayez.\n"
-                f"_{type(e).__name__}_"
+                "❌ Erreur de traitement. Réessayez."
             )
 
     async def _handle_command(self, text: str, message) -> None:

@@ -193,6 +193,19 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
+    # SIGHUP → reload config à chaud
+    def _sighup_handler(signum, frame):
+        logger.info("SIGHUP reçu — rechargement de la configuration")
+        try:
+            from neo_core.core.registry import core_registry
+            cfg = core_registry.get_config()
+            cfg.reload()
+            logger.info("Configuration rechargée avec succès")
+        except Exception as e:
+            logger.error("Échec du rechargement de config: %s", e)
+
+    signal.signal(signal.SIGHUP, _sighup_handler)
+
     # Lancer les tâches
     async def run_server():
         await server.serve()

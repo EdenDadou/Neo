@@ -106,6 +106,31 @@ class KeyVault:
 
         # SQLite
         self._conn = sqlite3.connect(str(self._db_path))
+
+        # Vérifier l'intégrité de la base de données
+        try:
+            result = self._conn.execute("PRAGMA integrity_check").fetchone()
+            if result and result[0] != "ok":
+                logger.error("KeyVault DB integrity check FAILED: %s", result[0])
+                self._conn.close()
+                # Tenter de recréer la DB depuis un backup ou from scratch
+                backup = self._db_path.with_suffix(".db.bak")
+                if backup.exists():
+                    logger.info("Restoring vault from backup: %s", backup)
+                    import shutil
+                    self._db_path.unlink(missing_ok=True)
+                    shutil.copy2(backup, self._db_path)
+                    self._conn = sqlite3.connect(str(self._db_path))
+                else:
+                    logger.warning("No backup available — creating fresh vault DB")
+                    self._db_path.unlink(missing_ok=True)
+                    self._conn = sqlite3.connect(str(self._db_path))
+        except sqlite3.DatabaseError as e:
+            logger.error("KeyVault DB corrupted: %s — recreating", e)
+            self._conn.close()
+            self._db_path.unlink(missing_ok=True)
+            self._conn = sqlite3.connect(str(self._db_path))
+
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS secrets (
                 name TEXT PRIMARY KEY,
@@ -116,6 +141,15 @@ class KeyVault:
         """)
         self._conn.commit()
         os.chmod(self._db_path, 0o600)
+
+        # Créer un backup périodique
+        backup_path = self._db_path.with_suffix(".db.bak")
+        try:
+            import shutil
+            shutil.copy2(self._db_path, backup_path)
+            os.chmod(backup_path, 0o600)
+        except OSError:
+            pass  # Pas grave si le backup échoue
 
         logger.info("KeyVault initialized at %s", self._db_path)
 
@@ -129,16 +163,29 @@ class KeyVault:
             raise RuntimeError("KeyVault not initialized")
 
         encrypted = self._fernet.encrypt(value.encode("utf-8"))
-        self._conn.execute(
-            "INSERT OR REPLACE INTO secrets (name, value, updated_at) "
-            "VALUES (?, ?, CURRENT_TIMESTAMP)",
-            (name, encrypted),
-        )
-        self._conn.commit()
+        try:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO secrets (name, value, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (name, encrypted),
+            )
+            self._conn.commit()
+        except (sqlite3.OperationalError, OSError) as e:
+            err = str(e).lower()
+            if "disk" in err or "no space" in err or "i/o" in err:
+                logger.critical("DISK FULL — vault write failed for '%s': %s", name, e)
+                raise RuntimeError(f"Disk full — cannot store secret '{name}'") from e
+            raise
         logger.debug("Secret '%s' stored", name)
 
     def retrieve(self, name: str) -> Optional[str]:
-        """Déchiffre et retourne un secret, ou None si inexistant."""
+        """
+        Déchiffre et retourne un secret, ou None si inexistant.
+
+        Si la clé machine a changé (VM clonée, changement hardware),
+        le déchiffrement échoue. Le secret corrompu est supprimé et None
+        est retourné pour que l'utilisateur reconfigure via `neo setup`.
+        """
         if not self.is_initialized:
             raise RuntimeError("KeyVault not initialized")
 
@@ -152,7 +199,17 @@ class KeyVault:
         try:
             return self._fernet.decrypt(row[0]).decode("utf-8")
         except InvalidToken:
-            logger.warning("Failed to decrypt secret '%s' — key may have changed", name)
+            logger.warning(
+                "Cannot decrypt '%s' — machine_id may have changed. "
+                "Secret invalidated. Reconfigure with `neo setup`.",
+                name,
+            )
+            # Supprimer le secret indéchiffrable pour éviter les erreurs en boucle
+            try:
+                self._conn.execute("DELETE FROM secrets WHERE name = ?", (name,))
+                self._conn.commit()
+            except Exception:
+                pass
             return None
 
     def delete(self, name: str) -> bool:

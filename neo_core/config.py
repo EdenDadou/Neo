@@ -266,6 +266,29 @@ class NeoConfig:
         # Pas de vérification Ollama ici (trop lent au startup)
         return True
 
+    def reload(self) -> None:
+        """Recharge la configuration depuis le .env et neo_config.json."""
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        # Re-read env vars
+        self.debug = os.getenv("NEO_DEBUG", "false").lower() == "true"
+        self.log_level = os.getenv("NEO_LOG_LEVEL", "INFO")
+        self.groq_api_key = os.getenv("GROQ_API_KEY", None)
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY", None)
+        self.provider_mode = os.getenv("NEO_PROVIDER_MODE", "economic")
+        # Re-read LLM config
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if api_key:
+            self.llm.api_key = api_key.strip().strip("'\"")
+        # Re-read wizard config
+        wizard = _load_wizard_config()
+        if wizard:
+            if "core_name" in wizard:
+                self.core_name = wizard["core_name"]
+            if "user_name" in wizard:
+                self.user_name = wizard["user_name"]
+        logger.info("Configuration reloaded from .env and neo_config.json")
+
     def is_installed(self) -> bool:
         """Vérifie si le wizard d'installation a été exécuté."""
         return _CONFIG_FILE.exists()

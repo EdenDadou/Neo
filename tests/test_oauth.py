@@ -64,7 +64,7 @@ class TestTokenExpiration:
 
 class TestCredentialsPersistence:
     def test_save_and_load(self, tmp_path):
-        """save_credentials crée le fichier et load_credentials le relit."""
+        """save_credentials crée un marqueur (pas de tokens en clair)."""
         creds_file = tmp_path / "data" / ".oauth_credentials.json"
 
         with patch("neo_core.oauth.CREDENTIALS_FILE", creds_file):
@@ -73,11 +73,16 @@ class TestCredentialsPersistence:
 
                 assert creds_file.exists()
 
+                # Le fichier JSON ne contient plus les tokens en clair (v0.8.3)
+                import json
+                raw = json.loads(creds_file.read_text())
+                assert raw.get("has_credentials") is True
+                assert "access_token" not in raw  # Pas de tokens en clair!
+                assert raw.get("expires_at") == 99999.0
+
+                # Sans vault, load_credentials retourne dict vide (tokens absents du JSON)
                 data = load_credentials()
-                assert data["access_token"] == "access-123"
-                assert data["refresh_token"] == "refresh-456"
-                assert data["expires_at"] == 99999.0
-                assert data["api_key"] == "sk-ant-api-key"
+                assert data == {} or data.get("has_credentials") is True
 
     def test_load_empty(self, tmp_path):
         """Sans fichier → dict vide."""

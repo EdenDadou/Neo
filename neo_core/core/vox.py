@@ -129,6 +129,7 @@ class Vox:
     _on_thinking_callback: Optional[object] = None  # Callable[[str], None]
     _conversation_store: Optional[ConversationStore] = None
     _current_session: Optional[ConversationSession] = None
+    _session_lock: Optional[object] = None  # threading.Lock
 
     def __post_init__(self):
         self._agent_statuses = {
@@ -138,6 +139,10 @@ class Vox:
         }
         self._mock_mode = self.config.is_mock_mode()
         self._model_config = get_agent_model("vox")
+
+        # Lock pour protéger _current_session contre les accès concurrents
+        import threading
+        self._session_lock = threading.Lock()
 
         # Initialiser le conversation store
         db_path = Path("data/memory/conversations.db")
@@ -211,31 +216,33 @@ class Vox:
         """Démarre une nouvelle session de conversation."""
         if not self._conversation_store:
             return None
-        self._current_session = self._conversation_store.start_session(user_name)
-        logger.info(f"Started new conversation session: {self._current_session.session_id}")
-        return self._current_session
+        with self._session_lock:
+            self._current_session = self._conversation_store.start_session(user_name)
+            logger.info(f"Started new conversation session: {self._current_session.session_id}")
+            return self._current_session
 
     def resume_session(self, session_id: str) -> Optional[ConversationSession]:
-        """Charge une session existante et restaure son historique."""
+        """Charge une session existante et restaure son historique (thread-safe)."""
         if not self._conversation_store:
             return None
-        session = self._conversation_store.get_session_by_id(session_id)
-        if not session:
-            logger.warning(f"Session not found: {session_id}")
-            return None
+        with self._session_lock:
+            session = self._conversation_store.get_session_by_id(session_id)
+            if not session:
+                logger.warning(f"Session not found: {session_id}")
+                return None
 
-        # Charger l'historique
-        history = self._conversation_store.get_history(session_id, limit=10000)
-        self.conversation_history = []
-        for turn in history:
-            if turn.role == "human":
-                self.conversation_history.append(HumanMessage(content=turn.content))
-            else:
-                self.conversation_history.append(AIMessage(content=turn.content))
+            # Charger l'historique
+            history = self._conversation_store.get_history(session_id, limit=10000)
+            self.conversation_history = []
+            for turn in history:
+                if turn.role == "human":
+                    self.conversation_history.append(HumanMessage(content=turn.content))
+                else:
+                    self.conversation_history.append(AIMessage(content=turn.content))
 
-        self._current_session = session
-        logger.info(f"Resumed session: {session_id} with {len(history)} messages")
-        return self._current_session
+            self._current_session = session
+            logger.info(f"Resumed session: {session_id} with {len(history)} messages")
+            return self._current_session
 
     def get_session_info(self) -> Optional[dict]:
         """Retourne les infos de la session courante."""
@@ -353,8 +360,10 @@ class Vox:
         if not self.brain:
             return "[Erreur] Brain n'est pas connecté à Vox."
 
-        # Enregistre le message dans l'historique
+        # Enregistre le message dans l'historique (borné à 200 messages max)
         self.conversation_history.append(HumanMessage(content=human_message))
+        if len(self.conversation_history) > 200:
+            self.conversation_history = self.conversation_history[-200:]
 
         # Met à jour les statuts
         self.update_agent_status("Vox", active=True, task="reformulation", progress=0.3)

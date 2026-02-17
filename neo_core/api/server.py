@@ -75,7 +75,7 @@ def create_app(config=None) -> FastAPI:
     app = FastAPI(
         title="Neo Core API",
         description="API REST pour Neo Core — Écosystème IA Multi-Agents",
-        version="0.8.2",
+        version="0.8.3",
         lifespan=lifespan,
     )
 
@@ -99,6 +99,30 @@ def create_app(config=None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # --- Security middlewares ---
+    from neo_core.api.middleware import APIKeyMiddleware, RateLimitMiddleware, SanitizerMiddleware
+
+    # 1. API Key authentication (protège /chat, /sessions, /persona, /ws/chat)
+    #    /health et /docs restent ouverts (gérés dans le middleware)
+    api_key = None
+    if neo_core.config:
+        api_key = getattr(neo_core.config.llm, "api_key", None)
+    if not api_key:
+        import os
+        api_key = os.getenv("NEO_API_KEY", "")
+    if api_key:
+        app.add_middleware(APIKeyMiddleware, api_key=api_key)
+        logger.info("API key authentication enabled")
+    else:
+        logger.warning("No API key configured — API endpoints are UNPROTECTED")
+
+    # 2. Rate limiting (persistant SQLite)
+    data_dir = neo_core.config.data_dir if neo_core.config else None
+    app.add_middleware(RateLimitMiddleware, requests_per_minute=60, data_dir=data_dir)
+
+    # 3. Input sanitization
+    app.add_middleware(SanitizerMiddleware, max_length=10_000)
 
     # Import and include routes
     from neo_core.api.routes import router

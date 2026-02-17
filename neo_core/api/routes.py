@@ -6,9 +6,10 @@ REST endpoints for interacting with Neo Core.
 """
 
 import asyncio
+import hmac
 import logging
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query
 from typing import Optional
 
 from neo_core.api.schemas import (
@@ -44,8 +45,14 @@ async def chat(request: ChatRequest):
         if request.session_id != neo_core.vox._current_session.session_id:
             neo_core.vox.resume_session(request.session_id)
 
-    async with neo_core._lock:
-        response = await neo_core.vox.process_message(request.message)
+    try:
+        async with neo_core._lock:
+            response = await asyncio.wait_for(
+                neo_core.vox.process_message(request.message),
+                timeout=120.0,
+            )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "Request timeout — Brain did not respond in time")
 
     session = neo_core.vox._current_session
     return ChatResponse(
@@ -229,16 +236,27 @@ async def get_persona():
 
 
 @router.websocket("/ws/chat")
-async def websocket_chat(ws: WebSocket):
+async def websocket_chat(ws: WebSocket, token: str = Query(default="")):
     """
     WebSocket endpoint for real-time chat.
 
+    Authentication via query param: /ws/chat?token=<api_key>
+    (WebSocket ne supporte pas les headers custom côté navigateur)
+
     Accepts JSON messages with "message" field and responds with
     "response", "session_id", and "timestamp".
-
-    Raises:
-        WebSocketDisconnect: When client disconnects
     """
+    # Auth WebSocket — vérifie le token query param
+    if neo_core.config:
+        api_key = getattr(neo_core.config.llm, "api_key", None)
+        if not api_key:
+            import os
+            api_key = os.getenv("NEO_API_KEY", "")
+        if api_key and not hmac.compare_digest(token.encode(), api_key.encode()):
+            await ws.close(code=4001, reason="Unauthorized")
+            logger.warning("WebSocket auth failed")
+            return
+
     await ws.accept()
     logger.info("WebSocket client connected")
     try:
@@ -249,8 +267,15 @@ async def websocket_chat(ws: WebSocket):
                 await ws.send_json({"error": "Empty message"})
                 continue
 
-            async with neo_core._lock:
-                response = await neo_core.vox.process_message(message)
+            try:
+                async with neo_core._lock:
+                    response = await asyncio.wait_for(
+                        neo_core.vox.process_message(message),
+                        timeout=120.0,
+                    )
+            except asyncio.TimeoutError:
+                await ws.send_json({"error": "Request timeout"})
+                continue
 
             session = neo_core.vox._current_session
             await ws.send_json(
