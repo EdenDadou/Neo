@@ -234,11 +234,14 @@ source "${VENV_DIR}/bin/activate"
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # Installer pip à jour
-run_or_fail "Mise à jour de pip" pip install --upgrade pip
+run_or_fail "Mise à jour de pip" pip install --upgrade pip --no-cache-dir
+
+# Purger le cache pip (évite de réutiliser des métadonnées obsolètes)
+pip cache purge >> "$LOG_FILE" 2>&1 || true
 
 # Installer Neo Core (SANS [dev] en production — moins de deps)
 echo -e "  ${DIM}⧗ Installation de Neo Core + dépendances (peut prendre 2-5 min)...${RESET}"
-if pip install -e "." >> "$LOG_FILE" 2>&1; then
+if pip install -e "." --no-cache-dir >> "$LOG_FILE" 2>&1; then
     log_info "Neo Core + dépendances installés"
 else
     log_error "Installation de Neo Core échouée"

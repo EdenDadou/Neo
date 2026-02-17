@@ -578,10 +578,25 @@ def run_setup(auto_mode: bool = False):
     # ─── Étape 2 : Installation des dépendances ─────────────────
     print_step(2, total_steps, "Installation des dépendances")
 
-    if not install_dependencies(python_path):
-        if auto_mode:
-            print(f"  {YELLOW}⚠{RESET} Certaines dépendances ont échoué — continuation...")
+    if auto_mode:
+        # En mode auto (appelé par install.sh), les deps sont déjà installées
+        # On vérifie juste que les modules clés sont importables
+        deps_ok = True
+        for mod_name in ("rich", "fastapi", "dotenv", "httpx"):
+            try:
+                __import__(mod_name)
+            except ImportError:
+                deps_ok = False
+                break
+
+        if deps_ok:
+            print(f"  {GREEN}✓{RESET} Dépendances déjà installées par le script d'installation")
         else:
+            print(f"  {DIM}Installation des dépendances manquantes...{RESET}")
+            if not install_dependencies(python_path):
+                print(f"  {YELLOW}⚠{RESET} Certaines dépendances ont échoué — continuation...")
+    else:
+        if not install_dependencies(python_path):
             print(f"\n  {RED}⚠ L'installation a rencontré des erreurs.{RESET}")
             print(f"  {DIM}Vous pouvez réessayer manuellement :{RESET}")
             print(f"  {CYAN}{python_path} -m pip install -r requirements.txt{RESET}")
