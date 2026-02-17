@@ -20,6 +20,7 @@ import io
 import os
 import sys
 import textwrap
+import threading
 import time
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
@@ -29,6 +30,7 @@ from langchain_core.tools import tool
 
 if TYPE_CHECKING:
     from neo_core.core.memory_agent import MemoryAgent
+    from neo_core.tools.plugin_loader import PluginLoader
 
 
 # ─── Variable globale pour le mode mock ───────────────────
@@ -207,7 +209,7 @@ def _is_path_safe(path: str, roots: list[Path]) -> bool:
     resolved = Path(path).resolve()
     if not roots:
         return True  # Pas de restriction si aucune racine définie
-    return any(str(resolved).startswith(str(root)) for root in roots)
+    return any(resolved == root or resolved.is_relative_to(root) for root in roots)
 
 
 @tool
@@ -547,6 +549,10 @@ class ToolRegistry:
         "memory_search": memory_search_tool,
     }
 
+    # Plugin loader (initialisé lors de initialize())
+    _plugin_loader: Optional[PluginLoader] = None
+    _registry_lock = threading.Lock()
+
     @classmethod
     def get_tool(cls, name: str) -> object:
         """Retourne un outil par son nom."""
@@ -610,6 +616,10 @@ class ToolRegistry:
             return f"Erreur: Outil inconnu '{name}'"
 
         try:
+            # Vérifier si c'est un plugin (directement dans le loader)
+            if cls._plugin_loader and cls._plugin_loader.get_plugin(name):
+                return cls._plugin_loader.execute_plugin(name, args)
+
             # Les outils LangChain acceptent un dict ou un string
             # selon leur signature
             if name == "web_search":
@@ -634,13 +644,93 @@ class ToolRegistry:
 
     @classmethod
     def initialize(cls, mock_mode: bool = False,
-                   memory: Optional[MemoryAgent] = None) -> None:
+                   memory: Optional[MemoryAgent] = None,
+                   plugins_dir: Optional[Path | str] = None) -> None:
         """
         Initialise tous les outils.
 
         Args:
             mock_mode: Active le mode mock pour tous les outils
             memory: Référence vers MemoryAgent pour l'outil memory_search
+            plugins_dir: Chemin vers le répertoire des plugins (optionnel)
         """
         set_mock_mode(mock_mode)
         set_memory_ref(memory)
+
+        # Initialiser le plugin loader si un répertoire est spécifié
+        if plugins_dir:
+            from neo_core.tools.plugin_loader import PluginLoader
+            with cls._registry_lock:
+                cls._plugin_loader = PluginLoader(Path(plugins_dir))
+                result = cls._plugin_loader.discover()
+                if result["loaded"]:
+                    cls._register_plugins()
+                    import logging
+                    log = logging.getLogger(__name__)
+                    log.info(f"Loaded {len(result['loaded'])} plugins: {result['loaded']}")
+                if result["errors"]:
+                    import logging
+                    log = logging.getLogger(__name__)
+                    for name, error in result["errors"].items():
+                        log.warning(f"Plugin load error ({name}): {error}")
+
+    @classmethod
+    def _register_plugins(cls) -> None:
+        """Register all loaded plugins as tools."""
+        if not cls._plugin_loader:
+            return
+
+        plugins = cls._plugin_loader.list_plugins()
+        for plugin_info in plugins:
+            plugin_name = plugin_info["name"]
+
+            # Créer un wrapper LangChain pour chaque plugin
+            def make_plugin_tool(pname: str, pinfo: dict):
+                @tool
+                def plugin_tool(**kwargs) -> str:
+                    """Dynamically created plugin tool."""
+                    return cls._execute_plugin_tool(pname, kwargs)
+                plugin_tool.name = pname
+                plugin_tool.description = pinfo["description"]
+                return plugin_tool
+
+            tool_wrapper = make_plugin_tool(plugin_name, plugin_info)
+            cls._TOOL_MAP[plugin_name] = tool_wrapper
+
+            # Ajouter le schéma
+            TOOL_SCHEMAS[plugin_name] = {
+                "name": plugin_name,
+                "description": plugin_info["description"],
+                "input_schema": plugin_info["input_schema"],
+            }
+
+            # Ajouter aux worker types appropriés
+            for worker_type in plugin_info["worker_types"]:
+                if worker_type in cls.WORKER_TOOLS:
+                    if plugin_name not in cls.WORKER_TOOLS[worker_type]:
+                        cls.WORKER_TOOLS[worker_type].append(plugin_name)
+
+    @classmethod
+    def _execute_plugin_tool(cls, plugin_name: str, args: dict) -> str:
+        """Execute a plugin tool."""
+        if not cls._plugin_loader:
+            return f"Error: Plugin loader not initialized"
+        return cls._plugin_loader.execute_plugin(plugin_name, args)
+
+    @classmethod
+    def reload_plugins(cls) -> dict:
+        """
+        Hot-reload all plugins.
+
+        Returns:
+            dict with reload results
+        """
+        if not cls._plugin_loader:
+            return {"message": "Plugin loader not initialized"}
+
+        result = cls._plugin_loader.reload_all()
+
+        # Ré-enregistrer les plugins
+        cls._register_plugins()
+
+        return result

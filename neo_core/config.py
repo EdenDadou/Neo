@@ -115,6 +115,51 @@ AGENT_MODELS = {
 }
 
 
+def _load_auto_tuning() -> dict:
+    """
+    Load auto-tuning overrides from data/auto_tuning.json.
+    Returns empty dict if file doesn't exist (backwards compatible).
+    """
+    tuning_file = _PROJECT_ROOT / "data" / "auto_tuning.json"
+    if not tuning_file.exists():
+        return {}
+
+    try:
+        with open(tuning_file) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning("Failed to load auto-tuning: %s", e)
+        return {}
+
+
+# Bornes de sécurité pour les paramètres auto-tuned
+_TUNING_BOUNDS = {
+    "temperature": (0.1, 1.0),
+    "max_tokens": (256, 8192),
+}
+
+
+def _apply_tuning_overrides(config: AgentModelConfig, tuning: dict, agent_name: str) -> None:
+    """Apply auto-tuning overrides with bounds checking (mutates config in-place)."""
+    if agent_name not in tuning:
+        return
+    overrides = tuning[agent_name]
+    if "temperature" in overrides:
+        try:
+            val = float(overrides["temperature"])
+            lo, hi = _TUNING_BOUNDS["temperature"]
+            config.temperature = max(lo, min(hi, val))
+        except (ValueError, TypeError):
+            logger.warning("Invalid auto-tuning temperature for %s: %s", agent_name, overrides["temperature"])
+    if "max_tokens" in overrides:
+        try:
+            val = int(overrides["max_tokens"])
+            lo, hi = _TUNING_BOUNDS["max_tokens"]
+            config.max_tokens = max(lo, min(hi, val))
+        except (ValueError, TypeError):
+            logger.warning("Invalid auto-tuning max_tokens for %s: %s", agent_name, overrides["max_tokens"])
+
+
 def get_agent_model(agent_name: str) -> AgentModelConfig:
     """
     Récupère la config modèle pour un agent donné.
@@ -123,7 +168,11 @@ def get_agent_model(agent_name: str) -> AgentModelConfig:
     1. Si le ModelRegistry a des modèles testés → routing dynamique
        (local gratuit > cloud gratuit > cloud payant)
     2. Sinon → fallback aux modèles hardcodés (Anthropic)
+    3. Appliquer les surcharges d'auto-tuning si disponibles
     """
+    # Load tuning once for both code paths
+    tuning = _load_auto_tuning()
+
     try:
         from neo_core.providers.registry import get_model_registry
         registry = get_model_registry()
@@ -134,18 +183,28 @@ def get_agent_model(agent_name: str) -> AgentModelConfig:
             if model:
                 # Récupérer la temperature/max_tokens de la config hardcodée
                 defaults = AGENT_MODELS.get(agent_name, AGENT_MODELS["brain"])
-                return AgentModelConfig(
+                config = AgentModelConfig(
                     model=model.model_name,
                     temperature=defaults.temperature,
                     max_tokens=min(defaults.max_tokens, model.max_output_tokens),
                     provider=model.provider,
                     model_id=model.model_id,
                 )
+
+                # Appliquer les surcharges d'auto-tuning avec bounds checking
+                _apply_tuning_overrides(config, tuning, agent_name)
+
+                return config
     except Exception as e:
         logger.debug("Provider registry lookup failed for '%s': %s", agent_name, e)
 
     # Fallback : modèles hardcodés (Anthropic)
-    return AGENT_MODELS.get(agent_name, AGENT_MODELS["brain"])
+    config = AGENT_MODELS.get(agent_name, AGENT_MODELS["brain"])
+
+    # Appliquer les surcharges d'auto-tuning avec bounds checking
+    _apply_tuning_overrides(config, tuning, agent_name)
+
+    return config
 
 
 @dataclass

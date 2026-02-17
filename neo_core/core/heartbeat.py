@@ -42,6 +42,8 @@ class HeartbeatConfig:
     max_auto_tasks_per_pulse: int = 1  # Max tâches auto-lancées par pulse
     auto_consolidation: bool = True  # Consolider Memory automatiquement
     consolidation_interval_pulses: int = 10  # Consolider toutes les N pulses
+    auto_tuning: bool = True  # Lancer l'auto-tuning périodiquement
+    auto_tuning_interval_pulses: int = 5  # Toutes les 5 pulses (~2h30)
     enabled: bool = True
 
 
@@ -83,6 +85,7 @@ class HeartbeatManager:
         self._running = False
         self._pulse_count = 0
         self._events: list[HeartbeatEvent] = []
+        self._auto_tuner = None  # Initialisé au premier pulse si disponible
 
     # ─── Lifecycle ────────────────────────────────────
 
@@ -186,6 +189,12 @@ class HeartbeatManager:
         # 5. State snapshot périodique pour Guardian (Stage 10)
         if self._pulse_count > 0 and self._pulse_count % 10 == 0:
             self._save_guardian_state()
+
+        # 6. Auto-tuning périodique (Level 1 self-improvement)
+        if (self.config.auto_tuning and
+                self._pulse_count > 0 and
+                self._pulse_count % self.config.auto_tuning_interval_pulses == 0):
+            self._run_auto_tuning()
 
     # ─── Avancement des Epics ─────────────────────────
 
@@ -352,6 +361,39 @@ class HeartbeatManager:
                 ))
         except Exception as e:
             logger.error("[Heartbeat] Erreur consolidation: %s", e)
+
+    # ─── Auto-tuning (Level 1 self-improvement) ────────
+
+    def _run_auto_tuning(self) -> None:
+        """Lance un cycle d'auto-tuning basé sur les performances."""
+        try:
+            # Lazy init de l'AutoTuner
+            if self._auto_tuner is None:
+                from neo_core.config import NeoConfig
+                config = NeoConfig()
+                data_dir = config.data_dir
+
+                # Vérifier si le LearningEngine est disponible
+                if hasattr(self.memory, 'learning_engine') and self.memory.learning_engine:
+                    from neo_core.core.auto_tuner import AutoTuner
+                    self._auto_tuner = AutoTuner(data_dir, self.memory.learning_engine)
+                    logger.info("[Heartbeat] AutoTuner initialisé")
+                else:
+                    logger.debug("[Heartbeat] LearningEngine non disponible, auto-tuning ignoré")
+                    return
+
+            changes = self._auto_tuner.run_tuning_cycle()
+            if changes:
+                self._emit(HeartbeatEvent(
+                    event_type="auto_tuning",
+                    message=f"Auto-tuning: {len(changes)} paramètre(s) ajusté(s)",
+                    data={"changes": changes},
+                ))
+                logger.info("[Heartbeat] Auto-tuning: %d changements", len(changes))
+            else:
+                logger.debug("[Heartbeat] Auto-tuning: aucun changement")
+        except Exception as e:
+            logger.error("[Heartbeat] Erreur auto-tuning: %s", e)
 
     # ─── Auto-réflexion personnalité (Stage 9) ────────
 

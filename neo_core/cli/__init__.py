@@ -46,6 +46,7 @@ def print_usage():
     {CYAN}guardian{RESET}          Lancer Neo avec le Guardian (auto-restart)
     {CYAN}history{RESET}           Lister les sessions de conversation
     {CYAN}providers{RESET}         Afficher les providers LLM configurés
+    {CYAN}plugins{RESET}           Afficher les plugins dynamiques chargés
     {CYAN}install-service{RESET}   Générer/installer le service systemd
     {CYAN}telegram-setup{RESET}   Configurer le bot Telegram
     {CYAN}version{RESET}           Afficher la version
@@ -242,6 +243,46 @@ def main():
         print(f"  {GREEN}✓{RESET} {len(user_ids)} utilisateur(s) autorisé(s)")
         print(f"\n  {DIM}Redémarrez le daemon pour activer Telegram :{RESET}")
         print(f"  {CYAN}neo restart{RESET}\n")
+
+    elif command == "plugins":
+        from neo_core.tools.plugin_loader import PluginLoader
+        from neo_core.config import NeoConfig
+        from rich.console import Console as RichConsole
+        from rich.table import Table as RichTable
+
+        cfg = NeoConfig()
+        plugins_dir = cfg.data_dir / "plugins"
+
+        rc = RichConsole()
+        rc.print(f"\n[bold cyan]  Neo Core — Plugins Dynamiques[/bold cyan]\n")
+
+        if not plugins_dir.exists():
+            rc.print(f"  [dim]Aucun répertoire de plugins ({plugins_dir})[/dim]")
+            rc.print()
+            return
+
+        loader = PluginLoader(plugins_dir)
+        result = loader.discover()
+
+        if not result["loaded"] and not result["errors"]:
+            rc.print(f"  [dim]Aucun plugin dans {plugins_dir}[/dim]")
+            rc.print()
+            return
+
+        if result["loaded"]:
+            rc.print(f"  [bold green]Plugins chargés ({len(result['loaded'])}):[/bold green]")
+            plugins_list = loader.list_plugins()
+            for plugin in plugins_list:
+                rc.print(f"    [cyan]{plugin['name']}[/cyan] v{plugin['version']}")
+                rc.print(f"      {plugin['description']}")
+                rc.print(f"      Workers: {', '.join(plugin['worker_types'])}")
+            rc.print()
+
+        if result["errors"]:
+            rc.print(f"  [bold red]Erreurs de chargement:[/bold red]")
+            for name, error in result["errors"].items():
+                rc.print(f"    [red]✗[/red] {name}: {error}")
+            rc.print()
 
     elif command == "version":
         print("Neo Core v0.8.5")
