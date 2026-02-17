@@ -257,11 +257,28 @@ class ResilienceConfig:
 
 
 @dataclass
+class SelfImprovementConfig:
+    """Configuration des niveaux d'auto-amélioration (Levels 1-4)."""
+    # Level 1 — Auto-tuning (géré aussi dans HeartbeatConfig)
+    auto_tuning_enabled: bool = True
+    # Level 2 — Plugin system (toujours actif)
+    # Level 3 — Self-patching
+    self_patching_enabled: bool = True
+    patch_detection_threshold: int = 3   # Nb erreurs min avant de générer un patch
+    patch_validation_min_improvement: float = 0.5  # Amélioration min pour valider
+    # Level 4 — Autonomous tool creation
+    tool_generation_enabled: bool = True
+    tool_pruning_days: int = 7           # Supprimer outils inutilisés après N jours
+    tool_min_success_rate: float = 0.3   # Taux succès min (sinon deprecated)
+
+
+@dataclass
 class NeoConfig:
     """Configuration principale de Neo Core."""
     llm: LLMConfig = field(default_factory=LLMConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     resilience: ResilienceConfig = field(default_factory=ResilienceConfig)
+    self_improvement: SelfImprovementConfig = field(default_factory=SelfImprovementConfig)
     debug: bool = field(default_factory=lambda: os.getenv("NEO_DEBUG", "false").lower() == "true")
     log_level: str = field(default_factory=lambda: os.getenv("NEO_LOG_LEVEL", "INFO"))
 

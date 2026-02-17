@@ -44,6 +44,10 @@ class HeartbeatConfig:
     consolidation_interval_pulses: int = 10  # Consolider toutes les N pulses
     auto_tuning: bool = True  # Lancer l'auto-tuning périodiquement
     auto_tuning_interval_pulses: int = 5  # Toutes les 5 pulses (~2h30)
+    self_patching: bool = True  # Level 3 — auto-correction comportementale
+    self_patching_interval_pulses: int = 10  # Toutes les 10 pulses (~5h)
+    tool_generation: bool = True  # Level 4 — création autonome d'outils
+    tool_generation_interval_pulses: int = 15  # Toutes les 15 pulses (~7h30)
     enabled: bool = True
 
 
@@ -86,6 +90,8 @@ class HeartbeatManager:
         self._pulse_count = 0
         self._events: list[HeartbeatEvent] = []
         self._auto_tuner = None  # Initialisé au premier pulse si disponible
+        self._self_patcher = None  # Level 3 — lazy init
+        self._tool_generator = None  # Level 4 — lazy init
 
     # ─── Lifecycle ────────────────────────────────────
 
@@ -195,6 +201,18 @@ class HeartbeatManager:
                 self._pulse_count > 0 and
                 self._pulse_count % self.config.auto_tuning_interval_pulses == 0):
             self._run_auto_tuning()
+
+        # 7. Self-patching périodique (Level 3 — auto-correction)
+        if (self.config.self_patching and
+                self._pulse_count > 0 and
+                self._pulse_count % self.config.self_patching_interval_pulses == 0):
+            self._run_self_patching()
+
+        # 8. Tool generation périodique (Level 4 — création d'outils)
+        if (self.config.tool_generation and
+                self._pulse_count > 0 and
+                self._pulse_count % self.config.tool_generation_interval_pulses == 0):
+            self._run_tool_generation()
 
     # ─── Avancement des Epics ─────────────────────────
 
@@ -394,6 +412,106 @@ class HeartbeatManager:
                 logger.debug("[Heartbeat] Auto-tuning: aucun changement")
         except Exception as e:
             logger.error("[Heartbeat] Erreur auto-tuning: %s", e)
+
+    # ─── Self-patching (Level 3 self-improvement) ──────
+
+    def _run_self_patching(self) -> None:
+        """Lance un cycle de self-patching : détection → génération → validation → évaluation."""
+        try:
+            # Lazy init du SelfPatcher
+            if self._self_patcher is None:
+                from neo_core.config import NeoConfig
+                config = NeoConfig()
+
+                if hasattr(self.memory, 'learning_engine') and self.memory.learning_engine:
+                    from neo_core.core.self_patcher import SelfPatcher
+                    self._self_patcher = SelfPatcher(config.data_dir, self.memory.learning_engine)
+                    logger.info("[Heartbeat] SelfPatcher initialisé")
+                else:
+                    logger.debug("[Heartbeat] LearningEngine non disponible, self-patching ignoré")
+                    return
+
+            # 1. Détecter les patterns d'erreurs récurrents
+            patterns = self._self_patcher.detect_patchable_patterns()
+
+            # 2. Générer et valider les patches
+            new_patches = 0
+            for pattern in patterns[:3]:  # Max 3 patches par cycle
+                patch = self._self_patcher.generate_patch(pattern)
+                if patch and self._self_patcher.validate_patch(patch):
+                    new_patches += 1
+
+            # 3. Évaluer et rollback les patches inefficaces
+            rolled_back = self._self_patcher.evaluate_and_rollback_all()
+
+            if new_patches or rolled_back:
+                self._emit(HeartbeatEvent(
+                    event_type="self_patching",
+                    message=f"Self-patching: {new_patches} nouveau(x), {rolled_back} rollback(s)",
+                    data={"new_patches": new_patches, "rolled_back": rolled_back},
+                ))
+                logger.info("[Heartbeat] Self-patching: %d nouveaux, %d rollback", new_patches, rolled_back)
+            else:
+                logger.debug("[Heartbeat] Self-patching: aucun changement")
+        except Exception as e:
+            logger.error("[Heartbeat] Erreur self-patching: %s", e)
+
+    # ─── Tool generation (Level 4 self-improvement) ───
+
+    def _run_tool_generation(self) -> None:
+        """Lance un cycle de tool generation : détection → génération → validation → déploiement."""
+        try:
+            # Lazy init du ToolGenerator
+            if self._tool_generator is None:
+                from neo_core.config import NeoConfig
+                config = NeoConfig()
+
+                if hasattr(self.memory, 'learning_engine') and self.memory.learning_engine:
+                    from neo_core.tools.tool_generator import ToolGenerator
+
+                    # Essayer de récupérer le PluginLoader s'il existe
+                    plugin_loader = None
+                    try:
+                        from neo_core.tools.plugin_loader import PluginLoader
+                        plugin_loader = PluginLoader(config.data_dir)
+                    except Exception:
+                        pass
+
+                    self._tool_generator = ToolGenerator(
+                        config.data_dir,
+                        self.memory.learning_engine,
+                        plugin_loader,
+                    )
+                    logger.info("[Heartbeat] ToolGenerator initialisé")
+                else:
+                    logger.debug("[Heartbeat] LearningEngine non disponible, tool generation ignoré")
+                    return
+
+            # 1. Détecter les opportunités
+            opportunities = self._tool_generator.detect_opportunities()
+
+            # 2. Générer, valider et déployer
+            deployed = 0
+            for pattern in opportunities[:2]:  # Max 2 outils par cycle
+                tool = self._tool_generator.generate_plugin(pattern)
+                if tool and self._tool_generator.validate_plugin(tool):
+                    if self._tool_generator.deploy_plugin(tool):
+                        deployed += 1
+
+            # 3. Pruning des outils inutilisés
+            pruned = self._tool_generator.prune_unused()
+
+            if deployed or pruned:
+                self._emit(HeartbeatEvent(
+                    event_type="tool_generation",
+                    message=f"Tool generation: {deployed} déployé(s), {pruned} nettoyé(s)",
+                    data={"deployed": deployed, "pruned": pruned},
+                ))
+                logger.info("[Heartbeat] Tool generation: %d déployés, %d nettoyés", deployed, pruned)
+            else:
+                logger.debug("[Heartbeat] Tool generation: aucun changement")
+        except Exception as e:
+            logger.error("[Heartbeat] Erreur tool generation: %s", e)
 
     # ─── Auto-réflexion personnalité (Stage 9) ────────
 

@@ -114,6 +114,7 @@ class BrainDecision:
     confidence: float = 1.0
     worker_type: Optional[str] = None  # Stage 3 : type de worker recommandé
     reasoning: str = ""  # Stage 3 : justification de la décision
+    metadata: dict = field(default_factory=dict)  # Level 3 : patch overrides (temperature, etc.)
 
 
 class WorkerLifecycleManager:
@@ -234,6 +235,7 @@ class Brain:
     _retry_config: Optional[RetryConfig] = None
     _model_config: Optional[object] = None
     _worker_manager: Optional[WorkerLifecycleManager] = None
+    _self_patcher: Optional[object] = None
 
     def __post_init__(self):
         self._mock_mode = self.config.is_mock_mode()
@@ -268,6 +270,18 @@ class Brain:
         if self._worker_manager is None:
             self._worker_manager = WorkerLifecycleManager()
         return self._worker_manager
+
+    @property
+    def self_patcher(self):
+        """Accès lazy au SelfPatcher (Level 3)."""
+        if self._self_patcher is None:
+            try:
+                if self.memory and hasattr(self.memory, 'learning_engine') and self.memory.learning_engine:
+                    from neo_core.core.self_patcher import SelfPatcher
+                    self._self_patcher = SelfPatcher(self.config.data_dir, self.memory.learning_engine)
+            except Exception as exc:
+                logger.debug("SelfPatcher init failed: %s", exc)
+        return self._self_patcher
 
     def get_model_info(self) -> dict:
         """Retourne les infos du modèle utilisé par Brain."""
@@ -451,6 +465,23 @@ class Brain:
         complexity = self.analyze_complexity(request)
         worker_type = self.factory.classify_task(request)
 
+        # ── Application des patches comportementaux (Level 3) ──
+        patch_overrides = {}
+        if self.self_patcher:
+            try:
+                patch_overrides = self.self_patcher.apply_patches(
+                    request, worker_type.value if worker_type != WorkerType.GENERIC else "generic"
+                )
+            except Exception as exc:
+                logger.debug("SelfPatcher apply_patches error: %s", exc)
+
+        # Si un patch force un changement de worker_type
+        if "override_worker_type" in patch_overrides:
+            try:
+                worker_type = WorkerType(patch_overrides["override_worker_type"])
+            except ValueError:
+                pass
+
         # Si un type spécifique est détecté → TOUJOURS déléguer
         if worker_type != WorkerType.GENERIC:
             subtasks = self.factory._basic_decompose(request, worker_type)
@@ -486,13 +517,15 @@ class Brain:
             else:
                 reasoning = f"Type {worker_type.value} détecté → Worker (complexité: {complexity})"
 
-            return BrainDecision(
+            decision = BrainDecision(
                 action="delegate_worker",
                 subtasks=subtasks,
                 confidence=confidence,
                 worker_type=worker_type.value,
                 reasoning=reasoning,
+                metadata=patch_overrides if patch_overrides else {},
             )
+            return decision
 
         # Requêtes complexes sans type spécifique → Worker generic ou Epic (crew)
         if complexity == "complex":
@@ -1047,6 +1080,19 @@ class Brain:
                     "confidence": decision.confidence,
                 },
             )
+            # 3. Tracker l'usage des outils auto-générés (Level 4)
+            if result.worker_type and result.worker_type.startswith("auto_"):
+                try:
+                    from neo_core.tools.tool_generator import ToolGenerator
+                    # Accès via le heartbeat ou lazy init
+                    if hasattr(self, '_tool_generator') and self._tool_generator:
+                        self._tool_generator.track_usage(
+                            result.worker_type,
+                            result.success,
+                            result.execution_time,
+                        )
+                except Exception:
+                    pass  # Best-effort tracking
         except Exception as e:
             logger.debug("Impossible d'enregistrer l'apprentissage: %s", e)
 

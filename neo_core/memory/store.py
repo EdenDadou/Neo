@@ -117,9 +117,19 @@ class MemoryStore:
     def _init_chromadb(self) -> None:
         """Initialise ChromaDB pour le stockage vectoriel."""
         try:
+            # Désactiver la télémétrie chromadb AVANT tout import/init
+            # Corrige: "Failed to send telemetry event: capture() takes 1 positional argument but 3 were given"
+            import os as _os
+            _os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
             import chromadb
+            from chromadb.config import Settings as _ChromaSettings
+
             chroma_path = self.config.storage_path / "chroma"
-            self._chroma_client = chromadb.PersistentClient(path=str(chroma_path))
+            self._chroma_client = chromadb.PersistentClient(
+                path=str(chroma_path),
+                settings=_ChromaSettings(anonymized_telemetry=False),
+            )
             self._collection = self._chroma_client.get_or_create_collection(
                 name="neo_memory",
                 metadata={"hnsw:space": "cosine"},
