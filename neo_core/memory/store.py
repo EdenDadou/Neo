@@ -50,6 +50,9 @@ class MemoryStore:
         self._collection = None
         self._db_conn: Optional[sqlite3.Connection] = None
         self._initialized = False
+        # Cache d'embeddings pour éviter les doubles recherches sémantiques
+        self._semantic_cache: dict[str, list] = {}  # query → results
+        self._semantic_cache_hits: int = 0
 
     def initialize(self) -> None:
         """Initialise les deux systèmes de stockage."""
@@ -213,14 +216,28 @@ class MemoryStore:
 
         return record_id
 
+    def clear_semantic_cache(self) -> None:
+        """Vide le cache sémantique (à appeler entre les requêtes utilisateur)."""
+        self._semantic_cache.clear()
+
     def search_semantic(self, query: str, n_results: int = 5,
                         min_importance: float = 0.0) -> list[MemoryRecord]:
         """
         Recherche sémantique via ChromaDB.
         Retourne les souvenirs les plus pertinents pour la requête.
+        Utilise un cache par requête pour éviter les doubles embeddings.
         """
         if not self._collection or self._collection.count() == 0:
             return []
+
+        # Cache hit — même query + même n_results
+        cache_key = f"{query}::{n_results}"
+        if cache_key in self._semantic_cache:
+            self._semantic_cache_hits += 1
+            cached = self._semantic_cache[cache_key]
+            if min_importance > 0.0:
+                return [r for r in cached if r.importance >= min_importance]
+            return list(cached)
 
         n_results = min(n_results, self._collection.count())
         results = self._collection.query(
@@ -243,7 +260,7 @@ class MemoryStore:
             # Reconstituer dans l'ordre ChromaDB (pertinence décroissante)
             for record_id in record_ids:
                 row = id_to_row.get(record_id)
-                if row and row["importance"] >= min_importance:
+                if row:
                     records.append(MemoryRecord(
                         id=row["id"],
                         content=row["content"],
@@ -254,6 +271,12 @@ class MemoryStore:
                         metadata=json.loads(row["metadata"]),
                     ))
 
+        # Stocker dans le cache AVANT filtrage par importance
+        self._semantic_cache[cache_key] = records
+
+        # Filtrer par importance si demandé
+        if min_importance > 0.0:
+            return [r for r in records if r.importance >= min_importance]
         return records
 
     def search_by_source(self, source: str, limit: int = 20) -> list[MemoryRecord]:
@@ -266,11 +289,36 @@ class MemoryStore:
         return [self._row_to_record(row) for row in rows]
 
     def search_by_tags(self, tags: list[str], limit: int = 20) -> list[MemoryRecord]:
-        """Recherche par tags."""
+        """
+        Recherche par tags.
+        Optimisation v0.9.1 : utilise LIKE en SQL pour pré-filtrer,
+        avec fallback Python pour les tags unicode (json.dumps encode en \\uXXXX).
+        """
+        if not tags:
+            return []
+
+        # Construire les patterns LIKE — inclure aussi la forme json-escaped
+        like_conditions = []
+        like_params: list = []
+        for tag in tags:
+            # Forme brute (si ensure_ascii=False a été utilisé)
+            like_conditions.append("tags LIKE ?")
+            like_params.append(f"%{tag}%")
+            # Forme json-escaped (json.dumps par défaut encode les accents)
+            escaped = json.dumps(tag)[1:-1]  # Enlever les guillemets
+            if escaped != tag:
+                like_conditions.append("tags LIKE ?")
+                like_params.append(f"%{escaped}%")
+
+        conditions = " OR ".join(like_conditions)
+        like_params.append(limit * 3)  # Marge pour faux positifs
+
         rows = self._db_conn.execute(
-            "SELECT * FROM memories ORDER BY timestamp DESC"
+            f"SELECT * FROM memories WHERE ({conditions}) ORDER BY timestamp DESC LIMIT ?",
+            like_params,
         ).fetchall()
 
+        # Vérification exacte en Python
         records = []
         for row in rows:
             row_tags = json.loads(row["tags"])

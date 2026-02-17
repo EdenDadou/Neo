@@ -237,8 +237,8 @@ class MemoryConfig:
     """Configuration du système mémoire."""
     storage_path: Path = field(default_factory=lambda: _PROJECT_ROOT / "data" / "memory")
     vector_db: str = "chromadb"
-    max_context_tokens: int = 2048
-    max_results: int = 5
+    max_context_tokens: int = 1024
+    max_results: int = 3
     similarity_threshold: float = 0.3
 
 

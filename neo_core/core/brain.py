@@ -418,15 +418,25 @@ class Brain:
         """
         Récupère le contexte pertinent depuis Memory.
         Inclut les conseils du LearningEngine si disponibles.
+
+        Optimisation v0.9.1 : le LearningEngine réutilise le cache sémantique
+        du MemoryStore (un seul embedding par requête au lieu de deux).
         """
         if not self.memory:
             return "Aucun contexte mémoire disponible."
 
+        # Vider le cache sémantique au début de chaque requête
+        try:
+            if hasattr(self.memory, '_store') and self.memory._store:
+                self.memory._store.clear_semantic_cache()
+        except Exception:
+            pass
+
         context = self.memory.get_context(request)
 
         # Ajouter les conseils d'apprentissage au contexte
+        # Note : search_semantic est maintenant caché — pas de double embedding
         try:
-            # On récupère les conseils pour le type le plus probable
             worker_type = self.factory.classify_task(request)
             if worker_type != WorkerType.GENERIC:
                 advice = self.memory.get_learning_advice(request, worker_type.value)
@@ -692,11 +702,16 @@ class Brain:
             logger.warning("Validation du message échouée: %s", e)
             return f"[Brain Erreur] Message invalide: {str(e)[:200]}"
 
-        memory_context = self.get_memory_context(request)
+        # ── Optimisation v0.9.1 : décision AVANT le contexte mémoire ──
+        # Brain décide d'abord s'il a besoin du contexte, au lieu de le
+        # charger systématiquement (économise 300-600ms pour les msgs simples).
+        decision = self.make_decision(request)
+
+        # Contexte mémoire chargé uniquement quand nécessaire
+        needs_context = decision.action != "direct_response" or self.analyze_complexity(request) != "simple"
+        memory_context = self.get_memory_context(request) if needs_context else ""
 
         if self._mock_mode:
-            decision = self.make_decision(request)
-
             if decision.action == "delegate_crew" and decision.subtasks:
                 return await self._execute_as_epic(request, decision, memory_context)
 
@@ -714,17 +729,14 @@ class Brain:
             )
 
         try:
-            decision = self.make_decision(request)
-
             if decision.action == "delegate_crew" and decision.subtasks:
                 return await self._execute_as_epic(request, decision, memory_context)
 
             if decision.action == "delegate_worker" and decision.worker_type:
-                try:
-                    analysis = await self._decompose_task_with_llm(request, memory_context)
-                except Exception as e:
-                    logger.debug("Décomposition LLM échouée, utilisation de analyze_task: %s", e)
-                    analysis = self.factory.analyze_task(request)
+                # Optimisation v0.9.1 : heuristiques SEULES, plus d'appel LLM redondant
+                # L'ancien _decompose_task_with_llm() faisait un appel Sonnet de 2-5s
+                # alors que _basic_decompose() dans make_decision l'avait déjà fait.
+                analysis = self.factory.analyze_task(request)
 
                 return await self._execute_with_worker(request, decision, memory_context, analysis)
 

@@ -96,14 +96,14 @@ class ContextEngine:
                 n_results=self.config.max_results,
             )
 
-        # 2. Souvenirs importants
+        # 2. Souvenirs importants (max 2 — optimisation perf)
         block.important_memories = self.store.get_important(
             min_importance=0.7,
-            limit=3,
+            limit=2,
         )
 
-        # 3. Souvenirs récents
-        block.recent_memories = self.store.get_recent(limit=3)
+        # 3. Souvenirs récents (max 2 — optimisation perf)
+        block.recent_memories = self.store.get_recent(limit=2)
 
         # 4. Estimation des tokens et troncature
         block.total_tokens_estimate = self._estimate_tokens(block)

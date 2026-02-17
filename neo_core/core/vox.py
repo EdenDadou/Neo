@@ -360,10 +360,10 @@ class Vox:
         if not self.brain:
             return "[Erreur] Brain n'est pas connecté à Vox."
 
-        # Enregistre le message dans l'historique (borné à 200 messages max)
+        # Enregistre le message dans l'historique (borné à 20 messages max — perf)
         self.conversation_history.append(HumanMessage(content=human_message))
-        if len(self.conversation_history) > 200:
-            self.conversation_history = self.conversation_history[-200:]
+        if len(self.conversation_history) > 20:
+            self.conversation_history = self.conversation_history[-20:]
 
         # Met à jour les statuts
         self.update_agent_status("Vox", active=True, task="reformulation", progress=0.3)

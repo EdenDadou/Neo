@@ -599,7 +599,7 @@ class LearningEngine:
         if not self.store.has_vector_search:
             return []
 
-        records = self.store.search_semantic(request, n_results=5)
+        records = self.store.search_semantic(request, n_results=3)
         skills = []
         for record in records:
             if record.source == self.SOURCE_SKILL:
