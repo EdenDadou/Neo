@@ -494,7 +494,7 @@ class Brain:
                 reasoning=reasoning,
             )
 
-        # Requêtes complexes sans type spécifique → Worker generic
+        # Requêtes complexes sans type spécifique → Worker generic ou Epic (crew)
         if complexity == "complex":
             subtasks = self._decompose_task(request)
             confidence = 0.5
@@ -518,6 +518,16 @@ class Brain:
                         confidence = 0.7
                     except ValueError as e:
                         logger.debug("Type de worker invalide pour compétence %s: %s", best_skill.worker_type, e)
+
+            # Si 3+ sous-tâches distinctes → delegate_crew (Epic)
+            if len(subtasks) >= 3:
+                return BrainDecision(
+                    action="delegate_crew",
+                    subtasks=subtasks,
+                    confidence=confidence,
+                    worker_type=worker_type.value,
+                    reasoning=f"Tâche complexe ({len(subtasks)} sous-tâches) → Epic (crew)",
+                )
 
             return BrainDecision(
                 action="delegate_worker",
@@ -654,6 +664,9 @@ class Brain:
         if self._mock_mode:
             decision = self.make_decision(request)
 
+            if decision.action == "delegate_crew" and decision.subtasks:
+                return await self._execute_as_epic(request, decision, memory_context)
+
             if decision.action == "delegate_worker" and decision.worker_type:
                 return await self._execute_with_worker(request, decision, memory_context)
 
@@ -669,6 +682,9 @@ class Brain:
 
         try:
             decision = self.make_decision(request)
+
+            if decision.action == "delegate_crew" and decision.subtasks:
+                return await self._execute_as_epic(request, decision, memory_context)
 
             if decision.action == "delegate_worker" and decision.worker_type:
                 try:
@@ -756,8 +772,8 @@ class Brain:
                     request, decision, errors_so_far, attempt
                 )
                 logger.info(
-                    f"[Brain] Retry {attempt}/{max_attempts} — "
-                    f"stratégie: {decision.worker_type} ({decision.reasoning})"
+                    "[Brain] Retry %d/%d — stratégie: %s (%s)",
+                    attempt, max_attempts, decision.worker_type, decision.reasoning,
                 )
 
             try:
@@ -839,6 +855,69 @@ class Brain:
             f"[Brain] Échec après {max_attempts} tentatives. "
             f"Dernière erreur: {last_error}"
         )
+
+    async def _execute_as_epic(self, request: str, decision: BrainDecision,
+                               memory_context: str) -> str:
+        """
+        Crée un Epic dans le TaskRegistry et exécute chaque sous-tâche
+        séquentiellement via des Workers individuels.
+
+        Chaque sous-tâche est enregistrée, exécutée et trackée.
+        L'Epic est marqué done/failed selon les résultats.
+        """
+        # 1. Créer l'Epic dans le registre
+        epic = None
+        if self.memory and self.memory.is_initialized:
+            try:
+                subtask_tuples = [
+                    (st, decision.worker_type or "generic")
+                    for st in decision.subtasks
+                ]
+                epic = self.memory.create_epic(
+                    description=request[:200],
+                    subtask_descriptions=subtask_tuples,
+                    strategy=decision.reasoning,
+                )
+                logger.info(
+                    "Epic créé: %s avec %d sous-tâches",
+                    epic.id[:8] if epic else "?", len(decision.subtasks),
+                )
+            except Exception as e:
+                logger.debug("Impossible de créer l'Epic: %s", e)
+
+        # 2. Exécuter chaque sous-tâche comme un delegate_worker
+        results = []
+        for i, subtask in enumerate(decision.subtasks):
+            sub_decision = BrainDecision(
+                action="delegate_worker",
+                subtasks=[subtask],
+                confidence=decision.confidence,
+                worker_type=decision.worker_type,
+                reasoning=f"Sous-tâche {i + 1}/{len(decision.subtasks)} de l'Epic",
+            )
+            try:
+                result = await self._execute_with_worker(
+                    subtask, sub_decision, memory_context,
+                )
+                results.append(f"✅ {subtask[:60]}: {result[:200]}")
+            except Exception as e:
+                results.append(f"❌ {subtask[:60]}: {type(e).__name__}: {str(e)[:100]}")
+
+        # 3. Compiler le résultat final
+        all_ok = all(r.startswith("✅") for r in results)
+        summary = "\n".join(results)
+
+        if epic and self.memory and self.memory.is_initialized:
+            try:
+                from neo_core.memory.task_registry import Epic as EpicModel
+                self.memory.update_epic_status(
+                    epic.id, "done" if all_ok else "failed",
+                )
+            except Exception as e:
+                logger.debug("Impossible de mettre à jour l'Epic: %s", e)
+
+        status = "terminé" if all_ok else "partiellement terminé"
+        return f"[Epic {status}]\n{summary}"
 
     def _improve_strategy(
         self,

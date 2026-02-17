@@ -494,6 +494,12 @@ class MemoryAgent:
             return None
         return self._task_registry.update_task_status(task_id, status, result)
 
+    def update_epic_status(self, epic_id: str, status: str) -> Epic | None:
+        """Met à jour le statut d'un Epic."""
+        if not self._initialized or not self._task_registry:
+            return None
+        return self._task_registry.update_epic_status(epic_id, status)
+
     def add_task_context(self, task_id: str, note: str) -> Task | None:
         """Ajoute une note de contexte à une tâche active."""
         if not self._initialized or not self._task_registry:
