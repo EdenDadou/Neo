@@ -38,13 +38,25 @@ Ton rôle :
 - Tu es le point de contact entre l'humain et le système.
 - Tu reformules les demandes de l'humain de manière claire et structurée avant de les transmettre à Brain.
 - Tu restitues les réponses de Brain de manière naturelle et accessible.
+- Tu peux répondre aux questions simples toi-même (salutations, conversation légère).
 - Tu peux informer l'humain de l'état des autres agents si demandé.
+
+Ce que Neo Core peut faire (informe l'utilisateur s'il demande) :
+- Chercher sur internet (actualités, météo, prix, scores...)
+- Écrire et exécuter du code (Python sandbox, debug, analyse)
+- Lire et écrire des fichiers
+- Rédiger des textes (articles, emails, rapports)
+- Traduire dans toutes les langues
+- Analyser des données et identifier des tendances
+- Créer des tâches et des epics (projets multi-étapes)
+- Mémoriser les préférences et apprendre des interactions
+- Utiliser des plugins personnalisés
 
 Règles :
 - Sois naturel, empathique et efficace dans ta communication.
 - Ne modifie jamais le fond des réponses de Brain, seulement la forme si nécessaire.
 - Si une demande est ambiguë, pose des questions de clarification.
-- Tu peux signaler à l'humain quand Brain travaille sur une tâche longue.
+- Quand Brain travaille sur une tâche longue, tu peux continuer à discuter avec l'humain.
 - Réponds de manière concise et naturelle, pas de markdown excessif.
 
 {personality}
@@ -127,9 +139,12 @@ class Vox:
     _mock_mode: bool = False
     _model_config: Optional[object] = None
     _on_thinking_callback: Optional[object] = None  # Callable[[str], None]
+    _on_brain_done_callback: Optional[object] = None  # Callable[[str], None] — async brain result
     _conversation_store: Optional[ConversationStore] = None
     _current_session: Optional[ConversationSession] = None
     _session_lock: Optional[object] = None  # threading.Lock
+    _brain_task: Optional[object] = None  # asyncio.Task — tâche Brain en cours
+    _brain_busy: bool = False  # True quand Brain travaille en arrière-plan
 
     def __post_init__(self):
         self._agent_statuses = {
@@ -265,6 +280,84 @@ class Vox:
         """
         self._on_thinking_callback = callback
 
+    def set_brain_done_callback(self, callback) -> None:
+        """
+        Définit un callback appelé quand Brain termine en arrière-plan.
+        Le callback reçoit un str (réponse de Brain).
+        Utilisé en mode asynchrone pour délivrer le résultat au CLI.
+        """
+        self._on_brain_done_callback = callback
+
+    @property
+    def is_brain_busy(self) -> bool:
+        """Indique si Brain travaille en arrière-plan."""
+        return self._brain_busy
+
+    def _is_simple_message(self, message: str) -> bool:
+        """
+        Détermine si un message peut être traité par Vox seul
+        (sans Brain) — conversation légère, salutations, statut.
+        """
+        msg_lower = message.lower().strip()
+
+        # Salutations et conversation légère
+        simple_patterns = [
+            "salut", "hello", "bonjour", "bonsoir", "hey", "hi", "yo",
+            "ça va", "ca va", "comment tu vas", "comment vas-tu",
+            "merci", "thanks", "ok", "oui", "non", "d'accord",
+            "quoi de neuf", "coucou", "wesh", "slt",
+        ]
+        if any(msg_lower.startswith(p) or msg_lower == p for p in simple_patterns):
+            return True
+
+        # Questions sur Neo lui-même
+        neo_questions = [
+            "que sais-tu faire", "qu'est-ce que tu sais faire",
+            "que peux-tu faire", "qu'est-ce que tu peux faire",
+            "tes capacités", "tes fonctionnalités", "tu fais quoi",
+            "tu sers à quoi", "c'est quoi neo", "tu es quoi",
+            "what can you do", "who are you",
+        ]
+        if any(q in msg_lower for q in neo_questions):
+            return True
+
+        # Messages très courts de conversation
+        if len(msg_lower.split()) <= 3 and "?" not in msg_lower:
+            return True
+
+        return False
+
+    async def _vox_quick_reply(self, message: str) -> str:
+        """
+        Génère une réponse rapide de Vox (sans Brain) pour les messages simples.
+        Si Brain travaille en arrière-plan, mentionne-le.
+        """
+        brain_status = ""
+        if self._brain_busy:
+            brain_status = "\n(Brain travaille encore sur ta demande précédente, je te donnerai la réponse dès qu'elle est prête.)"
+
+        if self._mock_mode:
+            return f"Salut ! Je suis Vox, l'interface de Neo Core. Je suis là pour t'aider !{brain_status}"
+
+        try:
+            import asyncio
+            prompt = (
+                f"Tu es Vox, l'interface de Neo Core. Réponds de manière courte et naturelle "
+                f"à ce message de l'utilisateur (max 2-3 phrases). "
+                f"Si on te demande tes capacités, explique ce que Neo peut faire : "
+                f"chercher sur internet, écrire du code, analyser des données, rédiger des textes, "
+                f"traduire, créer des tâches/epics, mémoriser et apprendre.\n\n"
+                f"Message : {message}\n\n"
+                f"{'Note: Brain travaille actuellement sur une tâche en arrière-plan.' if self._brain_busy else ''}"
+            )
+            reply = await asyncio.wait_for(
+                self._vox_llm_call(prompt),
+                timeout=5.0,
+            )
+            return reply.strip() + brain_status if reply else f"Je suis là !{brain_status}"
+        except Exception:
+            return f"Je suis là, comment puis-je t'aider ?{brain_status}"
+
     async def _generate_ack(self, user_message: str) -> str:
         """
         Génère un accusé de réception instantané via LLM.
@@ -344,11 +437,14 @@ class Vox:
         """
         Pipeline principal : humain → Vox(LLM) → Brain(LLM) → humain.
 
-        1. Reçoit le message humain
-        2. Vox reformule intelligemment la requête (Haiku)
-        3. Envoie un accusé de réception instantané (callback)
-        4. Transmet à Brain (Sonnet)
-        5. Retourne la réponse de Brain telle quelle
+        Mode synchrone (par défaut) :
+        1. Si message simple → Vox répond directement (sans Brain)
+        2. Si message complexe → Vox reformule → Brain traite → retourne réponse
+
+        Mode asynchrone (si _on_brain_done_callback est défini) :
+        1. Si message simple → Vox répond immédiatement
+        2. Si message complexe → Lance Brain en arrière-plan, retourne un ack
+        3. Quand Brain termine → callback avec la réponse
         """
         # Input validation
         try:
@@ -365,13 +461,35 @@ class Vox:
         if len(self.conversation_history) > 20:
             self.conversation_history = self.conversation_history[-20:]
 
-        # Met à jour les statuts
-        self.update_agent_status("Vox", active=True, task="reformulation", progress=0.3)
+        # ── Message simple → Vox répond seul (instantané) ──
+        if self._is_simple_message(human_message):
+            reply = await self._vox_quick_reply(human_message)
+            self.conversation_history.append(AIMessage(content=reply))
+            self._save_conversation_turn(human_message, reply)
+            return reply
 
-        # Vox reformule intelligemment la requête
+        # ── Message complexe → Brain nécessaire ──
+        self.update_agent_status("Vox", active=True, task="reformulation", progress=0.3)
         formatted_request = await self.format_request_async(human_message)
 
-        # Accusé de réception instantané — feedback immédiat à l'utilisateur
+        # Mode asynchrone : lancer Brain en arrière-plan
+        if self._on_brain_done_callback:
+            import asyncio
+
+            # Accusé de réception
+            ack = await self._generate_ack(human_message)
+            self.update_agent_status("Vox", active=False, task="communication", progress=0.0)
+            self.update_agent_status("Brain", active=True, task="analyse de la requête", progress=0.5)
+
+            # Lancer Brain en arrière-plan
+            self._brain_busy = True
+            self._brain_task = asyncio.create_task(
+                self._brain_background(formatted_request, human_message)
+            )
+
+            return ack
+
+        # Mode synchrone (fallback / API / Telegram) : attendre Brain
         if self._on_thinking_callback:
             try:
                 ack = await self._generate_ack(human_message)
@@ -382,22 +500,50 @@ class Vox:
         self.update_agent_status("Vox", active=False, task="communication", progress=0.0)
         self.update_agent_status("Brain", active=True, task="analyse de la requête", progress=0.5)
 
-        # Transmet à Brain et récupère la réponse
         brain_response = await self.brain.process(
             request=formatted_request,
             conversation_history=self.conversation_history,
         )
 
-        # Met à jour les statuts
         self.update_agent_status("Brain", active=False, task=None, progress=0.0)
-
-        # Retourne la réponse de Brain telle quelle (pas de réécriture)
         final_response = brain_response
 
-        # Enregistre la réponse dans l'historique
         self.conversation_history.append(AIMessage(content=final_response))
+        self._save_conversation_turn(human_message, final_response)
+        self._store_in_memory(human_message, final_response)
 
-        # Sauvegarde dans le ConversationStore
+        return final_response
+
+    async def _brain_background(self, formatted_request: str, original_message: str) -> None:
+        """Exécute Brain en arrière-plan et délivre le résultat via callback."""
+        try:
+            brain_response = await self.brain.process(
+                request=formatted_request,
+                conversation_history=self.conversation_history,
+            )
+
+            self.update_agent_status("Brain", active=False, task=None, progress=0.0)
+
+            # Enregistrer dans l'historique
+            self.conversation_history.append(AIMessage(content=brain_response))
+            self._save_conversation_turn(original_message, brain_response)
+            self._store_in_memory(original_message, brain_response)
+
+            # Délivrer via callback
+            if self._on_brain_done_callback:
+                self._on_brain_done_callback(brain_response)
+
+        except Exception as e:
+            logger.error("Brain background task failed: %s", e)
+            error_msg = f"[Erreur Brain] {type(e).__name__}: {str(e)[:300]}"
+            if self._on_brain_done_callback:
+                self._on_brain_done_callback(error_msg)
+        finally:
+            self._brain_busy = False
+            self._brain_task = None
+
+    def _save_conversation_turn(self, human_message: str, response: str) -> None:
+        """Sauvegarde un échange dans le ConversationStore."""
         if self._conversation_store and self._current_session:
             try:
                 self._conversation_store.append_turn(
@@ -408,18 +554,17 @@ class Vox:
                 self._conversation_store.append_turn(
                     self._current_session.session_id,
                     "assistant",
-                    final_response,
+                    response,
                 )
             except Exception as e:
                 logger.error("Failed to save conversation turn: %s", e)
 
-        # Stocke l'échange en mémoire persistante
+    def _store_in_memory(self, human_message: str, response: str) -> None:
+        """Stocke l'échange en mémoire persistante."""
         if self.memory and self.memory.is_initialized:
             self.update_agent_status("Memory", active=True, task="stockage", progress=0.5)
-            self.memory.on_conversation_turn(human_message, final_response)
+            self.memory.on_conversation_turn(human_message, response)
             self.update_agent_status("Memory", active=False, task=None, progress=0.0)
-
-        return final_response
 
     def get_prompt_template(self) -> ChatPromptTemplate:
         """Retourne le template de prompt pour Vox avec personnalité injectée."""

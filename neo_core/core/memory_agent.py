@@ -111,6 +111,9 @@ class MemoryAgent:
         if not self._mock_mode:
             self._init_llm()
 
+        # Charger la documentation système en mémoire (auto-connaissance)
+        self._load_system_docs()
+
     def _init_llm(self) -> None:
         """Initialise le LLM dédié de Memory (Haiku — économique)."""
         try:
@@ -137,6 +140,80 @@ class MemoryAgent:
             logger.info("[Memory] PersonaEngine initialisé")
         except Exception as e:
             logger.error("[Memory] PersonaEngine non disponible (%s)", e)
+
+    def _load_system_docs(self) -> None:
+        """
+        Charge la documentation système en mémoire pour l'auto-connaissance.
+
+        Lit les fichiers Markdown de data/system_docs/ et les stocke
+        avec une importance haute. Vérifie le hash pour ne pas recharger
+        si le contenu n'a pas changé.
+        """
+        import hashlib
+        from pathlib import Path
+
+        docs_dir = self.config.data_dir / "system_docs"
+        if not docs_dir.exists():
+            return
+
+        for doc_path in sorted(docs_dir.glob("*.md")):
+            try:
+                content = doc_path.read_text(encoding="utf-8")
+                if not content.strip():
+                    continue
+
+                # Hash pour éviter les duplicats
+                doc_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+                tag = f"system_doc:{doc_path.stem}"
+
+                # Vérifier si déjà chargé (même hash)
+                existing = self._store.search_by_tags([tag], limit=1)
+                if existing:
+                    existing_hash = existing[0].metadata.get("doc_hash", "")
+                    if existing_hash == doc_hash:
+                        logger.debug("[Memory] System doc '%s' already loaded (hash match)", doc_path.stem)
+                        continue
+                    # Hash différent → supprimer l'ancien et recharger
+                    for old in existing:
+                        self._store.delete(old.id)
+
+                # Découper en sections si le document est long (>2000 chars)
+                sections = self._split_doc_sections(content)
+                for i, section in enumerate(sections):
+                    section_tag = f"{tag}:part{i}" if len(sections) > 1 else tag
+                    self._store.store(
+                        content=section,
+                        source="system_documentation",
+                        tags=["system_doc", tag, "architecture", "capacités"],
+                        importance=0.95,
+                        metadata={"doc_hash": doc_hash, "filename": doc_path.name, "part": i},
+                    )
+
+                logger.info("[Memory] System doc loaded: %s (%d sections)", doc_path.stem, len(sections))
+
+            except Exception as e:
+                logger.debug("[Memory] Failed to load system doc %s: %s", doc_path.name, e)
+
+    @staticmethod
+    def _split_doc_sections(content: str, max_chars: int = 2000) -> list[str]:
+        """Découpe un document en sections basées sur les titres ## ou par taille."""
+        import re
+        # Découper sur les titres de niveau 2 (##)
+        parts = re.split(r'\n(?=## )', content)
+        sections = []
+        current = ""
+
+        for part in parts:
+            if len(current) + len(part) > max_chars and current:
+                sections.append(current.strip())
+                current = part
+            else:
+                current += ("\n" if current else "") + part
+
+        if current.strip():
+            sections.append(current.strip())
+
+        return sections if sections else [content]
 
     async def _memory_llm_call(self, prompt: str) -> Optional[str]:
         """

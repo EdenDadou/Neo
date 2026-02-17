@@ -642,7 +642,9 @@ class TestIntegration:
         acks = []
         vox.set_thinking_callback(lambda msg: acks.append(msg))
 
-        response = await vox.process_message("Explique-moi Python")
+        response = await vox.process_message(
+            "Recherche les dernières tendances en intelligence artificielle et fais-moi un résumé détaillé"
+        )
 
         assert isinstance(response, str)
         assert len(response) > 0

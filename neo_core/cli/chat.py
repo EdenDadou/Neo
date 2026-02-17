@@ -447,6 +447,16 @@ def bootstrap():
     return vox
 
 
+def _drain_brain_results(brain_results: asyncio.Queue) -> None:
+    """Affiche tous les résultats Brain en attente dans la queue."""
+    while not brain_results.empty():
+        try:
+            result = brain_results.get_nowait()
+            console.print(f"\n  [bold cyan]Vox >[/bold cyan] {result}\n")
+        except asyncio.QueueEmpty:
+            break
+
+
 async def conversation_loop(vox):
     """Boucle principale de conversation."""
     config = vox.config
@@ -515,6 +525,15 @@ async def conversation_loop(vox):
 
     shutdown_handler.add_cleanup_callback(cleanup_heartbeat)
 
+    # ── Mode asynchrone : queue pour les résultats Brain en arrière-plan ──
+    brain_results: asyncio.Queue = asyncio.Queue()
+
+    def on_brain_done(result: str):
+        """Callback appelé quand Brain termine en arrière-plan."""
+        brain_results.put_nowait(result)
+
+    vox.set_brain_done_callback(on_brain_done)
+
     print_banner(config)
 
     # Message de recovery si redémarrage
@@ -556,9 +575,11 @@ async def conversation_loop(vox):
     )
 
     while True:
+        # ── Lecture input asynchrone (permet à Brain de tourner en parallèle) ──
         try:
-            user_input = console.input(
-                f"[bold green]  {config.user_name} >[/bold green] "
+            user_input = await asyncio.to_thread(
+                console.input,
+                f"[bold green]  {config.user_name} >[/bold green] ",
             )
         except (KeyboardInterrupt, EOFError):
             if heartbeat_manager:
@@ -664,22 +685,12 @@ async def conversation_loop(vox):
                 console.print(f"[red]  Erreur: {e}[/red]")
             continue
 
-        # Process via Vox → Brain → Vox
+        # ── Afficher les résultats Brain en attente ──
+        _drain_brain_results(brain_results)
+
+        # Process via Vox → Brain → Vox (mode asynchrone)
         try:
-            # Callback pour l'accusé de réception instantané de Vox
-            ack_displayed = False
-
-            def on_thinking(ack_text: str):
-                nonlocal ack_displayed
-                if not ack_displayed:
-                    console.print(f"\n  [dim cyan]Vox >[/dim cyan] [dim]{ack_text}[/dim]")
-                    ack_displayed = True
-
-            vox.set_thinking_callback(on_thinking)
-
-            with console.status("[bold cyan]  Brain analyse...[/bold cyan]"):
-                response = await vox.process_message(user_input)
-
+            response = await vox.process_message(user_input)
             console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response}\n")
         except Exception as e:
             console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
