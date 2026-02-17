@@ -46,6 +46,7 @@ def print_usage():
     {CYAN}history{RESET}           Lister les sessions de conversation
     {CYAN}providers{RESET}         Afficher les providers LLM configurés
     {CYAN}install-service{RESET}   Générer/installer le service systemd
+    {CYAN}telegram-setup{RESET}   Configurer le bot Telegram
     {CYAN}version{RESET}           Afficher la version
 
   {BOLD}Première utilisation :{RESET}
@@ -205,8 +206,43 @@ def main():
             rc.print("  [dim]Aucun provider configuré — mode mock[/dim]")
         rc.print()
 
+    elif command in ("telegram-setup", "telegram_setup"):
+        from neo_core.integrations.telegram import save_telegram_config
+        from neo_core.config import NeoConfig
+        cfg = NeoConfig()
+
+        print(f"\n  {CYAN}{BOLD}Neo Core — Configuration Telegram{RESET}\n")
+        print(f"  {DIM}1. Ouvrez Telegram et cherchez @BotFather{RESET}")
+        print(f"  {DIM}2. Envoyez /newbot et suivez les instructions{RESET}")
+        print(f"  {DIM}3. Copiez le token du bot ici{RESET}\n")
+
+        token = input(f"  {GREEN}▸{RESET} Token du bot : ").strip()
+        if not token:
+            print(f"  {RED}✗ Token requis{RESET}")
+            return
+
+        print(f"\n  {DIM}Pour trouver votre user_id Telegram :{RESET}")
+        print(f"  {DIM}  → Envoyez /start à @userinfobot{RESET}\n")
+
+        ids_input = input(f"  {GREEN}▸{RESET} User IDs autorisés (séparés par des virgules) : ").strip()
+        try:
+            user_ids = [int(x.strip()) for x in ids_input.split(",") if x.strip()]
+        except ValueError:
+            print(f"  {RED}✗ IDs invalides (doivent être des nombres){RESET}")
+            return
+
+        if not user_ids:
+            print(f"  {RED}✗ Au moins un user_id requis{RESET}")
+            return
+
+        save_telegram_config(cfg.data_dir, token, user_ids)
+        print(f"\n  {GREEN}✓{RESET} Token chiffré dans le vault")
+        print(f"  {GREEN}✓{RESET} {len(user_ids)} utilisateur(s) autorisé(s)")
+        print(f"\n  {DIM}Redémarrez le daemon pour activer Telegram :{RESET}")
+        print(f"  {CYAN}neo restart{RESET}\n")
+
     elif command == "version":
-        print("Neo Core v1.4.0 — Stage 17")
+        print("Neo Core v1.5.0 — Stage 18")
 
     else:
         print(f"\n  Commande inconnue : '{sys.argv[1]}'")

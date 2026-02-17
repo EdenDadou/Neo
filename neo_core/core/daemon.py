@@ -178,6 +178,16 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
+    # Bootstrap Vox (partagé entre API, heartbeat et Telegram)
+    vox = None
+    try:
+        from neo_core.cli.chat import bootstrap
+        vox = bootstrap()
+        vox.start_new_session(config.user_name)
+        logger.info("Vox bootstrapped — session started for %s", config.user_name)
+    except Exception as e:
+        logger.warning("Vox bootstrap failed: %s — Telegram disabled", e)
+
     # Lancer les tâches
     async def run_server():
         await server.serve()
@@ -195,19 +205,52 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
                     await heartbeat.pulse()
                 except Exception as e:
                     logger.error("Heartbeat pulse error: %s", e)
-                # Attendre ou être interrompu par shutdown
                 try:
                     await asyncio.wait_for(
                         shutdown_event.wait(),
                         timeout=hb_config.interval_seconds,
                     )
                 except asyncio.TimeoutError:
-                    pass  # Normal — timeout = il faut pulser à nouveau
+                    pass
         except ImportError:
             logger.warning("Heartbeat non disponible — daemon en mode API seul")
             await shutdown_event.wait()
         except Exception as e:
             logger.error("Heartbeat fatal: %s", e)
+
+    telegram_bot = None
+
+    async def run_telegram():
+        """Lance le bot Telegram si configuré."""
+        nonlocal telegram_bot
+        try:
+            from neo_core.integrations.telegram import (
+                TelegramBot,
+                load_telegram_config,
+            )
+
+            tg_config = load_telegram_config(config.data_dir)
+            if not tg_config.bot_token or not tg_config.allowed_user_ids:
+                logger.info("Telegram bot not configured — skipping")
+                await shutdown_event.wait()
+                return
+
+            telegram_bot = TelegramBot(config=tg_config, vox=vox)
+            await telegram_bot.start_polling()
+
+            # Attendre le shutdown
+            await shutdown_event.wait()
+            await telegram_bot.stop()
+
+        except ImportError:
+            logger.info(
+                "python-telegram-bot not installed — Telegram disabled. "
+                "Install: pip install 'python-telegram-bot>=21.0'"
+            )
+            await shutdown_event.wait()
+        except Exception as e:
+            logger.error("Telegram bot error: %s", e)
+            await shutdown_event.wait()
 
     async def watch_shutdown():
         """Attend le signal de shutdown et arrête le serveur."""
@@ -219,6 +262,7 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
     await asyncio.gather(
         run_server(),
         run_heartbeat(),
+        run_telegram(),
         watch_shutdown(),
         return_exceptions=True,
     )

@@ -535,7 +535,7 @@ def run_setup():
     print(f"  {DIM}Ce wizard va tout configurer en quelques étapes.{RESET}\n")
 
     # ─── Étape 1 : Vérifications système ─────────────────────────
-    print_step(1, 8, "Vérifications système")
+    print_step(1, 9, "Vérifications système")
 
     if not check_python_version():
         sys.exit(1)
@@ -543,7 +543,7 @@ def run_setup():
     python_path = setup_venv()
 
     # ─── Étape 2 : Installation des dépendances ─────────────────
-    print_step(2, 8, "Installation des dépendances")
+    print_step(2, 9, "Installation des dépendances")
 
     if not install_dependencies(python_path):
         print(f"\n  {RED}⚠ L'installation a rencontré des erreurs.{RESET}")
@@ -553,7 +553,7 @@ def run_setup():
             sys.exit(1)
 
     # ─── Étape 3 : Identité du Core ─────────────────────────────
-    print_step(3, 8, "Identité du Core")
+    print_step(3, 9, "Identité du Core")
 
     print(f"  {DIM}Donnez un nom à votre système IA.{RESET}")
     print(f"  {DIM}Ce nom sera utilisé par les agents pour se référencer.{RESET}\n")
@@ -568,22 +568,22 @@ def run_setup():
     print(f"\n  {GREEN}✓{RESET} Core: {BOLD}{core_name}{RESET} — Utilisateur: {BOLD}{user_name}{RESET}")
 
     # ─── Étape 4 : Connexion Anthropic (optionnel) ───────────────
-    print_step(4, 8, "Connexion Anthropic (payant, optionnel)")
+    print_step(4, 9, "Connexion Anthropic (payant, optionnel)")
 
     api_key = configure_auth()
 
     # ─── Étape 5 : Modèles LLM (hardware + providers gratuits) ───
-    print_step(5, 8, "Configuration des modèles LLM")
+    print_step(5, 9, "Configuration des modèles LLM")
 
     provider_keys = configure_hardware_and_providers(api_key)
 
     # ─── Étape 6 : Sauvegarde ────────────────────────────────────
-    print_step(6, 8, "Sauvegarde")
+    print_step(6, 9, "Sauvegarde")
 
     save_config(core_name, user_name, api_key, python_path, provider_keys)
 
     # ─── Étape 7 : Test final ────────────────────────────────────
-    print_step(7, 8, "Vérification finale")
+    print_step(7, 9, "Vérification finale")
 
     if api_key:
         test_connection(api_key)
@@ -592,8 +592,50 @@ def run_setup():
     active_providers = [k for k, v in provider_keys.items() if v]
     provider_list = ", ".join(active_providers) if active_providers else "Mode mock"
 
-    # ─── Étape 8 : Démarrage du daemon ───────────────────────────
-    print_step(8, 8, "Démarrage du daemon Neo")
+    # ─── Étape 8 : Configuration Telegram (optionnel) ────────────
+    print_step(8, 9, "Bot Telegram (optionnel)")
+
+    print(f"  {DIM}Connectez Neo à Telegram pour discuter via votre téléphone.{RESET}")
+    print(f"  {DIM}La conversation est partagée avec le CLI (même session).{RESET}")
+    print()
+
+    if ask_confirm("Configurer le bot Telegram ?", default=False):
+        print()
+        print(f"  {DIM}1. Ouvrez Telegram et cherchez @BotFather{RESET}")
+        print(f"  {DIM}2. Envoyez /newbot et suivez les instructions{RESET}")
+        print(f"  {DIM}3. Copiez le token du bot ici{RESET}")
+        print()
+
+        tg_token = ask("Token du bot Telegram", secret=True)
+        if tg_token:
+            print()
+            print(f"  {DIM}Pour trouver votre user_id Telegram :{RESET}")
+            print(f"  {DIM}  → Envoyez /start à @userinfobot{RESET}")
+            print()
+
+            tg_ids_input = ask("User IDs autorisés (séparés par des virgules)")
+            try:
+                tg_user_ids = [int(x.strip()) for x in tg_ids_input.split(",") if x.strip()]
+            except ValueError:
+                tg_user_ids = []
+                print(f"  {YELLOW}⚠{RESET} IDs invalides — Telegram non configuré")
+
+            if tg_user_ids:
+                try:
+                    from neo_core.integrations.telegram import save_telegram_config
+                    save_telegram_config(CONFIG_DIR, tg_token, tg_user_ids)
+                    print(f"  {GREEN}✓{RESET} Token chiffré dans le vault")
+                    print(f"  {GREEN}✓{RESET} {len(tg_user_ids)} utilisateur(s) autorisé(s)")
+                    print(f"  {DIM}  Le bot sera lancé automatiquement avec le daemon.{RESET}")
+                except Exception as e:
+                    print(f"  {YELLOW}⚠{RESET} Erreur config Telegram: {e}")
+        else:
+            print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
+    else:
+        print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
+
+    # ─── Étape 9 : Démarrage du daemon ───────────────────────────
+    print_step(9, 9, "Démarrage du daemon Neo")
 
     # Reload la config depuis le .env qu'on vient de créer
     from dotenv import load_dotenv
@@ -657,11 +699,12 @@ def run_setup():
     Providers LLM : {GREEN}{provider_list}{RESET}
 
   {BOLD}Commandes utiles :{RESET}
-    {CYAN}neo chat{RESET}        Discuter avec {core_name}
-    {CYAN}neo status{RESET}      État du système + daemon
-    {CYAN}neo logs{RESET}        Voir les logs du daemon
-    {CYAN}neo stop{RESET}        Arrêter le daemon
-    {CYAN}neo restart{RESET}     Redémarrer le daemon
+    {CYAN}neo chat{RESET}            Discuter avec {core_name}
+    {CYAN}neo status{RESET}          État du système + daemon
+    {CYAN}neo logs{RESET}            Voir les logs du daemon
+    {CYAN}neo stop{RESET}            Arrêter le daemon
+    {CYAN}neo restart{RESET}         Redémarrer le daemon
+    {CYAN}neo telegram-setup{RESET}  Configurer le bot Telegram
 """)
 
     # Lancer le chat
