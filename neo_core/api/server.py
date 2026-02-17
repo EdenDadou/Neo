@@ -75,7 +75,7 @@ def create_app(config=None) -> FastAPI:
     app = FastAPI(
         title="Neo Core API",
         description="API REST pour Neo Core — Écosystème IA Multi-Agents",
-        version="0.8.4",
+        version="0.8.5",
         lifespan=lifespan,
     )
 
@@ -87,7 +87,7 @@ def create_app(config=None) -> FastAPI:
             status_code=500,
             content={
                 "error": "internal_server_error",
-                "message": f"{type(exc).__name__}: {str(exc)[:200]}",
+                "message": "An unexpected error occurred. Please try again.",
             },
         )
 

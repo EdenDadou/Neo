@@ -82,7 +82,9 @@ class KeyVault:
         self._conn: Optional[sqlite3.Connection] = None
 
     def initialize(self) -> None:
-        """Initialise le vault : crée/charge le salt, dérive la clé, ouvre le DB."""
+        """Initialise le vault : crée/charge le salt, dérive la clé, ouvre le DB (idempotent)."""
+        if self._conn is not None:
+            return  # Déjà initialisé — évite les fuites de connexion
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         # Salt persistant (généré une seule fois)

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +60,7 @@ class TelegramBot:
         self._running = False
         # Rate limit persistant via SQLite (survit aux redémarrages)
         self._rate_db: Optional[sqlite3.Connection] = None
+        self._rate_lock = threading.Lock()
         self._init_rate_db()
 
     def _init_rate_db(self) -> None:
@@ -92,39 +94,40 @@ class TelegramBot:
         return user_id in self._config.allowed_user_ids
 
     def _is_rate_limited(self, user_id: int) -> bool:
-        """Vérifie le rate limit par utilisateur (SQLite persistant)."""
+        """Vérifie le rate limit par utilisateur (SQLite, thread-safe via lock)."""
         now = time.time()
         window = now - 60
 
         if not self._rate_db:
             return False
 
-        try:
-            # Nettoyer les entrées > 60s
-            self._rate_db.execute(
-                "DELETE FROM tg_rate_limits WHERE timestamp < ?", (window,)
-            )
+        with self._rate_lock:
+            try:
+                # Nettoyer les entrées > 60s
+                self._rate_db.execute(
+                    "DELETE FROM tg_rate_limits WHERE timestamp < ?", (window,)
+                )
 
-            # Compter les requêtes dans la fenêtre
-            row = self._rate_db.execute(
-                "SELECT COUNT(*) FROM tg_rate_limits WHERE user_id = ? AND timestamp >= ?",
-                (user_id, window),
-            ).fetchone()
-            count = row[0] if row else 0
+                # Compter les requêtes dans la fenêtre
+                row = self._rate_db.execute(
+                    "SELECT COUNT(*) FROM tg_rate_limits WHERE user_id = ? AND timestamp >= ?",
+                    (user_id, window),
+                ).fetchone()
+                count = row[0] if row else 0
 
-            if count >= self._config.rate_limit_per_minute:
-                return True
+                if count >= self._config.rate_limit_per_minute:
+                    return True
 
-            # Enregistrer
-            self._rate_db.execute(
-                "INSERT INTO tg_rate_limits (user_id, timestamp) VALUES (?, ?)",
-                (user_id, now),
-            )
-            self._rate_db.commit()
-            return False
-        except Exception as e:
-            logger.debug("Rate limit check failed: %s", e)
-            return False
+                # Enregistrer
+                self._rate_db.execute(
+                    "INSERT INTO tg_rate_limits (user_id, timestamp) VALUES (?, ?)",
+                    (user_id, now),
+                )
+                self._rate_db.commit()
+                return False
+            except Exception as e:
+                logger.debug("Rate limit check failed: %s", e)
+                return False
 
     def _sanitize_message(self, text: str) -> tuple[bool, str]:
         """

@@ -66,6 +66,7 @@ class ConversationStore:
     def _init_db(self) -> None:
         """Crée les tables si nécessaire."""
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
             cursor = conn.cursor()
 
             # Table sessions

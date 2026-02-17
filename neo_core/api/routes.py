@@ -289,3 +289,7 @@ async def websocket_chat(ws: WebSocket, token: str = Query(default="")):
         logger.info("WebSocket client disconnected")
     except Exception as e:
         logger.error("WebSocket error: %s", e)
+        try:
+            await ws.close(code=1011, reason="Internal error")
+        except Exception:
+            pass  # Client déjà déconnecté

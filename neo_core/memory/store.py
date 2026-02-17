@@ -79,6 +79,7 @@ class MemoryStore:
             db_path.unlink(missing_ok=True)
             self._db_conn = sqlite3.connect(str(db_path))
 
+        self._db_conn.execute("PRAGMA journal_mode=WAL")
         self._db_conn.row_factory = sqlite3.Row
 
         self._db_conn.execute("""

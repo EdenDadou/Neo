@@ -11,6 +11,7 @@ Sécurité renforcée :
 import hmac
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -70,6 +71,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.rpm = requests_per_minute
         self._conn: Optional[sqlite3.Connection] = None
+        self._db_lock = threading.Lock()
 
         if data_dir:
             data_dir.mkdir(parents=True, exist_ok=True)
@@ -95,34 +97,38 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         now = time.time()
         window_start = now - 60
 
-        # Nettoyer les anciennes entrées (> 60s)
-        self._conn.execute(
-            "DELETE FROM rate_limits WHERE timestamp < ?", (window_start,)
-        )
+        with self._db_lock:
+            try:
+                # Nettoyer les anciennes entrées (> 60s)
+                self._conn.execute(
+                    "DELETE FROM rate_limits WHERE timestamp < ?", (window_start,)
+                )
 
-        # Compter les requêtes dans la fenêtre
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM rate_limits WHERE client_ip = ? AND timestamp >= ?",
-            (client_ip, window_start),
-        ).fetchone()
-        count = row[0] if row else 0
+                # Compter les requêtes dans la fenêtre
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM rate_limits WHERE client_ip = ? AND timestamp >= ?",
+                    (client_ip, window_start),
+                ).fetchone()
+                count = row[0] if row else 0
 
-        if count >= self.rpm:
-            logger.warning("Rate limit exceeded for %s (%d/%d)", client_ip, count, self.rpm)
-            return JSONResponse(
-                status_code=429,
-                content={
-                    "error": "Rate limited",
-                    "detail": f"Max {self.rpm} requests/minute",
-                },
-            )
+                if count >= self.rpm:
+                    logger.warning("Rate limit exceeded for %s (%d/%d)", client_ip, count, self.rpm)
+                    return JSONResponse(
+                        status_code=429,
+                        content={
+                            "error": "Rate limited",
+                            "detail": f"Max {self.rpm} requests/minute",
+                        },
+                    )
 
-        # Enregistrer la requête
-        self._conn.execute(
-            "INSERT INTO rate_limits (client_ip, timestamp) VALUES (?, ?)",
-            (client_ip, now),
-        )
-        self._conn.commit()
+                # Enregistrer la requête
+                self._conn.execute(
+                    "INSERT INTO rate_limits (client_ip, timestamp) VALUES (?, ?)",
+                    (client_ip, now),
+                )
+                self._conn.commit()
+            except sqlite3.OperationalError as e:
+                logger.warning("Rate limit DB error: %s — allowing request", e)
 
         return await call_next(request)
 
