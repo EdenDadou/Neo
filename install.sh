@@ -178,22 +178,38 @@ fi
 
 log_step 3 $TOTAL_STEPS "Téléchargement de Neo Core"
 
-if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    log_info "Dépôt existant détecté — mise à jour..."
-    cd "$INSTALL_DIR"
-    git fetch --all --quiet 2>> "$LOG_FILE" || true
-    git checkout main --quiet 2>> "$LOG_FILE" || true
-    git pull --quiet 2>> "$LOG_FILE" || true
+# Toujours supprimer et re-cloner pour garantir un code à jour
+# (évite les problèmes de safe.directory quand le dossier appartient à un autre user)
+if [[ -d "$INSTALL_DIR" ]]; then
+    # Sauvegarder les données utilisateur si elles existent
+    if [[ -d "${INSTALL_DIR}/data" ]]; then
+        cp -r "${INSTALL_DIR}/data" /tmp/neo-data-backup 2>/dev/null || true
+        log_info "Données existantes sauvegardées dans /tmp/neo-data-backup"
+    fi
+    if [[ -f "${INSTALL_DIR}/.env" ]]; then
+        cp "${INSTALL_DIR}/.env" /tmp/neo-env-backup 2>/dev/null || true
+        log_info "Configuration .env sauvegardée"
+    fi
+    rm -rf "$INSTALL_DIR"
+fi
+
+if run_or_fail "Clonage du dépôt dans $INSTALL_DIR" git clone --quiet https://github.com/EdenDadou/Neo.git "$INSTALL_DIR"; then
+    :
 else
-    if [[ -d "$INSTALL_DIR" ]]; then
-        rm -rf "$INSTALL_DIR"
-    fi
-    if run_or_fail "Clonage du dépôt dans $INSTALL_DIR" git clone --quiet https://github.com/EdenDadou/Neo.git "$INSTALL_DIR"; then
-        :
-    else
-        log_error "Impossible de cloner le dépôt. Vérifiez votre connexion internet."
-        exit 1
-    fi
+    log_error "Impossible de cloner le dépôt. Vérifiez votre connexion internet."
+    exit 1
+fi
+
+# Restaurer les données si backup existe
+if [[ -d /tmp/neo-data-backup ]]; then
+    cp -r /tmp/neo-data-backup "${INSTALL_DIR}/data"
+    rm -rf /tmp/neo-data-backup
+    log_info "Données restaurées"
+fi
+if [[ -f /tmp/neo-env-backup ]]; then
+    cp /tmp/neo-env-backup "${INSTALL_DIR}/.env"
+    rm -f /tmp/neo-env-backup
+    log_info "Configuration .env restaurée"
 fi
 
 cd "$INSTALL_DIR"
