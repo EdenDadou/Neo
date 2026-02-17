@@ -527,63 +527,187 @@ def _test_providers(provider_keys: dict) -> dict:
         return asyncio.run(_run_tests())
 
 
-def run_setup():
-    """Point d'entrée du setup complet."""
+def run_setup(auto_mode: bool = False):
+    """
+    Point d'entrée du setup complet.
+
+    Args:
+        auto_mode: Si True, pose le minimum de questions (nom + clé API optionnelle)
+                   et installe tout automatiquement. Activé par --auto.
+    """
+    # Vérifier --auto depuis sys.argv si pas passé en paramètre
+    if not auto_mode and "--auto" in sys.argv:
+        auto_mode = True
+
     print_banner()
 
-    print(f"  {BOLD}Bienvenue dans le setup de Neo Core.{RESET}")
-    print(f"  {DIM}Ce wizard va tout configurer en quelques étapes.{RESET}\n")
+    if auto_mode:
+        print(f"  {BOLD}Mode automatique activé.{RESET}")
+        print(f"  {DIM}Neo sera configuré avec les paramètres optimaux.{RESET}\n")
+        total_steps = 5
+    else:
+        print(f"  {BOLD}Bienvenue dans le setup de Neo Core.{RESET}")
+        print(f"  {DIM}Ce wizard va tout configurer en quelques étapes.{RESET}\n")
+        total_steps = 9
 
     # ─── Étape 1 : Vérifications système ─────────────────────────
-    print_step(1, 9, "Vérifications système")
+    print_step(1, total_steps, "Vérifications système")
 
     if not check_python_version():
         sys.exit(1)
 
-    python_path = setup_venv()
+    if auto_mode:
+        # En mode auto, utiliser le python courant (le venv est déjà créé par install.sh)
+        python_path = sys.executable
+        if check_venv():
+            print(f"  {GREEN}✓{RESET} Virtual environment actif")
+        else:
+            # Créer le venv silencieusement
+            venv_path = PROJECT_ROOT / ".venv"
+            if not venv_path.exists():
+                run_command(
+                    f"{sys.executable} -m venv {venv_path}",
+                    "Création du virtual environment"
+                )
+                python_path = str(venv_path / "bin" / "python3")
+            else:
+                python_path = str(venv_path / "bin" / "python3")
+    else:
+        python_path = setup_venv()
 
     # ─── Étape 2 : Installation des dépendances ─────────────────
-    print_step(2, 9, "Installation des dépendances")
+    print_step(2, total_steps, "Installation des dépendances")
 
     if not install_dependencies(python_path):
-        print(f"\n  {RED}⚠ L'installation a rencontré des erreurs.{RESET}")
-        print(f"  {DIM}Vous pouvez réessayer manuellement :{RESET}")
-        print(f"  {CYAN}{python_path} -m pip install -r requirements.txt{RESET}")
-        if not ask_confirm("Continuer malgré les erreurs ?", default=False):
+        if auto_mode:
+            print(f"  {YELLOW}⚠{RESET} Certaines dépendances ont échoué — continuation...")
+        else:
+            print(f"\n  {RED}⚠ L'installation a rencontré des erreurs.{RESET}")
+            print(f"  {DIM}Vous pouvez réessayer manuellement :{RESET}")
+            print(f"  {CYAN}{python_path} -m pip install -r requirements.txt{RESET}")
+            if not ask_confirm("Continuer malgré les erreurs ?", default=False):
+                sys.exit(1)
+
+    # ─── Étape 3 : Identité + Configuration ──────────────────────
+    if auto_mode:
+        # Mode auto : demander SEULEMENT le nom et optionnellement la clé API
+        print_step(3, total_steps, "Configuration rapide")
+
+        print(f"  {DIM}Deux petites questions et Neo sera prêt !{RESET}\n")
+
+        user_name = ask("Votre nom / pseudonyme")
+        if not user_name:
+            user_name = "User"
+            print(f"  {DIM}  (nom par défaut: User){RESET}")
+
+        core_name = "Neo"
+        print(f"\n  {GREEN}✓{RESET} Core: {BOLD}{core_name}{RESET} — Utilisateur: {BOLD}{user_name}{RESET}")
+
+        # Clé API (optionnelle, mais on la propose)
+        print()
+        print(f"  {DIM}Clé Anthropic (Claude) = cerveau principal de Neo.{RESET}")
+        print(f"  {DIM}Sans clé, Neo fonctionne en mode démo (réponses simulées).{RESET}")
+        print(f"  {DIM}Vous pouvez aussi configurer des providers gratuits plus tard.{RESET}\n")
+
+        api_key = ""
+
+        # Tenter l'import automatique depuis Claude Code
+        try:
+            from neo_core.oauth import import_claude_code_credentials
+            claude_creds = import_claude_code_credentials()
+            if claude_creds:
+                api_key = claude_creds["access_token"]
+                print(f"  {GREEN}✓{RESET} Credentials Claude Code détectées et importées automatiquement !")
+        except Exception:
+            pass
+
+        if not api_key:
+            api_key = ask("Clé Anthropic (Entrée pour ignorer)", secret=True)
+
+        if api_key:
+            masked = api_key[:12] + "..." + api_key[-4:]
+            print(f"  {GREEN}✓{RESET} Clé configurée : {DIM}{masked}{RESET}")
+        else:
+            print(f"  {DIM}  Mode démo activé — configurable plus tard{RESET}")
+
+        # Auto-détection hardware + install Ollama si possible
+        provider_keys = {"anthropic": api_key}
+
+        print()
+        print(f"  {DIM}⧗ Détection hardware et providers gratuits...{RESET}")
+
+        try:
+            from neo_core.providers.hardware import HardwareDetector
+            profile = HardwareDetector.detect()
+            print(f"  {GREEN}✓{RESET} {profile.summary()}")
+
+            # Installer Ollama automatiquement si hardware ok
+            if profile.max_model_size() != "none":
+                if not HardwareDetector.is_ollama_installed():
+                    run_command(
+                        "curl -fsSL https://ollama.com/install.sh | sh",
+                        "Installation d'Ollama (modèles locaux)"
+                    )
+                if HardwareDetector.is_ollama_installed():
+                    if not HardwareDetector.is_ollama_running():
+                        run_command("ollama serve &", "Démarrage Ollama")
+                        import time
+                        time.sleep(2)
+                    models = profile.recommend_ollama_models()
+                    for m in models[:1]:  # Juste le modèle principal en auto
+                        run_command(
+                            f"ollama pull {m['model']}",
+                            f"Téléchargement {m['model']} ({m['size']})"
+                        )
+                    provider_keys["ollama"] = "local"
+        except Exception as e:
+            print(f"  {DIM}  Hardware: détection échouée ({e}){RESET}")
+
+        # Chercher les clés d'env existantes (peut-être déjà configurées)
+        groq_key = os.environ.get("GROQ_API_KEY", "")
+        gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        if groq_key:
+            provider_keys["groq"] = groq_key
+            print(f"  {GREEN}✓{RESET} Groq détecté depuis l'environnement")
+        if gemini_key:
+            provider_keys["gemini"] = gemini_key
+            print(f"  {GREEN}✓{RESET} Gemini détecté depuis l'environnement")
+
+    else:
+        # Mode interactif complet (wizard 9 étapes)
+        print_step(3, total_steps, "Identité du Core")
+
+        print(f"  {DIM}Donnez un nom à votre système IA.{RESET}")
+        print(f"  {DIM}Ce nom sera utilisé par les agents pour se référencer.{RESET}\n")
+
+        core_name = ask("Nom du Core", default="Neo")
+        user_name = ask("Votre nom / pseudonyme")
+
+        if not user_name:
+            print(f"  {RED}Le nom d'utilisateur est requis.{RESET}")
             sys.exit(1)
 
-    # ─── Étape 3 : Identité du Core ─────────────────────────────
-    print_step(3, 9, "Identité du Core")
+        print(f"\n  {GREEN}✓{RESET} Core: {BOLD}{core_name}{RESET} — Utilisateur: {BOLD}{user_name}{RESET}")
 
-    print(f"  {DIM}Donnez un nom à votre système IA.{RESET}")
-    print(f"  {DIM}Ce nom sera utilisé par les agents pour se référencer.{RESET}\n")
+        # ─── Étape 4 : Connexion Anthropic (optionnel) ───────────────
+        print_step(4, total_steps, "Connexion Anthropic (payant, optionnel)")
 
-    core_name = ask("Nom du Core", default="Neo")
-    user_name = ask("Votre nom / pseudonyme")
+        api_key = configure_auth()
 
-    if not user_name:
-        print(f"  {RED}Le nom d'utilisateur est requis.{RESET}")
-        sys.exit(1)
+        # ─── Étape 5 : Modèles LLM (hardware + providers gratuits) ───
+        print_step(5, total_steps, "Configuration des modèles LLM")
 
-    print(f"\n  {GREEN}✓{RESET} Core: {BOLD}{core_name}{RESET} — Utilisateur: {BOLD}{user_name}{RESET}")
+        provider_keys = configure_hardware_and_providers(api_key)
 
-    # ─── Étape 4 : Connexion Anthropic (optionnel) ───────────────
-    print_step(4, 9, "Connexion Anthropic (payant, optionnel)")
-
-    api_key = configure_auth()
-
-    # ─── Étape 5 : Modèles LLM (hardware + providers gratuits) ───
-    print_step(5, 9, "Configuration des modèles LLM")
-
-    provider_keys = configure_hardware_and_providers(api_key)
-
-    # ─── Étape 6 : Sauvegarde ────────────────────────────────────
-    print_step(6, 9, "Sauvegarde")
+    # ─── Sauvegarde ───────────────────────────────────────────────
+    step_save = 4 if auto_mode else 6
+    print_step(step_save, total_steps, "Sauvegarde")
 
     save_config(core_name, user_name, api_key, python_path, provider_keys)
 
-    # ─── Étape 7 : Test final ────────────────────────────────────
-    print_step(7, 9, "Vérification finale")
+    # ─── Test final / Vérification ────────────────────────────────
+    if not auto_mode:
+        print_step(7, total_steps, "Vérification finale")
 
     if api_key:
         test_connection(api_key)
@@ -592,50 +716,52 @@ def run_setup():
     active_providers = [k for k, v in provider_keys.items() if v]
     provider_list = ", ".join(active_providers) if active_providers else "Mode mock"
 
-    # ─── Étape 8 : Configuration Telegram (optionnel) ────────────
-    print_step(8, 9, "Bot Telegram (optionnel)")
+    # ─── Configuration Telegram (mode interactif seulement) ───────
+    if not auto_mode:
+        print_step(8, total_steps, "Bot Telegram (optionnel)")
 
-    print(f"  {DIM}Connectez Neo à Telegram pour discuter via votre téléphone.{RESET}")
-    print(f"  {DIM}La conversation est partagée avec le CLI (même session).{RESET}")
-    print()
-
-    if ask_confirm("Configurer le bot Telegram ?", default=False):
-        print()
-        print(f"  {DIM}1. Ouvrez Telegram et cherchez @BotFather{RESET}")
-        print(f"  {DIM}2. Envoyez /newbot et suivez les instructions{RESET}")
-        print(f"  {DIM}3. Copiez le token du bot ici{RESET}")
+        print(f"  {DIM}Connectez Neo à Telegram pour discuter via votre téléphone.{RESET}")
+        print(f"  {DIM}La conversation est partagée avec le CLI (même session).{RESET}")
         print()
 
-        tg_token = ask("Token du bot Telegram", secret=True)
-        if tg_token:
+        if ask_confirm("Configurer le bot Telegram ?", default=False):
             print()
-            print(f"  {DIM}Pour trouver votre user_id Telegram :{RESET}")
-            print(f"  {DIM}  → Envoyez /start à @userinfobot{RESET}")
+            print(f"  {DIM}1. Ouvrez Telegram et cherchez @BotFather{RESET}")
+            print(f"  {DIM}2. Envoyez /newbot et suivez les instructions{RESET}")
+            print(f"  {DIM}3. Copiez le token du bot ici{RESET}")
             print()
 
-            tg_ids_input = ask("User IDs autorisés (séparés par des virgules)")
-            try:
-                tg_user_ids = [int(x.strip()) for x in tg_ids_input.split(",") if x.strip()]
-            except ValueError:
-                tg_user_ids = []
-                print(f"  {YELLOW}⚠{RESET} IDs invalides — Telegram non configuré")
+            tg_token = ask("Token du bot Telegram", secret=True)
+            if tg_token:
+                print()
+                print(f"  {DIM}Pour trouver votre user_id Telegram :{RESET}")
+                print(f"  {DIM}  → Envoyez /start à @userinfobot{RESET}")
+                print()
 
-            if tg_user_ids:
+                tg_ids_input = ask("User IDs autorisés (séparés par des virgules)")
                 try:
-                    from neo_core.integrations.telegram import save_telegram_config
-                    save_telegram_config(CONFIG_DIR, tg_token, tg_user_ids)
-                    print(f"  {GREEN}✓{RESET} Token chiffré dans le vault")
-                    print(f"  {GREEN}✓{RESET} {len(tg_user_ids)} utilisateur(s) autorisé(s)")
-                    print(f"  {DIM}  Le bot sera lancé automatiquement avec le daemon.{RESET}")
-                except Exception as e:
-                    print(f"  {YELLOW}⚠{RESET} Erreur config Telegram: {e}")
+                    tg_user_ids = [int(x.strip()) for x in tg_ids_input.split(",") if x.strip()]
+                except ValueError:
+                    tg_user_ids = []
+                    print(f"  {YELLOW}⚠{RESET} IDs invalides — Telegram non configuré")
+
+                if tg_user_ids:
+                    try:
+                        from neo_core.integrations.telegram import save_telegram_config
+                        save_telegram_config(CONFIG_DIR, tg_token, tg_user_ids)
+                        print(f"  {GREEN}✓{RESET} Token chiffré dans le vault")
+                        print(f"  {GREEN}✓{RESET} {len(tg_user_ids)} utilisateur(s) autorisé(s)")
+                        print(f"  {DIM}  Le bot sera lancé automatiquement avec le daemon.{RESET}")
+                    except Exception as e:
+                        print(f"  {YELLOW}⚠{RESET} Erreur config Telegram: {e}")
+            else:
+                print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
         else:
             print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
-    else:
-        print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
 
-    # ─── Étape 9 : Démarrage du daemon ───────────────────────────
-    print_step(9, 9, "Démarrage du daemon Neo")
+    # ─── Démarrage du daemon ──────────────────────────────────────
+    step_daemon = 5 if auto_mode else 9
+    print_step(step_daemon, total_steps, "Démarrage du daemon Neo")
 
     # Reload la config depuis le .env qu'on vient de créer
     from dotenv import load_dotenv
@@ -673,19 +799,20 @@ def run_setup():
             print(f"  {YELLOW}⚠{RESET} {result['message']}")
             print(f"  {DIM}  Vous pouvez démarrer manuellement : neo start{RESET}")
 
-    # Proposer l'installation du service systemd
-    import platform
-    if platform.system() == "Linux":
-        print()
-        if ask_confirm("Installer le service systemd (démarrage automatique au boot) ?", default=False):
-            from neo_core.core.daemon import install_service
-            svc_result = install_service()
-            if svc_result["success"]:
-                print(f"  {GREEN}✓{RESET} {svc_result['message']}")
-            else:
-                print(f"  {YELLOW}⚠{RESET} {svc_result['message']}")
-                for cmd in svc_result.get("commands", []):
-                    print(f"    {DIM}{cmd}{RESET}")
+    # Proposer l'installation du service systemd (mode interactif seulement)
+    if not auto_mode:
+        import platform
+        if platform.system() == "Linux":
+            print()
+            if ask_confirm("Installer le service systemd (démarrage automatique au boot) ?", default=False):
+                from neo_core.core.daemon import install_service
+                svc_result = install_service()
+                if svc_result["success"]:
+                    print(f"  {GREEN}✓{RESET} {svc_result['message']}")
+                else:
+                    print(f"  {YELLOW}⚠{RESET} {svc_result['message']}")
+                    for cmd in svc_result.get("commands", []):
+                        print(f"    {DIM}{cmd}{RESET}")
 
     # ─── Résumé final ─────────────────────────────────────────────
     print(f"""
@@ -707,7 +834,11 @@ def run_setup():
     {CYAN}neo telegram-setup{RESET}  Configurer le bot Telegram
 """)
 
-    # Lancer le chat
-    print(f"  {CYAN}Démarrage du chat avec {core_name}...{RESET}\n")
-    from neo_core.cli.chat import run_chat
-    run_chat()
+    if not auto_mode:
+        # Lancer le chat en mode interactif
+        print(f"  {CYAN}Démarrage du chat avec {core_name}...{RESET}\n")
+        from neo_core.cli.chat import run_chat
+        run_chat()
+    else:
+        print(f"  {GREEN}{BOLD}Neo est prêt !{RESET}")
+        print(f"  {DIM}Lancez 'neo chat' pour discuter.{RESET}\n")
