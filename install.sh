@@ -370,11 +370,15 @@ echo -e "  ${DIM}Il va vous demander votre nom et optionnellement vos clés API.
 echo -e "  ${DIM}Sans clé API, Neo fonctionne en mode démo (réponses simulées).${RESET}"
 echo
 
-# Lancer le wizard en mode auto (minimal questions)
-# IMPORTANT : < /dev/tty pour que input() lise le clavier et pas le pipe du curl
+# Lancer le wizard en tant que root (le user neo n'a pas accès au TTY)
+# On chown les fichiers de config après
 echo -e "  ${DIM}Lancement du wizard...${RESET}\n"
-sudo -u $NEO_USER bash -c "cd ${INSTALL_DIR} && source ${VENV_DIR}/bin/activate && neo setup --auto" < /dev/tty
+cd "${INSTALL_DIR}" && source "${VENV_DIR}/bin/activate" && neo setup --auto < /dev/tty
 WIZARD_EXIT=$?
+
+# Rendre les fichiers de config accessibles à l'utilisateur neo
+chown -R ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/data" 2>/dev/null || true
+chown ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/.env" 2>/dev/null || true
 
 # Si le wizard réussit, démarrer le service
 if [[ $WIZARD_EXIT -eq 0 ]]; then
