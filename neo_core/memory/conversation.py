@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +60,7 @@ class ConversationStore:
         """Initialise le store avec un chemin DB."""
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_lock = threading.Lock()
         self._init_db()
 
     def _init_db(self) -> None:
@@ -96,7 +98,7 @@ class ConversationStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON turns(timestamp)")
 
             conn.commit()
-            logger.debug(f"Database initialized: {self.db_path}")
+            logger.debug("Database initialized: %s", self.db_path)
 
     def start_session(self, user_name: str = "User") -> ConversationSession:
         """Démarre une nouvelle session de conversation."""
@@ -111,7 +113,7 @@ class ConversationStore:
             """, (session_id, user_name, now, now, 0))
             conn.commit()
 
-        logger.debug(f"Started session: {session_id}")
+        logger.debug("Started session: %s", session_id)
         return ConversationSession(
             session_id=session_id,
             user_name=user_name,
@@ -121,36 +123,35 @@ class ConversationStore:
         )
 
     def append_turn(self, session_id: str, role: str, content: str) -> ConversationTurn:
-        """Ajoute un tour à une session."""
+        """Ajoute un tour à une session (thread-safe via lock + transaction)."""
         now = datetime.now().isoformat()
 
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._write_lock:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
 
-            # Récupérer le numéro du prochain tour
-            cursor.execute(
-                "SELECT COALESCE(MAX(turn_number), 0) FROM turns WHERE session_id = ?",
-                (session_id,)
-            )
-            result = cursor.fetchone()
-            next_turn = (result[0] if result else 0) + 1
+                # Atomic: SELECT MAX + INSERT dans la même transaction sous lock
+                cursor.execute(
+                    "SELECT COALESCE(MAX(turn_number), 0) FROM turns WHERE session_id = ?",
+                    (session_id,)
+                )
+                result = cursor.fetchone()
+                next_turn = (result[0] if result else 0) + 1
 
-            # Insérer le turn
-            cursor.execute("""
-                INSERT INTO turns (session_id, turn_number, role, content, timestamp)
-                VALUES (?, ?, ?, ?, ?)
-            """, (session_id, next_turn, role, content, now))
+                cursor.execute("""
+                    INSERT INTO turns (session_id, turn_number, role, content, timestamp)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (session_id, next_turn, role, content, now))
 
-            # Mettre à jour la session
-            cursor.execute("""
-                UPDATE sessions
-                SET updated_at = ?, message_count = message_count + 1
-                WHERE session_id = ?
-            """, (now, session_id))
+                cursor.execute("""
+                    UPDATE sessions
+                    SET updated_at = ?, message_count = message_count + 1
+                    WHERE session_id = ?
+                """, (now, session_id))
 
-            conn.commit()
+                conn.commit()
 
-        logger.debug(f"Appended {role} turn to session {session_id}")
+        logger.debug("Appended %s turn to session %s", role, session_id)
         return ConversationTurn(
             role=role,
             content=content,

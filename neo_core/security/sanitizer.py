@@ -40,6 +40,19 @@ _PROMPT_INJECTION_PATTERNS = [
     re.compile(r"\[INST\]|\[/INST\]|\[SYS\]|\[/SYS\]", re.I),
     re.compile(r"forget\s+(everything|all|your\s+(instructions|rules))", re.I),
     re.compile(r"override\s+(your|the|all)\s+(safety|rules|restrictions)", re.I),
+    # v0.8.4 — Roleplay / impersonation patterns
+    re.compile(r"act\s+as\s+(a|an|if|though)\b", re.I),
+    re.compile(r"pretend\s+(you\s+are|to\s+be|you're)\s+", re.I),
+    re.compile(r"you\s+must\s+now\s+", re.I),
+    re.compile(r"(new|updated|revised)\s+(instructions?|rules?|prompt)\s*:", re.I),
+    re.compile(r"disregard\s+(all|any|the|your)\s+", re.I),
+    re.compile(r"do\s+not\s+follow\s+(your|the|any)\s+(instructions|rules|guidelines)", re.I),
+    # Encodage / obfuscation
+    re.compile(r"base64[:\s]", re.I),
+    re.compile(r"eval\s*\(", re.I),
+    # Extraction de prompt
+    re.compile(r"(repeat|show|display|print|output)\s+(your|the|system)\s+(prompt|instructions)", re.I),
+    re.compile(r"what\s+(are|is)\s+your\s+(system\s+)?prompt", re.I),
 ]
 
 _SQL_INJECTION_PATTERNS = [

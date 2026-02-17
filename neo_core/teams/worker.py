@@ -461,9 +461,9 @@ class Worker:
             for tu in pending_tool_uses:
                 try:
                     result = ToolRegistry.execute_tool(tu["name"], tu["input"])
-                    logger.info(f"Tool executed: {tu['name']}")
+                    logger.info("Tool executed: %s", tu['name'])
                 except Exception as e:
-                    logger.error(f"Tool execution failed: {tu['name']}: %s", e)
+                    logger.error("Tool execution failed: %s: %s", tu['name'], e)
                     result = f"Erreur outil {tu['name']}: {e}"
 
                 tool_results.append({

@@ -166,9 +166,9 @@ class Vox:
                     temperature=self._model_config.temperature,
                     max_tokens=self._model_config.max_tokens,
                 )
-            logger.info(f"LLM initialisé : {self._model_config.model}")
+            logger.info("LLM initialisé : %s", self._model_config.model)
         except Exception as e:
-            logger.error(f"LLM non disponible ({e}), mode passthrough")
+            logger.error("LLM non disponible (%s), mode passthrough", e)
 
     async def _vox_llm_call(self, prompt: str) -> str:
         """
@@ -197,13 +197,13 @@ class Vox:
 
         except Exception as e:
             # Fallback LangChain legacy
-            logger.debug(f"route_chat failed, trying legacy LangChain: {e}")
+            logger.debug("route_chat failed, trying legacy LangChain: %s", e)
             if self._llm:
                 try:
                     result = await self._llm.ainvoke(prompt)
                     return result.content
                 except Exception as e:
-                    logger.debug(f"LangChain ainvoke failed: {e}")
+                    logger.debug("LangChain ainvoke failed: %s", e)
 
         return prompt  # Passthrough si pas de LLM
 
@@ -218,7 +218,7 @@ class Vox:
             return None
         with self._session_lock:
             self._current_session = self._conversation_store.start_session(user_name)
-            logger.info(f"Started new conversation session: {self._current_session.session_id}")
+            logger.info("Started new conversation session: %s", self._current_session.session_id)
             return self._current_session
 
     def resume_session(self, session_id: str) -> Optional[ConversationSession]:
@@ -228,7 +228,7 @@ class Vox:
         with self._session_lock:
             session = self._conversation_store.get_session_by_id(session_id)
             if not session:
-                logger.warning(f"Session not found: {session_id}")
+                logger.warning("Session not found: %s", session_id)
                 return None
 
             # Charger l'historique
@@ -241,7 +241,7 @@ class Vox:
                     self.conversation_history.append(AIMessage(content=turn.content))
 
             self._current_session = session
-            logger.info(f"Resumed session: {session_id} with {len(history)} messages")
+            logger.info("Resumed session: %s with %d messages", session_id, len(history))
             return self._current_session
 
     def get_session_info(self) -> Optional[dict]:
@@ -289,9 +289,9 @@ class Vox:
                 return ack.strip()
 
         except asyncio.TimeoutError as e:
-            logger.debug(f"Acknowledgment generation timeout: {e}")
+            logger.debug("Acknowledgment generation timeout: %s", e)
         except Exception as e:
-            logger.debug(f"Acknowledgment generation failed: {e}")
+            logger.debug("Acknowledgment generation failed: %s", e)
 
         return random.choice(STATIC_ACKS)
 
@@ -301,7 +301,7 @@ class Vox:
             try:
                 return self.memory.persona_engine.get_vox_injection()
             except Exception as e:
-                logger.debug(f"Failed to get personality injection: {e}")
+                logger.debug("Failed to get personality injection: %s", e)
         return ""
 
     def get_system_status(self) -> str:
@@ -337,7 +337,7 @@ class Vox:
             result = await self._vox_llm_call(prompt)
             return result.strip() if result else human_message
         except Exception as e:
-            logger.debug(f"Failed to reformat request: {e}")
+            logger.debug("Failed to reformat request: %s", e)
             return human_message
 
     async def process_message(self, human_message: str) -> str:
@@ -354,7 +354,7 @@ class Vox:
         try:
             human_message = validate_message(human_message)
         except ValidationError as e:
-            logger.error(f"Message validation failed: {e}")
+            logger.error("Message validation failed: %s", e)
             return f"[Erreur] Message invalide : {e}"
 
         if not self.brain:
@@ -377,7 +377,7 @@ class Vox:
                 ack = await self._generate_ack(human_message)
                 self._on_thinking_callback(ack)
             except Exception as e:
-                logger.debug(f"Failed to send thinking callback: {e}")
+                logger.debug("Failed to send thinking callback: %s", e)
 
         self.update_agent_status("Vox", active=False, task="communication", progress=0.0)
         self.update_agent_status("Brain", active=True, task="analyse de la requête", progress=0.5)
@@ -411,7 +411,7 @@ class Vox:
                     final_response,
                 )
             except Exception as e:
-                logger.error(f"Failed to save conversation turn: {e}")
+                logger.error("Failed to save conversation turn: %s", e)
 
         # Stocke l'échange en mémoire persistante
         if self.memory and self.memory.is_initialized:

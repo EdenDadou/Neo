@@ -14,6 +14,7 @@ Responsabilités :
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
@@ -49,6 +50,7 @@ class MemoryConsolidator:
     def __init__(self, store: MemoryStore, config: NeoConfig | None = None):
         self.store = store
         self.config = config or default_config
+        self._lock = threading.Lock()
 
     def cleanup(self, max_age_days: int = 30,
                 min_importance: float = 0.2) -> ConsolidationReport:
@@ -162,21 +164,22 @@ class MemoryConsolidator:
         return report
 
     def full_consolidation(self) -> ConsolidationReport:
-        """Exécute toutes les opérations de consolidation."""
-        report = ConsolidationReport()
-        report.entries_before = self.store.count()
+        """Exécute toutes les opérations de consolidation (thread-safe)."""
+        with self._lock:
+            report = ConsolidationReport()
+            report.entries_before = self.store.count()
 
-        # 1. Nettoyage
-        cleanup_report = self.cleanup()
-        report.entries_deleted = cleanup_report.entries_deleted
+            # 1. Nettoyage
+            cleanup_report = self.cleanup()
+            report.entries_deleted = cleanup_report.entries_deleted
 
-        # 2. Fusion des doublons
-        merge_report = self.merge_similar()
-        report.entries_merged = merge_report.entries_merged
+            # 2. Fusion des doublons
+            merge_report = self.merge_similar()
+            report.entries_merged = merge_report.entries_merged
 
-        # 3. Promotion
-        promote_report = self.promote_important()
-        report.entries_promoted = promote_report.entries_promoted
+            # 3. Promotion
+            promote_report = self.promote_important()
+            report.entries_promoted = promote_report.entries_promoted
 
-        report.entries_after = self.store.count()
-        return report
+            report.entries_after = self.store.count()
+            return report

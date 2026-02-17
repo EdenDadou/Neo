@@ -61,8 +61,8 @@ async def route_chat(
 
             try:
                 logger.debug(
-                    f"[Router] {agent_name} → {model.model_id} "
-                    f"({model.provider})"
+                    "[Router] %s → %s (%s)",
+                    agent_name, model.model_id, model.provider,
                 )
                 response = await provider.chat(
                     messages=messages,
@@ -80,20 +80,20 @@ async def route_chat(
                 # Réponse d'erreur du provider → noter et continuer
                 error_msg = f"{model.model_id}: {response.text[:100]}"
                 errors.append(error_msg)
-                logger.warning(f"[Router] Échec {error_msg}, fallback...")
+                logger.warning("[Router] Échec %s, fallback...", error_msg)
 
             except Exception as e:
                 error_msg = f"{model.model_id}: {type(e).__name__}: {str(e)[:100]}"
                 errors.append(error_msg)
-                logger.warning(f"[Router] Échec {error_msg}, fallback...")
+                logger.warning("[Router] Échec %s, fallback...", error_msg)
                 continue
 
     except Exception as e:
         errors.append(f"Registry: {e}")
-        logger.debug(f"[Router] Registry indisponible: {e}")
+        logger.debug("[Router] Registry indisponible: %s", e)
 
     # Dernier recours : Anthropic direct (OAuth ou API key)
-    logger.debug(f"[Router] Tous les providers ont échoué, fallback Anthropic direct")
+    logger.debug("[Router] Tous les providers ont échoué, fallback Anthropic direct")
     response = await _fallback_anthropic(
         agent_name=agent_name,
         messages=messages,

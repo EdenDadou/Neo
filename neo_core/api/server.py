@@ -75,7 +75,7 @@ def create_app(config=None) -> FastAPI:
     app = FastAPI(
         title="Neo Core API",
         description="API REST pour Neo Core — Écosystème IA Multi-Agents",
-        version="0.8.3",
+        version="0.8.4",
         lifespan=lifespan,
     )
 
@@ -91,11 +91,11 @@ def create_app(config=None) -> FastAPI:
             },
         )
 
-    # CORS middleware
+    # CORS middleware — allow_credentials=False avec wildcard origins (spec-compliant)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

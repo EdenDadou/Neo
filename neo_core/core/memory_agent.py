@@ -125,9 +125,9 @@ class MemoryAgent:
                     temperature=self._model_config.temperature,
                     max_tokens=self._model_config.max_tokens,
                 )
-            logger.info(f"[Memory] LLM initialisé : {self._model_config.model}")
+            logger.info("[Memory] LLM initialisé : %s", self._model_config.model)
         except Exception as e:
-            logger.error(f"[Memory] LLM non disponible ({e}), mode heuristique")
+            logger.error("[Memory] LLM non disponible (%s), mode heuristique", e)
 
     def _init_persona_engine(self) -> None:
         """Initialise le moteur de personnalité et d'empathie (Stage 9)."""
@@ -136,7 +136,7 @@ class MemoryAgent:
             self._persona_engine.initialize()
             logger.info("[Memory] PersonaEngine initialisé")
         except Exception as e:
-            logger.error(f"[Memory] PersonaEngine non disponible ({e})")
+            logger.error("[Memory] PersonaEngine non disponible (%s)", e)
 
     async def _memory_llm_call(self, prompt: str) -> Optional[str]:
         """

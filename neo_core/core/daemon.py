@@ -183,26 +183,36 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
     )
     server = uvicorn.Server(uvi_config)
 
-    # Signal handler pour shutdown propre
+    # Signal handler pour shutdown propre (async-safe via loop.call_soon_threadsafe)
     shutdown_event = asyncio.Event()
+    loop = asyncio.get_event_loop()
 
     def _signal_handler(signum, frame):
-        logger.info("Signal %s reçu — arrêt du daemon", signal.Signals(signum).name)
-        shutdown_event.set()
+        # Signal handlers ne doivent pas appeler directement des méthodes asyncio
+        # call_soon_threadsafe est la seule méthode asyncio safe depuis un signal handler
+        try:
+            loop.call_soon_threadsafe(shutdown_event.set)
+        except RuntimeError:
+            # Loop fermée — fallback direct
+            shutdown_event.set()
 
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
-    # SIGHUP → reload config à chaud
+    # SIGHUP → reload config à chaud (async-safe)
     def _sighup_handler(signum, frame):
-        logger.info("SIGHUP reçu — rechargement de la configuration")
+        def _do_reload():
+            try:
+                from neo_core.core.registry import core_registry
+                cfg = core_registry.get_config()
+                cfg.reload()
+                logger.info("Configuration rechargée avec succès")
+            except Exception as e:
+                logger.error("Échec du rechargement de config: %s", e)
         try:
-            from neo_core.core.registry import core_registry
-            cfg = core_registry.get_config()
-            cfg.reload()
-            logger.info("Configuration rechargée avec succès")
-        except Exception as e:
-            logger.error("Échec du rechargement de config: %s", e)
+            loop.call_soon_threadsafe(_do_reload)
+        except RuntimeError:
+            _do_reload()
 
     signal.signal(signal.SIGHUP, _sighup_handler)
 
@@ -347,10 +357,32 @@ def start(foreground: bool = False, host: str = "0.0.0.0", port: int = 8000) -> 
     _write_pid(os.getpid())
     logger.info("Neo Core daemon PID %d (background)", os.getpid())
 
-    # Rediriger stdin/stdout/stderr
-    sys.stdin = open(os.devnull, "r")
-    sys.stdout = open(str(_get_log_file()), "a")
-    sys.stderr = open(str(_get_log_file()), "a")
+    # Rediriger stdin/stdout/stderr — fermer les anciens pour éviter les fuites de FD
+    _old_stdin = sys.stdin
+    _old_stdout = sys.stdout
+    _old_stderr = sys.stderr
+
+    _new_stdin = open(os.devnull, "r")
+    _new_stdout = open(str(_get_log_file()), "a")
+    _new_stderr = open(str(_get_log_file()), "a")
+
+    sys.stdin = _new_stdin
+    sys.stdout = _new_stdout
+    sys.stderr = _new_stderr
+
+    # Fermer les anciens descripteurs (hérités du parent)
+    try:
+        _old_stdin.close()
+    except Exception:
+        pass
+    try:
+        _old_stdout.close()
+    except Exception:
+        pass
+    try:
+        _old_stderr.close()
+    except Exception:
+        pass
 
     try:
         asyncio.run(_run_daemon(host=host, port=port))
@@ -358,6 +390,12 @@ def start(foreground: bool = False, host: str = "0.0.0.0", port: int = 8000) -> 
         logger.error("Daemon crash: %s", e)
     finally:
         _remove_pid()
+        # Fermer proprement les nouveaux descripteurs
+        for f in (_new_stdin, _new_stdout, _new_stderr):
+            try:
+                f.close()
+            except Exception:
+                pass
         sys.exit(0)
 
 

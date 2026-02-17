@@ -39,19 +39,20 @@ class CoreRegistry:
     def __new__(cls) -> "CoreRegistry":
         with cls._lock:
             if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
+                inst = super().__new__(cls)
+                # Initialise les attributs DANS le lock pour éviter la race condition
+                inst._memory = None
+                inst._brain = None
+                inst._vox = None
+                inst._config = None
+                inst._bootstrap_lock = threading.Lock()
+                inst._initialized = True
+                cls._instance = inst
             return cls._instance
 
     def __init__(self):
-        if self._initialized:
-            return
-        self._memory = None
-        self._brain = None
-        self._vox = None
-        self._config = None
-        self._bootstrap_lock = threading.Lock()
-        self._initialized = True
+        # Tout est initialisé dans __new__ sous le lock — rien à faire ici
+        pass
 
     def _bootstrap(self) -> None:
         """Bootstrap les 3 agents une seule fois."""
@@ -140,6 +141,27 @@ class CoreRegistry:
         """Reset le singleton lui-même (tests uniquement)."""
         with cls._lock:
             cls._instance = None
+
+    @classmethod
+    def _post_fork_reinit(cls) -> None:
+        """
+        Réinitialise les locks après un fork().
+
+        Après os.fork(), les threading.Lock hérités du parent peuvent être
+        dans un état incohérent (locked par un thread qui n'existe plus).
+        Cette méthode recrée les locks dans le processus enfant.
+        """
+        cls._lock = threading.Lock()
+        if cls._instance is not None:
+            cls._instance._bootstrap_lock = threading.Lock()
+
+
+# Enregistrer le callback post-fork (Linux/macOS uniquement)
+import os as _os
+try:
+    _os.register_at_fork(after_in_child=CoreRegistry._post_fork_reinit)
+except AttributeError:
+    pass  # Windows — pas de fork()
 
 
 # Instance globale unique
