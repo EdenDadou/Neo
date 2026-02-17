@@ -301,9 +301,16 @@ else
     log_warn "La commande 'neo' n'est pas encore fonctionnelle — le wizard la configurera"
 fi
 
-# Créer un symlink global pour que 'neo' soit accessible de partout
-ln -sf "${VENV_DIR}/bin/neo" /usr/local/bin/neo
-log_info "Commande 'neo' ajoutée au PATH (/usr/local/bin/neo)"
+# Créer un wrapper global pour que 'neo' soit accessible de partout
+# Le wrapper exécute en tant que user neo pour éviter les problèmes de permissions
+# (.env, data/ sont propriété de neo)
+# --preserve-env=TERM garde le terminal fonctionnel pour les commandes interactives
+cat > /usr/local/bin/neo << 'WRAPPER'
+#!/usr/bin/env bash
+exec sudo --preserve-env=TERM,LANG,LC_ALL -u neo /opt/neo-core/.venv/bin/neo "$@"
+WRAPPER
+chmod 755 /usr/local/bin/neo
+log_info "Commande 'neo' ajoutée au PATH (/usr/local/bin/neo → sudo -u neo)"
 
 # ═══════════════════════════════════════════════════════════
 #  Étape 5 : Permissions + dossier data

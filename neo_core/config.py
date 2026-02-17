@@ -21,7 +21,12 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Charge les variables d'environnement depuis .env à la racine du projet
-load_dotenv(_PROJECT_ROOT / ".env")
+try:
+    load_dotenv(_PROJECT_ROOT / ".env")
+except PermissionError:
+    logger.warning("Cannot read .env (permission denied) — using existing environment")
+except Exception as e:
+    logger.warning("Failed to load .env: %s — using existing environment", e)
 
 # Chemin vers la config du wizard
 _CONFIG_FILE = _PROJECT_ROOT / "data" / "neo_config.json"
