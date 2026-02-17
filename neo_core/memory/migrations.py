@@ -42,12 +42,13 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         ON memories(timestamp);
         """,
     ),
+    # Migration v3 removed: rate_limits table lives in brain.db, not memory_meta.db.
+    # We keep v3 as a no-op to avoid re-applying on existing DBs that already recorded v3.
     (
         3,
-        "Index sur rate_limits.timestamp pour cleanup",
+        "No-op (rate_limits index moved to brain migrations)",
         """
-        CREATE INDEX IF NOT EXISTS idx_rate_limits_timestamp
-        ON rate_limits(timestamp);
+        SELECT 1;
         """,
     ),
 ]

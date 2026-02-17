@@ -404,6 +404,8 @@ fi
 # --preserve-env=TERM garde le terminal fonctionnel pour les commandes interactives
 cat > /usr/local/bin/neo << 'WRAPPER'
 #!/usr/bin/env bash
+# cd to project root so that .env, data/ are accessible as neo user
+cd /opt/neo-core 2>/dev/null || true
 exec sudo --preserve-env=TERM,LANG,LC_ALL -u neo /opt/neo-core/.venv/bin/neo "$@"
 WRAPPER
 chmod 755 /usr/local/bin/neo

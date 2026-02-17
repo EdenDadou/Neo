@@ -126,6 +126,17 @@ class MemoryStore:
             )
         except ImportError:
             # Fallback sans ChromaDB — utilise uniquement SQLite
+            logger.info("ChromaDB non installé — mémoire vectorielle désactivée")
+            self._chroma_client = None
+            self._collection = None
+        except PermissionError as e:
+            # chromadb/pydantic tries to read .env in cwd — may fail with wrong perms
+            logger.warning("ChromaDB init failed (permission denied: %s) — mémoire vectorielle désactivée", e)
+            self._chroma_client = None
+            self._collection = None
+        except Exception as e:
+            # Any other error — degrade gracefully instead of crashing
+            logger.warning("ChromaDB init failed (%s) — mémoire vectorielle désactivée", e)
             self._chroma_client = None
             self._collection = None
 
