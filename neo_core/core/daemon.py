@@ -148,13 +148,28 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
     1. Le serveur API REST (uvicorn)
     2. Le heartbeat (pulse périodique)
     """
-    from neo_core.config import NeoConfig
+    from neo_core.core.registry import core_registry
     from neo_core.api.server import create_app
 
-    config = NeoConfig()
     logger.info("Neo Core daemon starting — host=%s port=%d", host, port)
 
-    # Créer l'app FastAPI
+    # Bootstrap unique via le CoreRegistry
+    # (la même instance sera utilisée par API, heartbeat et Telegram)
+    vox = None
+    try:
+        vox = core_registry.get_vox()
+        config = core_registry.get_config()
+        vox.start_new_session(config.user_name)
+        logger.info(
+            "CoreRegistry bootstrap OK — single Vox=%s, Brain=%s, Memory=%s",
+            id(vox), id(core_registry.get_brain()), id(core_registry.get_memory()),
+        )
+    except Exception as e:
+        logger.warning("CoreRegistry bootstrap failed: %s — Telegram disabled", e)
+        from neo_core.config import NeoConfig
+        config = NeoConfig()
+
+    # Créer l'app FastAPI (utilise aussi le CoreRegistry)
     app = create_app()
 
     # Lancer uvicorn en mode programmatique
@@ -177,16 +192,6 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
 
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
-
-    # Bootstrap Vox (partagé entre API, heartbeat et Telegram)
-    vox = None
-    try:
-        from neo_core.cli.chat import bootstrap
-        vox = bootstrap()
-        vox.start_new_session(config.user_name)
-        logger.info("Vox bootstrapped — session started for %s", config.user_name)
-    except Exception as e:
-        logger.warning("Vox bootstrap failed: %s — Telegram disabled", e)
 
     # Lancer les tâches
     async def run_server():

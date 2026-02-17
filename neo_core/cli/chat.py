@@ -420,24 +420,20 @@ def check_installation(config: NeoConfig) -> bool:
 
 def bootstrap():
     """
-    Initialise et connecte les 3 agents du Neo Core.
-    Lance le bootstrap des providers multi-LLM.
-    Retourne l'agent Vox prêt à communiquer.
+    Retourne l'instance unique de Vox via le CoreRegistry.
+
+    Le registry garantit qu'il n'existe qu'une seule instance
+    de Memory, Brain et Vox par processus — partagée entre
+    CLI chat, daemon, API et Telegram.
     """
-    import warnings
-    warnings.filterwarnings("ignore", category=DeprecationWarning)
-    warnings.filterwarnings("ignore", message=".*RuntimeWarning.*")
-    warnings.filterwarnings("ignore", message=".*renamed.*")
+    from neo_core.core.registry import core_registry
 
-    from neo_core.core.brain import Brain
-    from neo_core.core.memory_agent import MemoryAgent
-    from neo_core.core.vox import Vox
+    vox = core_registry.get_vox()
 
-    config = NeoConfig()
-
-    # Bootstrap des providers multi-LLM
+    # Afficher les providers actifs (première fois uniquement)
     try:
         from neo_core.providers.bootstrap import bootstrap_providers
+        config = core_registry.get_config()
         registry = bootstrap_providers(config)
         configured = registry.get_configured_providers()
         if configured:
@@ -446,17 +442,7 @@ def bootstrap():
                 f"({registry.get_stats()['total_models']} modèles)[/dim]"
             )
     except Exception:
-        pass  # Pas critique — fallback Anthropic hardcodé
-
-    # Instanciation des 3 agents
-    memory = MemoryAgent(config=config)
-    memory.initialize()
-
-    brain = Brain(config=config)
-    brain.connect_memory(memory)
-
-    vox = Vox(config=config)
-    vox.connect(brain=brain, memory=memory)
+        pass
 
     return vox
 

@@ -334,6 +334,6 @@ class TestSecurityInfra:
         assert "cryptography" in content
 
     def test_version_updated(self):
-        """La version est >= 1.3.0."""
+        """La version est correcte."""
         content = (self.PROJECT_ROOT / "pyproject.toml").read_text()
-        assert 'version = "1.' in content  # Accepte toute version 1.x
+        assert 'version = "0.' in content

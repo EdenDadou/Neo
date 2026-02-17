@@ -2,51 +2,44 @@
 Neo Core API Server — FastAPI Application
 ==========================================
 
-Creates and manages the FastAPI application and NeoCore singleton.
+Creates and manages the FastAPI application.
+Uses CoreRegistry for a single shared instance of Vox/Brain/Memory.
 """
 
-import asyncio
 import time
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from neo_core.config import NeoConfig
 
 logger = logging.getLogger(__name__)
 
 
 class NeoCore:
-    """Singleton wrapping Vox + Brain + Memory for the API."""
+    """Wrapper API autour du CoreRegistry partagé."""
 
     def __init__(self):
+        import asyncio
         self.vox = None
         self.config = None
         self._lock = asyncio.Lock()
         self._start_time = time.time()
         self._initialized = False
 
-    def initialize(self, config: NeoConfig = None):
-        """Bootstrap agents (same as chat.py bootstrap)."""
+    def initialize(self, config=None):
+        """Bootstrap via le CoreRegistry (instance unique partagée)."""
         if self._initialized:
             return
 
-        from neo_core.core.brain import Brain
-        from neo_core.core.memory_agent import MemoryAgent
-        from neo_core.core.vox import Vox
+        from neo_core.core.registry import core_registry
 
-        self.config = config or NeoConfig()
-        memory = MemoryAgent(config=self.config)
-        memory.initialize()
-        brain = Brain(config=self.config)
-        brain.connect_memory(memory)
-        self.vox = Vox(config=self.config)
-        self.vox.connect(brain=brain, memory=memory)
+        self.vox = core_registry.get_vox()
+        self.config = core_registry.get_config()
         self._initialized = True
-        logger.info("NeoCore API initialized")
+        logger.info("NeoCore API initialized (via CoreRegistry)")
 
     def reset(self):
-        """Reset singleton state (for testing)."""
+        """Reset state (for testing)."""
         self.vox = None
         self.config = None
         self._initialized = False
@@ -62,12 +55,9 @@ class NeoCore:
 neo_core = NeoCore()
 
 
-def create_app(config: NeoConfig = None) -> FastAPI:
+def create_app(config=None) -> FastAPI:
     """
     Create and configure FastAPI application.
-
-    Args:
-        config: Optional NeoConfig instance
 
     Returns:
         FastAPI application instance
@@ -84,7 +74,7 @@ def create_app(config: NeoConfig = None) -> FastAPI:
     app = FastAPI(
         title="Neo Core API",
         description="API REST pour Neo Core — Écosystème IA Multi-Agents",
-        version="1.0.0",
+        version="0.8.1",
         lifespan=lifespan,
     )
 

@@ -330,12 +330,11 @@ class TestTelegramInfra:
         assert hasattr(telegram, "save_telegram_config")
 
     def test_version_tag(self):
-        """La version est ≥ 1.5."""
+        """La version est correcte."""
         from pathlib import Path
         pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
         content = pyproject.read_text()
-        # Version doit être au moins 1.5
-        assert 'version = "1.' in content
+        assert 'version = "0.8' in content
 
     def test_telegram_optional_dep(self):
         """python-telegram-bot est dans les extras."""

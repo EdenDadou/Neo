@@ -241,6 +241,6 @@ class TestDaemonInfra:
         assert "install-service" in source or "install_service" in source
 
     def test_version_updated(self):
-        """La version est ≥ 1.4."""
+        """La version est correcte."""
         content = (PROJECT_ROOT / "pyproject.toml").read_text()
-        assert 'version = "1.' in content
+        assert 'version = "0.' in content

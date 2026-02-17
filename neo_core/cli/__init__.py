@@ -242,7 +242,7 @@ def main():
         print(f"  {CYAN}neo restart{RESET}\n")
 
     elif command == "version":
-        print("Neo Core v1.5.0 — Stage 18")
+        print("Neo Core v0.8.1")
 
     else:
         print(f"\n  Commande inconnue : '{sys.argv[1]}'")

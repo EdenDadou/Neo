@@ -398,11 +398,11 @@ class TestCLIIntegration:
         assert "providers" in source
 
     def test_cli_version_updated(self):
-        """Le CLI affiche la version 1.1.0."""
+        """Le CLI affiche la version."""
         import neo_core.cli
         import inspect
         source = inspect.getsource(neo_core.cli.main)
-        assert "v1." in source  # Accepte toute version 1.x
+        assert "v0." in source  # Accepte toute version 0.x
 
     def test_status_shows_providers(self):
         """Le status CLI importe bootstrap_providers."""
