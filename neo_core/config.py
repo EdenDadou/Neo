@@ -34,12 +34,15 @@ _CONFIG_FILE = _PROJECT_ROOT / "data" / "neo_config.json"
 
 def _load_wizard_config() -> dict:
     """Charge la configuration créée par le wizard d'installation."""
-    if _CONFIG_FILE.exists():
-        try:
-            with open(_CONFIG_FILE) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.debug("Failed to load wizard config: %s", e)
+    try:
+        if _CONFIG_FILE.exists():
+            try:
+                with open(_CONFIG_FILE) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                logger.debug("Failed to load wizard config: %s", e)
+    except PermissionError:
+        logger.warning("Cannot read %s (permission denied) — using defaults", _CONFIG_FILE)
     return {}
 
 

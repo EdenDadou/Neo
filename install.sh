@@ -256,17 +256,22 @@ echo "${NEO_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/neo
 chmod 440 /etc/sudoers.d/neo
 log_info "Droits sudo accordés à '$NEO_USER' (NOPASSWD)"
 
-# Ajouter le venv au PATH du user neo et du user courant
+# Ajouter le venv au PATH du user neo (accès direct aux binaires)
 NEO_PATH_LINE='export PATH="/opt/neo-core/.venv/bin:/usr/local/bin:$PATH"'
 if [[ -d /home/${NEO_USER} ]]; then
     grep -qF "/opt/neo-core/.venv/bin" /home/${NEO_USER}/.bashrc 2>/dev/null || \
         echo "$NEO_PATH_LINE" >> /home/${NEO_USER}/.bashrc
 fi
-# Aussi pour l'utilisateur qui lance l'install (souvent ubuntu)
+# Pour l'utilisateur courant (ubuntu), NE PAS ajouter le venv au PATH
+# car il faut passer par le wrapper /usr/local/bin/neo qui fait sudo -u neo.
+# On ajoute seulement /usr/local/bin s'il n'est pas déjà dans le PATH.
 REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
+WRAPPER_PATH_LINE='export PATH="/usr/local/bin:$PATH"'
 if [[ "$REAL_USER" != "root" ]] && [[ -f "/home/${REAL_USER}/.bashrc" ]]; then
-    grep -qF "/opt/neo-core/.venv/bin" "/home/${REAL_USER}/.bashrc" 2>/dev/null || \
-        echo "$NEO_PATH_LINE" >> "/home/${REAL_USER}/.bashrc"
+    # Nettoyer l'ancien PATH qui incluait le venv (corrige les installs précédentes)
+    sed -i '\|/opt/neo-core/.venv/bin|d' "/home/${REAL_USER}/.bashrc" 2>/dev/null || true
+    grep -qF "/usr/local/bin" "/home/${REAL_USER}/.bashrc" 2>/dev/null || \
+        echo "$WRAPPER_PATH_LINE" >> "/home/${REAL_USER}/.bashrc"
     log_info "PATH mis à jour pour l'utilisateur '${REAL_USER}'"
 fi
 
