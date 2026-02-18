@@ -27,7 +27,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
@@ -107,6 +107,8 @@ class Sidebar(Static):
     heartbeat_active: reactive[bool] = reactive(False)
     heartbeat_pulses: reactive[int] = reactive(0)
     brain_pending: reactive[int] = reactive(0)
+    active_tasks: reactive[list] = reactive(list, always_update=True)
+    active_epics: reactive[list] = reactive(list, always_update=True)
 
     def render(self) -> Text:
         t = Text()
@@ -128,6 +130,39 @@ class Sidebar(Static):
         # Vox
         t.append(f"  Vox     ● ", style="green")
         t.append(f"{self.vox_status}\n\n", style="green")
+
+        # Epics en cours
+        t.append("◆ Epics\n", style="bold cyan")
+        epics = self.active_epics
+        if epics:
+            status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
+            for epic in epics[:5]:
+                icon = status_icons.get(epic.get("status", ""), "?")
+                desc = epic.get("description", "?")
+                if len(desc) > 18:
+                    desc = desc[:17] + "…"
+                progress = epic.get("progress", "")
+                t.append(f"  {icon} {desc}\n", style="white")
+                if progress:
+                    t.append(f"     {progress}\n", style="dim")
+        else:
+            t.append("  aucun\n", style="dim")
+        t.append("\n")
+
+        # Tâches en cours
+        t.append("◆ Tâches\n", style="bold cyan")
+        tasks = self.active_tasks
+        if tasks:
+            for task in tasks[:8]:
+                status = task.get("status", "")
+                desc = task.get("description", "?")
+                if len(desc) > 20:
+                    desc = desc[:19] + "…"
+                icon = "🔄" if status == "in_progress" else "⏳"
+                t.append(f"  {icon} {desc}\n", style="white" if status == "in_progress" else "dim")
+        else:
+            t.append("  aucune\n", style="dim")
+        t.append("\n")
 
         # Heartbeat
         t.append("◆ Heartbeat\n", style="bold cyan")
@@ -153,38 +188,26 @@ class NeoTUI(App):
     """Neo Core — Terminal User Interface."""
 
     CSS = """
-    Screen {
-        layout: grid;
-        grid-size: 2;
-        grid-columns: 1fr 24;
-        grid-rows: 1fr auto auto;
+    #main-row {
+        height: 1fr;
     }
 
     #chat-area {
-        row-span: 1;
+        width: 1fr;
         border: solid $primary;
         padding: 0 1;
         scrollbar-size: 1 1;
     }
 
     #sidebar {
-        row-span: 1;
+        width: 26;
         border: solid $secondary;
         padding: 1;
     }
 
-    #input-area {
-        column-span: 2;
-        height: 3;
-        padding: 0 1;
-    }
-
     #input-field {
         dock: bottom;
-    }
-
-    Footer {
-        column-span: 2;
+        margin: 0 0;
     }
     """
 
@@ -226,13 +249,13 @@ class NeoTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield RichLog(id="chat-area", wrap=True, highlight=True, markup=True)
-        yield Sidebar(id="sidebar")
-        with Vertical(id="input-area"):
-            yield Input(
-                placeholder=f"  {self.config.user_name} > tapez votre message...",
-                id="input-field",
-            )
+        with Horizontal(id="main-row"):
+            yield RichLog(id="chat-area", wrap=True, highlight=True, markup=True)
+            yield Sidebar(id="sidebar")
+        yield Input(
+            placeholder=f"  {self.config.user_name} > tapez votre message...",
+            id="input-field",
+        )
         yield Footer()
 
     # ── Mount : initialisation ───────────────────────────────
@@ -560,6 +583,52 @@ class NeoTUI(App):
                             sidebar.brain_status = str(agents["Brain"])
                         if "Memory" in agents:
                             sidebar.memory_status = str(agents["Memory"])
+                        # Heartbeat info from status if available
+                        hb = data.get("heartbeat", {})
+                        if hb:
+                            sidebar.heartbeat_active = hb.get("running", True)
+                            sidebar.heartbeat_pulses = hb.get("pulse_count", 0)
+                        else:
+                            # Daemon actif = heartbeat actif
+                            sidebar.heartbeat_active = True
+                except Exception:
+                    pass
+
+                # Charger epics via API
+                try:
+                    resp = await self._http_client.get(
+                        f"{self.api_url}/epics",
+                        headers=self._api_headers,
+                        timeout=5.0,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        epics = data.get("epics", [])
+                        sidebar.active_epics = [
+                            e for e in epics
+                            if e.get("status") in ("pending", "in_progress")
+                        ]
+                except Exception:
+                    pass
+
+                # Charger tâches via API
+                try:
+                    resp = await self._http_client.get(
+                        f"{self.api_url}/tasks",
+                        headers=self._api_headers,
+                        timeout=5.0,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        raw_tasks = data.get("tasks", [])
+                        # Convertir les strings en dicts si nécessaire
+                        task_list = []
+                        for t in raw_tasks[:10]:
+                            if isinstance(t, dict):
+                                task_list.append(t)
+                            elif isinstance(t, str):
+                                task_list.append({"description": t, "status": "pending"})
+                        sidebar.active_tasks = task_list
                 except Exception:
                     pass
 
@@ -573,6 +642,29 @@ class NeoTUI(App):
                     status = self._heartbeat_manager.get_status()
                     sidebar.heartbeat_active = status.get("running", False)
                     sidebar.heartbeat_pulses = status.get("pulse_count", 0)
+
+                # Charger epics/tâches en local
+                if self.vox.memory and self.vox.memory.is_initialized:
+                    try:
+                        registry = self.vox.memory.task_registry
+                        if registry:
+                            epics = registry.get_all_epics(limit=10)
+                            sidebar.active_epics = [
+                                {"description": e.description, "status": e.status,
+                                 "progress": f"{sum(1 for t in registry.get_epic_tasks(e.id) if t.status == 'done')}/{len(registry.get_epic_tasks(e.id))}"}
+                                for e in epics if e.status in ("pending", "in_progress")
+                            ]
+                    except Exception:
+                        pass
+                    try:
+                        report = self.vox.memory.get_tasks_report()
+                        raw = report.get("tasks", [])
+                        sidebar.active_tasks = [
+                            {"description": t, "status": "pending"} if isinstance(t, str)
+                            else t for t in raw[:10]
+                        ]
+                    except Exception:
+                        pass
 
         except NoMatches:
             pass
