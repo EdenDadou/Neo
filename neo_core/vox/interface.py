@@ -138,7 +138,7 @@ class Vox:
     conversation_history: list = field(default_factory=list)
     _agent_statuses: dict[str, AgentStatus] = field(default_factory=dict)
     _llm: Optional[object] = None
-    _mock_mode: bool = False
+    _force_mock: bool = False
     _model_config: Optional[object] = None
     _on_thinking_callback: Optional[object] = None  # Callable[[str], None]
     _on_brain_done_callback: Optional[object] = None  # Callable[[str], None] — async brain result
@@ -154,7 +154,6 @@ class Vox:
             "Brain": AgentStatus(name="Brain"),
             "Memory": AgentStatus(name="Memory"),
         }
-        self._mock_mode = self.config.is_mock_mode()
         self._model_config = get_agent_model("vox")
 
         # Lock pour protéger _current_session contre les accès concurrents
@@ -165,8 +164,27 @@ class Vox:
         db_path = self.config.memory.storage_path / "conversations.db"
         self._conversation_store = ConversationStore(db_path)
 
-        if not self._mock_mode:
+        if not self.config.is_mock_mode():
             self._init_llm()
+
+    @property
+    def _mock_mode(self) -> bool:
+        """Vérifie dynamiquement si Vox est en mode mock.
+
+        Re-vérifie la config à chaque appel. Si la clé API devient
+        disponible après le démarrage, Vox s'auto-initialise.
+        """
+        if self._force_mock:
+            return True
+        if self.config.is_mock_mode():
+            return True
+        # La clé est disponible mais le LLM n'est pas encore initialisé
+        if self._llm is None and not is_oauth_token(self.config.llm.api_key or ""):
+            try:
+                self._init_llm()
+            except Exception:
+                pass  # Vox fonctionne en passthrough sans LLM
+        return False
 
     def _init_llm(self) -> None:
         """Initialise le LLM dédié de Vox (Haiku — rapide et léger)."""

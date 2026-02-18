@@ -169,7 +169,7 @@ class Brain:
     config: NeoConfig = field(default_factory=lambda: default_config)
     memory: Optional[MemoryAgent] = None
     _llm: Optional[object] = None
-    _mock_mode: bool = False
+    _force_mock: bool = False
     _oauth_mode: bool = False
     _auth_method: str = ""
     _anthropic_client: Optional[object] = None
@@ -181,7 +181,6 @@ class Brain:
     _self_patcher: Optional[object] = None
 
     def __post_init__(self):
-        self._mock_mode = self.config.is_mock_mode()
         self._model_config = get_agent_model("brain")
         self._worker_manager = WorkerLifecycleManager()
 
@@ -190,8 +189,29 @@ class Brain:
         self._retry_config = retry
         self._health = health
 
-        if not self._mock_mode:
+        if not self.config.is_mock_mode():
             self._init_llm()
+
+    @property
+    def _mock_mode(self) -> bool:
+        """Vérifie dynamiquement si Brain est en mode mock.
+
+        Au lieu de cacher le flag une fois au bootstrap, re-vérifie la config
+        à chaque appel. Si la clé API devient disponible après le démarrage
+        (ex: vault chargé tardivement), Brain s'auto-initialise.
+        """
+        if self._force_mock:
+            return True
+        if self.config.is_mock_mode():
+            return True
+        # La clé est disponible mais le LLM n'est pas encore initialisé
+        if self._llm is None:
+            try:
+                self._init_llm()
+            except Exception:
+                self._force_mock = True
+                return True
+        return False
 
     @property
     def factory(self) -> WorkerFactory:
@@ -285,7 +305,7 @@ class Brain:
                 self._init_langchain(api_key)
         except Exception as e:
             logger.error("Impossible d'initialiser le LLM: %s", e)
-            self._mock_mode = True
+            self._force_mock = True
             self._auth_method = "mock"
 
     def _init_oauth(self, token: str) -> None:
