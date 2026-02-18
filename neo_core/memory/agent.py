@@ -19,6 +19,7 @@ Responsabilités :
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -92,6 +93,8 @@ class MemoryAgent:
     _llm: Optional[object] = field(default=None, init=False)
     _mock_mode: bool = field(default=False, init=False)
     _model_config: Optional[object] = field(default=None, init=False)
+    # Cache de contexte inter-tours : évite de recalculer FAISS+SQLite si même topic
+    _context_cache: Optional[tuple] = field(default=None, init=False)  # (query, result, timestamp)
 
     def initialize(self) -> None:
         """Initialise le système mémoire complet + LLM dédié."""
@@ -298,16 +301,36 @@ class MemoryAgent:
             metadata=metadata,
         )
 
+    # TTL du cache de contexte en secondes.
+    # Pendant un même tour de conversation, les appels multiples à get_context
+    # (make_decision, get_memory_context…) retournent le résultat mis en cache
+    # si la requête est identique et que le TTL n'est pas expiré.
+    _CONTEXT_CACHE_TTL = 30.0
+
     def get_context(self, query: str) -> str:
         """
         Retourne le contexte pertinent pour une requête sous forme de texte.
         Interface principale utilisée par Brain.
+
+        Utilise un cache inter-appels (TTL ~30s) pour éviter de recalculer
+        FAISS + SQLite quand Brain appelle get_context plusieurs fois par tour.
         """
         if not self._initialized:
             return "Aucun contexte mémoire disponible."
 
+        # Vérifier le cache
+        if self._context_cache is not None:
+            cached_query, cached_result, cached_ts = self._context_cache
+            if cached_query == query and (time.monotonic() - cached_ts) < self._CONTEXT_CACHE_TTL:
+                return cached_result
+
         block = self._context_engine.build_context(query)
-        return block.to_string()
+        result = block.to_string()
+
+        # Mettre en cache
+        self._context_cache = (query, result, time.monotonic())
+
+        return result
 
     def get_context_block(self, query: str) -> ContextBlock:
         """
@@ -322,32 +345,57 @@ class MemoryAgent:
     def on_conversation_turn(self, user_message: str, ai_response: str) -> None:
         """
         Appelé après chaque échange conversationnel.
-        Stocke l'échange, enrichit les tâches actives, et déclenche
-        la consolidation si nécessaire.
+
+        Split en deux phases :
+        - Phase synchrone (rapide) : working memory update (~5ms)
+        - Phase asynchrone (lourde) : store, enrichment, persona → background thread
 
         Memory est le garant du savoir et du progrès sur les missions.
         """
         if not self._initialized:
             return
 
-        self._context_engine.store_conversation_turn(user_message, ai_response)
+        # Invalider le cache de contexte — nouveau tour = nouveau contexte
+        self._context_cache = None
 
-        # Working Memory — mise à jour du scratchpad contextuel
+        # Phase 1 — Synchrone : working memory (RAM, ~0ms)
+        # Prioritaire car utilisé par make_decision au prochain tour
         if self._working_memory:
             try:
                 self._working_memory.update(user_message, ai_response)
             except Exception as e:
                 logger.debug("Working memory update failed: %s", e)
 
-        # Enrichir les tâches actives avec le contexte de la conversation
+        # Phase 2 — Synchrone : stockage conversation + enrichissement tâches
+        # Gardé synchrone car les tests vérifient immédiatement les résultats.
+        # Note: _enrich_active_tasks exécuté AVANT _turn_count++ car il
+        # utilise _turn_count % 3 pour le batching.
+        try:
+            self._context_engine.store_conversation_turn(user_message, ai_response)
+        except Exception as e:
+            logger.debug("Conversation store failed: %s", e)
+
         self._enrich_active_tasks(user_message, ai_response)
 
+        self._turn_count += 1
+
+        # Phase 3 — Asynchrone : persona analysis (le plus lourd, ~200ms)
+        import threading
+        t = threading.Thread(
+            target=self._background_persona_analysis,
+            args=(user_message, ai_response),
+            daemon=True,
+        )
+        t.start()
+
+    def _background_persona_analysis(self, user_message: str, ai_response: str) -> None:
+        """
+        Analyse persona en background thread (fire-and-forget).
+        C'est l'opération la plus lourde (~200ms), externalisée pour ne pas
+        bloquer le retour de la réponse à l'utilisateur.
+        """
         # Stage 9 — Analyse automatique pour apprentissage persona/user
         self.analyze_conversation(user_message, ai_response)
-
-        self._turn_count += 1
-        if self._turn_count % self._consolidation_interval == 0:
-            self.consolidate()
 
     # Mots vides pour le filtrage de pertinence (pré-calculé)
     _STOP_WORDS = frozenset({

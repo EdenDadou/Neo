@@ -67,8 +67,8 @@ class ModelInfo:
 
 
 @dataclass
-class TestResult:
-    """Résultat du test d'un modèle."""
+class ModelTestResult:
+    """Résultat du test d'un modèle (renommé pour éviter le conflit avec pytest)."""
     model_id: str
     success: bool
     latency_ms: float = 0.0
@@ -163,7 +163,7 @@ class LLMProvider(ABC):
         """
         ...
 
-    async def test_model(self, model: str) -> TestResult:
+    async def test_model(self, model: str) -> ModelTestResult:
         """
         Teste un modèle avec un message simple.
 
@@ -180,7 +180,7 @@ class LLMProvider(ABC):
             )
             latency = (time.time() - start) * 1000
 
-            return TestResult(
+            return ModelTestResult(
                 model_id=f"{self.name}:{model}",
                 success=True,
                 latency_ms=latency,
@@ -189,7 +189,7 @@ class LLMProvider(ABC):
 
         except Exception as e:
             latency = (time.time() - start) * 1000
-            return TestResult(
+            return ModelTestResult(
                 model_id=f"{self.name}:{model}",
                 success=False,
                 latency_ms=latency,

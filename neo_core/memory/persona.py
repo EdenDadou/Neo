@@ -693,10 +693,19 @@ class PersonaEngine:
     # --- Persistence ---
 
     def _persist_persona(self) -> None:
-        """Sauvegarde la personnalité dans le store."""
+        """
+        Sauvegarde la personnalité dans le store (upsert).
+        Supprime l'ancien record avant d'en créer un nouveau
+        pour éviter l'accumulation de copies.
+        """
         if not self.store or not self._initialized:
             return
         try:
+            # Upsert : supprimer l'ancien avant de stocker le nouveau
+            old_records = self.store.search_by_source("persona:full", limit=5)
+            for old in old_records:
+                self.store.delete(old.id)
+
             content = json.dumps(self.persona.to_dict(), ensure_ascii=False, indent=2)
             self.store.store(
                 content=content,
@@ -709,10 +718,19 @@ class PersonaEngine:
             logger.error("[PersonaEngine] Erreur persistence persona: %s", e)
 
     def _persist_user_profile(self) -> None:
-        """Sauvegarde le profil utilisateur dans le store."""
+        """
+        Sauvegarde le profil utilisateur dans le store (upsert).
+        Supprime l'ancien record avant d'en créer un nouveau
+        pour éviter l'accumulation de copies.
+        """
         if not self.store or not self._initialized:
             return
         try:
+            # Upsert : supprimer l'ancien avant de stocker le nouveau
+            old_records = self.store.search_by_source("user:profile", limit=5)
+            for old in old_records:
+                self.store.delete(old.id)
+
             content = json.dumps(self.user_profile.to_dict(), ensure_ascii=False, indent=2)
             self.store.store(
                 content=content,

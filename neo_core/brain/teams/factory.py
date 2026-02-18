@@ -112,19 +112,26 @@ class WorkerFactory:
     config: NeoConfig
     memory: Optional[MemoryAgent] = None
 
+    # Seuil minimum de confiance pour la classification par heuristiques.
+    # En dessous de ce score, on tente un fallback LLM (si disponible).
+    CLASSIFICATION_CONFIDENCE_THRESHOLD = 2
+
     def classify_task(self, request: str) -> WorkerType:
         """
         Classifie une requête en type de Worker.
 
-        Utilise des heuristiques par mots-clés (fonctionne en mock ET réel).
-        En mode réel, pourrait être enrichi par le LLM (via Brain).
+        Pipeline :
+        1. Heuristiques par mots-clés (instantané, mock-compatible)
+        2. Si le score est trop faible (< seuil) et qu'un LLM est disponible,
+           tente une classification LLM en fallback
+        3. Sinon → GENERIC
 
         Returns:
             WorkerType correspondant à la requête
         """
         request_lower = request.lower()
 
-        # Score par type
+        # Score par type via heuristiques
         scores: dict[WorkerType, int] = {}
 
         for worker_type, patterns in _CLASSIFICATION_PATTERNS.items():
@@ -136,9 +143,46 @@ class WorkerFactory:
                 scores[worker_type] = score
 
         if scores:
-            # Retourner le type avec le score le plus élevé
             best_type = max(scores, key=scores.get)
+            best_score = scores[best_type]
+
+            # Confiance suffisante → retourner directement
+            if best_score >= self.CLASSIFICATION_CONFIDENCE_THRESHOLD:
+                return best_type
+
+            # Score faible → stocker comme candidat, on tentera le LLM
+            self._last_heuristic_candidate = (best_type, best_score)
             return best_type
+
+        # Aucun match heuristique → GENERIC
+        self._last_heuristic_candidate = None
+        return WorkerType.GENERIC
+
+    async def classify_task_with_llm(self, request: str, llm_call) -> WorkerType:
+        """
+        Classification LLM en fallback quand les heuristiques sont insuffisantes.
+
+        Appelé par Brain quand classify_task retourne GENERIC ou un score faible.
+        Le LLM choisit parmi les types de workers disponibles.
+        """
+        worker_types_str = ", ".join(wt.value for wt in WorkerType if wt != WorkerType.GENERIC)
+
+        prompt = (
+            f"Classifie cette requête utilisateur dans exactement UN type de worker.\n"
+            f"Types disponibles : {worker_types_str}\n"
+            f"Requête : {request[:300]}\n\n"
+            f"Réponds avec UNIQUEMENT le type (un seul mot, ex: researcher). "
+            f"Si aucun type ne correspond, réponds 'generic'."
+        )
+
+        try:
+            result = await llm_call(prompt)
+            result_clean = result.strip().lower().replace("'", "").replace('"', '')
+            return WorkerType(result_clean)
+        except (ValueError, TypeError):
+            logger.debug("LLM classification returned invalid type: %s", result if 'result' in dir() else "error")
+        except Exception as e:
+            logger.debug("LLM classification failed: %s", e)
 
         return WorkerType.GENERIC
 

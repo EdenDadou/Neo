@@ -37,7 +37,13 @@ def memory_agent(config):
     from neo_core.memory.agent import MemoryAgent
     agent = MemoryAgent(config=config)
     agent.initialize()
-    return agent
+    yield agent
+    # Cleanup : fermer les connexions (SQLite, FAISS)
+    try:
+        if hasattr(agent, '_store') and agent._store:
+            agent._store.close()
+    except Exception:
+        pass
 
 
 @pytest.fixture

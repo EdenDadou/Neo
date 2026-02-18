@@ -143,6 +143,29 @@ def web_fetch_tool(url: str) -> str:
             f"Page chargée avec succès. Contenu simulé de la page web."
         )
 
+    # Validation URL — bloquer les schémas non-HTTP et les IP internes (SSRF)
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return f"Erreur: Schéma URL non autorisé: {parsed.scheme} (seuls http/https sont acceptés)"
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return "Erreur: URL invalide (pas de hostname)"
+        # Bloquer les IP privées / localhost
+        import ipaddress
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return f"Erreur: Accès aux adresses internes interdit ({hostname})"
+        except ValueError:
+            pass  # C'est un hostname, pas une IP — OK
+        _blocked_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "metadata.google.internal"}
+        if hostname.lower() in _blocked_hosts:
+            return f"Erreur: Accès à {hostname} interdit"
+    except Exception as e:
+        return f"Erreur validation URL: {e}"
+
     try:
         import httpx
         import re as _re
@@ -207,7 +230,7 @@ def _is_path_safe(path: str, roots: list[Path]) -> bool:
     """Vérifie qu'un chemin est dans les répertoires autorisés."""
     resolved = Path(path).resolve()
     if not roots:
-        return True  # Pas de restriction si aucune racine définie
+        return False  # Deny-by-default si aucune racine autorisée définie
     return any(resolved == root or resolved.is_relative_to(root) for root in roots)
 
 
@@ -368,13 +391,13 @@ try:
 except (ValueError, resource.error):
     pass
 
-# Exécuter le code utilisateur
-with open("{tmp_path}") as _f:
+# Exécuter le code utilisateur (chemin passé via sys.argv[1])
+with open(sys.argv[1]) as _f:
     exec(_f.read())
 """)
 
         result = subprocess.run(
-            [sys.executable, "-c", wrapper_code],
+            [sys.executable, "-c", wrapper_code, tmp_path],
             capture_output=True,
             text=True,
             timeout=_CODE_TIMEOUT_SECONDS + 5,

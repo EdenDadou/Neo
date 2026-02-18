@@ -57,7 +57,8 @@ def _get_vault():
         vault = KeyVault(data_dir=_DATA_DIR)
         vault.initialize()
         return vault
-    except Exception:
+    except Exception as e:
+        logger.debug("KeyVault init failed: %s", e)
         return None
 
 
@@ -104,8 +105,8 @@ def load_credentials() -> dict:
             logger.debug("Vault read for OAuth failed: %s", e)
             try:
                 vault.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("vault.close() failed: %s", exc)
 
     # 2. Fallback : fichier JSON legacy
     if CREDENTIALS_FILE.exists():
@@ -142,8 +143,8 @@ def save_credentials(access_token: str, refresh_token: str, expires_at: float,
             logger.debug("Vault write for OAuth failed: %s — fallback to JSON", e)
             try:
                 vault.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("vault.close() failed: %s", exc)
 
     # 2. Fichier JSON legacy — NE STOCKE PLUS les tokens en clair.
     #    Écrit seulement un marqueur de présence (sans secrets).
@@ -199,7 +200,8 @@ def refresh_access_token(refresh_token: str) -> Optional[dict]:
                 }
 
         return None
-    except Exception:
+    except Exception as e:
+        logger.debug("refresh_access_token failed: %s", e)
         return None
 
 
@@ -306,8 +308,8 @@ def get_api_key_from_oauth() -> Optional[str]:
         except Exception:
             try:
                 vault.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("vault.close() failed: %s", exc)
 
     creds = load_credentials()
     existing_key = creds.get("api_key")
@@ -356,8 +358,8 @@ def get_best_auth() -> dict:
         except Exception:
             try:
                 vault.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("vault.close() failed: %s", exc)
 
     creds = load_credentials()
     existing_key = creds.get("api_key")

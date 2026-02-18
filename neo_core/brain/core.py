@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -53,153 +54,10 @@ from neo_core.oauth import (
 )
 from neo_core.brain.teams.factory import WorkerFactory, TaskAnalysis
 from neo_core.brain.teams.worker import WorkerType, WorkerResult, WorkerState
+from neo_core.brain.prompts import BRAIN_SYSTEM_PROMPT, DECOMPOSE_PROMPT, BrainDecision
 
 if TYPE_CHECKING:
     from neo_core.memory.agent import MemoryAgent
-
-BRAIN_SYSTEM_PROMPT = """Tu es Brain, le cortex exécutif du système Neo Core.
-Date et heure actuelles : {current_date}, {current_time}
-
-Ton rôle :
-- Tu reçois les requêtes structurées par Vox (l'interface humaine).
-- Tu analyses chaque requête et détermines la meilleure stratégie de réponse.
-- Tu consultes le contexte fourni par Memory pour enrichir tes réponses.
-- Tu coordonnes l'exécution des tâches et délègues aux Workers spécialisés si nécessaire.
-
-=== TES CAPACITÉS (ce que tu SAIS faire) ===
-
-🔍 RECHERCHE & WEB :
-- Chercher des informations actuelles sur internet (web_search via DuckDuckGo)
-- Récupérer et lire le contenu de pages web (web_fetch)
-- Répondre à des questions sur l'actualité, la météo, les scores, les prix crypto
-
-💻 CODE & ANALYSE :
-- Écrire, analyser et débugger du code dans tous les langages
-- Exécuter du Python dans un sandbox sécurisé (code_execute)
-- Analyser des données, calculer, transformer
-
-📄 FICHIERS :
-- Lire et écrire des fichiers (file_read, file_write)
-- Traiter des documents, des CSV, du texte
-
-📋 GESTION DE TÂCHES :
-- Créer des tâches unitaires et suivre leur avancement
-- Créer des Epics (projets complexes décomposés en sous-tâches coordonnées)
-- Déléguer aux Workers spécialisés et orchestrer leur exécution
-
-🤖 WORKERS SPÉCIALISÉS :
-- Researcher : recherche web, investigation, collecte d'infos
-- Coder : écriture/debug de code, exécution sandbox
-- Analyst : analyse de données, tendances, patterns
-- Writer : rédaction (articles, emails, rapports, documents)
-- Summarizer : synthèse et résumé de contenus
-- Translator : traduction multilingue
-- Generic : tâches polyvalentes
-
-🧠 MÉMOIRE & APPRENTISSAGE :
-- Mémoriser les conversations, préférences et faits importants
-- Rechercher dans la mémoire par pertinence sémantique
-- Apprendre des succès et échecs pour s'améliorer
-- S'auto-corriger via des patches comportementaux (self-patching)
-
-🔌 PLUGINS :
-- Charger et utiliser des plugins personnalisés (data/plugins/)
-- Générer automatiquement de nouveaux outils si un besoin récurrent est détecté
-
-📌 COMMANDES SLASH (disponibles côté CLI et Telegram) :
-/help — Aide et liste des commandes
-/status — État du système (uptime, mémoire, LLM)
-/tasks — Registre des tâches en cours
-/epics — Registre des Epics (projets multi-tâches)
-/heartbeat — Rapport du cycle autonome
-/persona — Personnalité de Neo
-/profile — Profil utilisateur appris
-/sessions — Liste des sessions de conversation
-/skills — Compétences acquises par apprentissage
-/reflect — Lancer une auto-réflexion
-IMPORTANT : Quand l'utilisateur tape une de ces commandes, tu dois répondre
-avec les infos demandées. Tu peux aussi créer des Epics de ta propre initiative
-quand une tâche est complexe (3+ sous-tâches).
-
-═══ COMMANDEMENT FONDAMENTAL ═══
-NEO PEUT TOUT FAIRE.
-Tu ne dis JAMAIS "je ne peux pas", "ce n'est pas possible", "je n'ai pas accès",
-"je suis limité" ou toute variante. Tu as TOUS les outils nécessaires.
-Si tu ne sais pas comment faire → cherche avec le Researcher.
-Si tu as besoin de code → lance le Coder.
-Si tu as besoin de données → utilise web_search + web_fetch.
-Si tu as besoin de traitement → utilise code_execute.
-Il n'y a PAS de sandbox isolé. Tu as requests, urllib, socket, pandas, numpy,
-scikit-learn, et TOUT ce qui est installé sur le système.
-Tu as SQLite et les fichiers locaux. Tu as un scheduler (heartbeat).
-Tu as accès à l'intégralité du système.
-
-IMPORTANT : Quand l'utilisateur te demande de faire quelque chose,
-FAIS-LE au lieu de dire que tu ne peux pas. Utilise tes Workers et outils.
-Si on te demande de chercher quelque chose → lance le Researcher.
-Si on te demande du code → lance le Coder.
-Si on te demande un texte → lance le Writer.
-
-⚠️ CE QUE TU NE DOIS JAMAIS DIRE :
-- "Je n'ai pas accès au réseau/internet" → FAUX, tu as web_search et web_fetch
-- "Je ne peux pas exécuter de code" → FAUX, tu as code_execute
-- "Je suis dans un sandbox isolé" → FAUX, tu tournes sur un VPS complet
-- "Je ne peux pas installer de packages" → FAUX, le Coder peut pip install
-- "Je n'ai pas de base de données" → FAUX, tu as SQLite + la mémoire persistante
-- "Je ne peux pas faire de scraping" → FAUX, requests et beautifulsoup sont dispo
-- "Ceci nécessite un serveur externe" → FAUX, tu ES sur un serveur (VPS)
-
-Contexte mémoire :
-{memory_context}
-
-{user_context}
-
-Règles :
-- NEO PEUT TOUT FAIRE — c'est le commandement #0 (suprême).
-- NEO NE MENT JAMAIS — c'est le commandement #4. Sois toujours honnête et factuel.
-- Sois précis, stratégique et orienté résultat.
-- Si une tâche est complexe, décompose-la en sous-tâches ou crée un Epic.
-- N'indique JAMAIS de limitation technique — trouve une solution.
-- Tu es le décideur final sur la stratégie d'exécution.
-- Réponds de manière concise et naturelle, pas de markdown excessif.
-- Adapte ton approche au profil de l'utilisateur (niveau technique, préférences).
-"""
-
-# Prompt pour la décomposition LLM de tâches
-DECOMPOSE_PROMPT = """Analyse cette requête et détermine comment la traiter.
-
-Requête : {request}
-
-Contexte mémoire : {memory_context}
-
-Réponds en JSON strict avec cette structure :
-{{
-  "action": "direct_response" ou "delegate_worker",
-  "worker_type": "researcher" | "coder" | "summarizer" | "analyst" | "writer" | "translator" | "generic",
-  "subtasks": ["sous-tâche 1", "sous-tâche 2", ...],
-  "reasoning": "explication courte de ta décision",
-  "confidence": 0.0 à 1.0
-}}
-
-Règles :
-- "direct_response" si c'est une question simple, une conversation, ou une demande rapide
-- "delegate_worker" si ça nécessite de la recherche, du code, de l'analyse, ou une tâche structurée
-- Le worker_type doit correspondre au type de tâche
-- Les subtasks doivent être des actions concrètes et ordonnées
-- Réponds UNIQUEMENT avec le JSON, rien d'autre.
-"""
-
-
-@dataclass
-class BrainDecision:
-    """Représente une décision prise par Brain."""
-    action: str  # "direct_response" | "delegate_worker" | "delegate_crew"
-    response: Optional[str] = None
-    subtasks: list[str] = field(default_factory=list)
-    confidence: float = 1.0
-    worker_type: Optional[str] = None  # Stage 3 : type de worker recommandé
-    reasoning: str = ""  # Stage 3 : justification de la décision
-    metadata: dict = field(default_factory=dict)  # Level 3 : patch overrides (temperature, etc.)
 
 
 class WorkerLifecycleManager:
@@ -444,13 +302,11 @@ class Brain:
     def _init_oauth_bearer(self, token: str) -> None:
         """Init Bearer + beta header (méthode OpenClaw)."""
         import anthropic
-        import httpx
 
         valid_token = get_valid_access_token()
         if not valid_token:
             valid_token = token
 
-        custom_transport = httpx.AsyncHTTPTransport()
         self._anthropic_client = anthropic.AsyncAnthropic(
             api_key="dummy",
             default_headers={
@@ -499,13 +355,18 @@ class Brain:
         if self._factory:
             self._factory.memory = memory
 
-    def get_memory_context(self, request: str) -> str:
+    def get_memory_context(
+        self, request: str,
+        working_context: str = "",
+        cached_learning_advice: object | None = None,
+    ) -> str:
         """
         Récupère le contexte pertinent depuis Memory.
         Inclut les conseils du LearningEngine si disponibles.
 
-        Optimisation v0.9.1 : le LearningEngine réutilise le cache sémantique
-        du MemoryStore (un seul embedding par requête au lieu de deux).
+        Optimisation v0.9.2 :
+        - working_context pré-chargé par process() (évite double appel)
+        - cached_learning_advice réutilisé depuis make_decision (évite double query)
         """
         if not self.memory:
             return "Aucun contexte mémoire disponible."
@@ -520,53 +381,130 @@ class Brain:
         context = self.memory.get_context(request)
 
         # Ajouter les conseils d'apprentissage au contexte
-        # Note : search_semantic est maintenant caché — pas de double embedding
+        # Réutilise le cached_learning_advice si déjà calculé dans make_decision
         try:
-            worker_type = self.factory.classify_task(request)
-            if worker_type != WorkerType.GENERIC:
-                advice = self.memory.get_learning_advice(request, worker_type.value)
-                learning_context = advice.to_context_string()
+            if cached_learning_advice:
+                learning_context = cached_learning_advice.to_context_string()
                 if learning_context:
                     context += f"\n\n=== Apprentissage ===\n{learning_context}"
+            else:
+                worker_type = self.factory.classify_task(request)
+                if worker_type != WorkerType.GENERIC:
+                    advice = self.memory.get_learning_advice(request, worker_type.value)
+                    learning_context = advice.to_context_string()
+                    if learning_context:
+                        context += f"\n\n=== Apprentissage ===\n{learning_context}"
         except Exception as e:
             logger.debug("Impossible de récupérer les conseils d'apprentissage: %s", e)
 
         # Ajouter le contexte de la mémoire de travail (Working Memory)
-        try:
-            working_ctx = self.memory.get_working_context()
-            if working_ctx:
-                context += f"\n\n=== Mémoire de travail ===\n{working_ctx}"
-        except Exception as e:
-            logger.debug("Impossible de récupérer la mémoire de travail: %s", e)
+        # Réutilise le working_context pré-chargé si disponible
+        if working_context:
+            context += f"\n\n=== Mémoire de travail ===\n{working_context}"
+        else:
+            try:
+                working_ctx = self.memory.get_working_context()
+                if working_ctx:
+                    context += f"\n\n=== Mémoire de travail ===\n{working_ctx}"
+            except Exception as e:
+                logger.debug("Impossible de récupérer la mémoire de travail: %s", e)
 
         return context
 
     # ─── Analyse et décision ────────────────────────────────
 
+    # Mots/expressions indiquant une requête dépendante du contexte précédent.
+    # Exclut les mots trop génériques ("ça", "cela") qui apparaissent dans
+    # des phrases courantes sans lien contextuel ("comment ça va ?").
+    _CONTEXT_DEPENDENT_RE = re.compile(
+        r"\b(continu|enchaîne|enchaine|la suite|on avance|pareil|"
+        r"même chose|fais[- ]le|do it|go ahead|next step|"
+        r"le même|la même|les mêmes|refais|recommence)\b",
+        re.IGNORECASE,
+    )
+
+    # Mots-clés indiquant des sous-tâches implicites (complexité élevée)
+    _COMPLEXITY_MULTI_ACTION = re.compile(
+        r"\b(puis|ensuite|après|et aussi|également|en plus|aussi|"
+        r"then|also|additionally|and then|next)\b", re.IGNORECASE,
+    )
+    _COMPLEXITY_TECHNICAL = re.compile(
+        r"\b(refactor|architect|migrat|optimis|deploy|pipeline|distribu|"
+        r"concurren|async|thread|microservic|kubernetes|docker|ci/cd|"
+        r"database|schema|api\s+rest|websocket|oauth|encrypt)\b", re.IGNORECASE,
+    )
+    _COMPLEXITY_ACTION_VERBS = re.compile(
+        r"\b(crée|implémente|développe|construi[st]|configure|installe|"
+        r"analyse|compare|évalue|audite|corrige|refactorise|"
+        r"create|implement|build|setup|configure|install|"
+        r"analyze|compare|evaluate|audit|fix|refactor)\b", re.IGNORECASE,
+    )
+
     def analyze_complexity(self, request: str) -> str:
         """
-        Analyse la complexité d'une requête.
+        Analyse la complexité d'une requête via signaux sémantiques.
         Retourne : "simple" | "moderate" | "complex"
+
+        Signaux :
+        - Nombre de verbes d'action (sous-tâches implicites)
+        - Présence de connecteurs multi-étapes ("puis", "ensuite")
+        - Références à des concepts techniques avancés
+        - Longueur du message (signal secondaire)
         """
         word_count = len(request.split())
-        if word_count < 15:
-            return "simple"
-        elif word_count < 50:
-            return "moderate"
-        return "complex"
+        score = 0
 
-    def make_decision(self, request: str) -> BrainDecision:
+        # Verbes d'action multiples → sous-tâches implicites
+        action_verbs = self._COMPLEXITY_ACTION_VERBS.findall(request)
+        score += len(action_verbs)
+
+        # Connecteurs multi-étapes → workflow séquentiel
+        multi_steps = self._COMPLEXITY_MULTI_ACTION.findall(request)
+        score += len(multi_steps) * 2
+
+        # Concepts techniques avancés
+        tech_refs = self._COMPLEXITY_TECHNICAL.findall(request)
+        score += len(tech_refs)
+
+        # Longueur comme signal complémentaire
+        if word_count > 50:
+            score += 4  # Très long → probablement complexe
+        elif word_count > 30:
+            score += 2
+        elif word_count > 12:
+            score += 1
+
+        # Décision
+        if score >= 4:
+            return "complex"
+        elif score >= 1:
+            return "moderate"
+        return "simple"
+
+    def make_decision(self, request: str, working_context: str = "") -> BrainDecision:
         """
         Prend une décision stratégique sur la manière de traiter la requête.
 
         Pipeline :
-        1. Classifie la tâche (Factory)
-        2. Applique les patches comportementaux (Level 3)
-        3. Consulte l'historique d'apprentissage
-        4. Route vers le bon type de réponse
+        1. Enrichit la requête avec le contexte de travail (topic, actions en attente)
+        2. Classifie la tâche (Factory)
+        3. Applique les patches comportementaux (Level 3)
+        4. Consulte l'historique d'apprentissage
+        5. Route vers le bon type de réponse
+
+        Le working_context (mémoire de travail) permet de comprendre les requêtes
+        courtes qui font référence à une conversation en cours ("continue", "fais pareil").
         """
+        # Enrichir la requête pour la classification si contexte de travail disponible.
+        # Seulement pour les messages qui font explicitement référence au contexte
+        # ("continue", "pareil", "la suite", pronoms déictiques).
+        # Les salutations simples ("Salut", "Bonjour") ne doivent PAS être enrichies.
+        classification_input = request
+        if working_context and self._CONTEXT_DEPENDENT_RE.search(request):
+            classification_input = f"{working_context}\n\nRequête: {request}"
+
         complexity = self.analyze_complexity(request)
-        worker_type = self.factory.classify_task(request)
+        worker_type = self.factory.classify_task(classification_input)
 
         # 1. Application des patches comportementaux
         patch_overrides = self._apply_behavior_patches(request, worker_type)
@@ -616,13 +554,16 @@ class Brain:
         else:
             reasoning = f"Type {worker_type.value} détecté → Worker (complexité: {complexity})"
 
+        metadata = dict(patch_overrides) if patch_overrides else {}
+        if advice:
+            metadata["_cached_learning_advice"] = advice
         return BrainDecision(
             action="delegate_worker",
             subtasks=subtasks,
             confidence=confidence,
             worker_type=worker_type.value,
             reasoning=reasoning,
-            metadata=patch_overrides if patch_overrides else {},
+            metadata=metadata,
         )
 
     def _decide_complex_generic(
@@ -651,6 +592,7 @@ class Brain:
                     logger.debug("Invalid worker type for skill %s: %s", best_skill.worker_type, e)
 
         # Si 3+ sous-tâches → delegate_crew (Epic)
+        metadata = {"_cached_learning_advice": advice} if advice else {}
         if len(subtasks) >= 3:
             return BrainDecision(
                 action="delegate_crew",
@@ -658,6 +600,7 @@ class Brain:
                 confidence=confidence,
                 worker_type=worker_type.value,
                 reasoning=f"Tâche complexe ({len(subtasks)} sous-tâches) → Epic (crew)",
+                metadata=metadata,
             )
 
         return BrainDecision(
@@ -666,6 +609,7 @@ class Brain:
             confidence=confidence,
             worker_type=worker_type.value,
             reasoning=reasoning,
+            metadata=metadata,
         )
 
     def _decide_simple_generic(self, request: str, complexity: str) -> BrainDecision:
@@ -686,6 +630,7 @@ class Brain:
                             f"Requête {complexity} mais compétence acquise "
                             f"({best_skill.name}, ×{best_skill.success_count}) → Worker"
                         ),
+                        metadata={"_cached_learning_advice": advice},
                     )
                 except ValueError as e:
                     logger.debug("Invalid worker type for acquired skill %s: %s", best_skill.worker_type, e)
@@ -695,6 +640,7 @@ class Brain:
             subtasks=[request] if complexity == "moderate" else [],
             confidence=0.9 if complexity == "simple" else 0.7,
             reasoning=f"Requête {complexity} générique → réponse directe",
+            metadata={"_cached_learning_advice": advice} if advice else {},
         )
 
     def _apply_learning_advice(
@@ -810,14 +756,34 @@ class Brain:
             logger.warning("Validation du message échouée: %s", e)
             return f"[Brain Erreur] Message invalide: {str(e)[:200]}"
 
-        # ── Optimisation v0.9.1 : décision AVANT le contexte mémoire ──
-        # Brain décide d'abord s'il a besoin du contexte, au lieu de le
-        # charger systématiquement (économise 300-600ms pour les msgs simples).
-        decision = self.make_decision(request)
+        # ── Optimisation v0.9.2 : working memory AVANT la décision ──
+        # La working memory (topic courant, actions en attente) est en RAM (~0ms),
+        # elle permet à make_decision de comprendre les requêtes courtes
+        # ("continue", "fais pareil") dans leur contexte.
+        working_context = ""
+        if self.memory and self.memory.is_initialized:
+            try:
+                working_context = self.memory.get_working_context()
+            except Exception as e:
+                logger.debug("Failed to load working context for decision: %s", e)
+
+        decision = self.make_decision(request, working_context=working_context)
 
         # Contexte mémoire chargé uniquement quand nécessaire
-        needs_context = decision.action != "direct_response" or self.analyze_complexity(request) != "simple"
-        memory_context = self.get_memory_context(request) if needs_context else ""
+        # Workers → toujours besoin de contexte
+        # direct_response → seulement si requête complexe
+        needs_context = decision.action != "direct_response" or self.analyze_complexity(request) == "complex"
+        # Réutilise le working_context et le learning advice déjà calculés
+        cached_advice = decision.metadata.pop("_cached_learning_advice", None)
+        memory_context = (
+            self.get_memory_context(
+                request,
+                working_context=working_context,
+                cached_learning_advice=cached_advice,
+            )
+            if needs_context
+            else ""
+        )
 
         if self._mock_mode:
             if decision.action == "delegate_crew" and decision.subtasks:

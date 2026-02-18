@@ -17,12 +17,11 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-import signal
 import sys
 import threading
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -84,17 +83,17 @@ class PluginLoader:
 
         # Créer le répertoire s'il n'existe pas
         if not self.plugins_dir.exists():
-            logger.info(f"Plugin directory does not exist: {self.plugins_dir}")
+            logger.info("Plugin directory does not exist: %s", self.plugins_dir)
             return results
 
         if not self.plugins_dir.is_dir():
-            logger.warning(f"Plugin path is not a directory: {self.plugins_dir}")
+            logger.warning("Plugin path is not a directory: %s", self.plugins_dir)
             return results
 
         # Scanner les fichiers .py
         plugin_files = sorted(self.plugins_dir.glob("*.py"))
         if not plugin_files:
-            logger.debug(f"No plugin files found in {self.plugins_dir}")
+            logger.debug("No plugin files found in %s", self.plugins_dir)
             return results
 
         for filepath in plugin_files:
@@ -107,11 +106,11 @@ class PluginLoader:
                 loaded_plugin = self.load_plugin(filepath)
                 if loaded_plugin:
                     results["loaded"].append(loaded_plugin.name)
-                    logger.info(f"Plugin loaded: {loaded_plugin.name} (v{loaded_plugin.version})")
+                    logger.info("Plugin loaded: %s (v%s)", loaded_plugin.name, loaded_plugin.version)
             except Exception as e:
                 error_msg = f"{type(e).__name__}: {e}"
                 results["errors"][plugin_name] = error_msg
-                logger.error(f"Failed to load plugin {plugin_name}: {error_msg}")
+                logger.error("Failed to load plugin %s: %s", plugin_name, error_msg)
 
         return results
 
@@ -132,6 +131,25 @@ class PluginLoader:
 
         if not filepath.is_file():
             raise ValueError(f"Plugin path is not a file: {filepath}")
+
+        # Pré-validation : scanner les imports dangereux AVANT d'exécuter le code
+        import re as _re
+        source_code = filepath.read_text(encoding="utf-8")
+        _DANGEROUS_IMPORTS = frozenset({
+            "os", "subprocess", "sys", "importlib", "shutil",
+            "socket", "ctypes", "signal", "multiprocessing",
+        })
+        _DANGEROUS_BUILTINS = [
+            r"\b__import__\s*\(", r"\bexec\s*\(", r"\beval\s*\(",
+            r"\bcompile\s*\(", r"\bglobals\s*\(",
+        ]
+        found_imports = _re.findall(r"^\s*(?:from|import)\s+(\w+)", source_code, _re.MULTILINE)
+        for imp in found_imports:
+            if imp in _DANGEROUS_IMPORTS:
+                raise ValueError(f"Plugin contains forbidden import: {imp}")
+        for pattern in _DANGEROUS_BUILTINS:
+            if _re.search(pattern, source_code):
+                raise ValueError(f"Plugin contains dangerous builtin: {pattern}")
 
         # Charger le module Python avec namespace isolé
         module_name = f"neo_plugin_{filepath.stem}"
@@ -193,7 +211,7 @@ class PluginLoader:
             worker_types=list(plugin_meta["worker_types"]),
             execute_fn=execute_fn,
             filepath=filepath,
-            loaded_at=datetime.utcnow().isoformat(),
+            loaded_at=datetime.now(timezone.utc).isoformat(),
         )
 
         # Enregistrer
@@ -223,7 +241,7 @@ class PluginLoader:
                 del self._loaded_modules[module_name]
 
             del self._plugins[name]
-            logger.info(f"Plugin unloaded: {name}")
+            logger.info("Plugin unloaded: %s", name)
             return True
 
     def reload_all(self) -> dict:
@@ -291,7 +309,7 @@ class PluginLoader:
             t.join(timeout=PLUGIN_EXECUTION_TIMEOUT)
 
             if t.is_alive():
-                logger.error(f"Plugin '{name}' execution timed out after {PLUGIN_EXECUTION_TIMEOUT}s")
+                logger.error("Plugin '%s' execution timed out after %ds", name, PLUGIN_EXECUTION_TIMEOUT)
                 return f"Error: Plugin '{name}' timed out after {PLUGIN_EXECUTION_TIMEOUT}s"
 
             if error_container[0] is not None:
@@ -306,7 +324,7 @@ class PluginLoader:
                 return str(result)
         except Exception as e:
             error_msg = traceback.format_exc()
-            logger.error(f"Plugin '{name}' execution failed:\n{error_msg}")
+            logger.error("Plugin '%s' execution failed:\n%s", name, error_msg)
             return f"Error executing plugin '{name}': {type(e).__name__}: {e}"
 
     def list_plugins(self) -> list[dict]:

@@ -140,7 +140,7 @@ def _setup_logging() -> None:
     root_logger.addHandler(console_handler)
 
 
-async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
+async def _run_daemon(host: str = "127.0.0.1", port: int = 8000) -> None:
     """
     Boucle principale du daemon.
 
@@ -307,7 +307,7 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
     logger.info("Neo Core daemon arrêté proprement")
 
 
-def start(foreground: bool = False, host: str = "0.0.0.0", port: int = 8000) -> dict:
+def start(foreground: bool = False, host: str = "127.0.0.1", port: int = 8000) -> dict:
     """
     Démarre le daemon Neo Core.
 
@@ -450,7 +450,7 @@ def stop() -> dict:
         return {"success": False, "message": f"Permission refusée pour arrêter PID {pid}"}
 
 
-def restart(host: str = "0.0.0.0", port: int = 8000) -> dict:
+def restart(host: str = "127.0.0.1", port: int = 8000) -> dict:
     """Redémarre le daemon Neo Core."""
     if is_running():
         result = stop()
