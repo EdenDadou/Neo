@@ -154,6 +154,64 @@ def check_python_version() -> bool:
     return False
 
 
+def _download_embedding_model(provider_keys: dict | None = None) -> bool:
+    """
+    Télécharge et vérifie le modèle d'embedding all-MiniLM-L6-v2.
+
+    Étape obligatoire du setup — la mémoire de Neo en dépend.
+    Retry avec/sans HF_TOKEN si le premier essai échoue (429).
+    """
+    import time
+
+    model_name = "all-MiniLM-L6-v2"
+    max_retries = 3
+
+    print(f"\n  {DIM}⧗ Téléchargement du modèle d'embedding ({model_name})...{RESET}")
+
+    # S'assurer que le HF_TOKEN est dans l'env si disponible
+    hf_token = (provider_keys or {}).get("huggingface", "") or os.environ.get("HF_TOKEN", "")
+    if hf_token:
+        os.environ["HF_TOKEN"] = hf_token
+
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        print(f"  {YELLOW}⚠{RESET} sentence-transformers non installé — mémoire en mode dégradé")
+        print(f"  {DIM}  Fix: pip install sentence-transformers{RESET}")
+        return False
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            model = SentenceTransformer(model_name)
+            # Vérifier que le modèle encode correctement
+            result = model.encode(["test de vérification"])
+            if result is not None and len(result) > 0:
+                print(f"  {GREEN}✓{RESET} Modèle {model_name} téléchargé et vérifié (dim={len(result[0])})")
+                del model
+                return True
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str:
+                wait = 5 * attempt
+                if attempt < max_retries:
+                    print(f"  {YELLOW}⚠{RESET} Rate-limit HuggingFace (429) — retry dans {wait}s... ({attempt}/{max_retries})")
+                    if not hf_token:
+                        print(f"  {DIM}  Conseil: un token HF gratuit évite les 429 → https://huggingface.co/settings/tokens{RESET}")
+                    time.sleep(wait)
+                else:
+                    print(f"  {RED}✗{RESET} Échec après {max_retries} tentatives (HuggingFace 429)")
+            else:
+                print(f"  {RED}✗{RESET} Erreur: {error_str[:200]}")
+                break
+
+    print(f"  {YELLOW}⚠{RESET} Modèle d'embedding non disponible — mémoire en mode dégradé (bag-of-words)")
+    print(f"  {DIM}  La recherche mémoire fonctionnera par mots-clés au lieu de sémantique.{RESET}")
+    print(f"  {DIM}  Pour corriger plus tard :{RESET}")
+    print(f"  {DIM}    export HF_TOKEN=hf_votre_token{RESET}")
+    print(f"  {DIM}    python -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('{model_name}')\" {RESET}")
+    return False
+
+
 def check_venv() -> bool:
     """Vérifie si on est dans un virtual environment."""
     return hasattr(sys, "real_prefix") or (
@@ -829,18 +887,7 @@ def run_setup(auto_mode: bool = False):
     save_config(core_name, user_name, api_key, python_path, provider_keys)
 
     # ─── Pré-téléchargement du modèle d'embedding ─────────────────
-    print(f"\n  {DIM}⧗ Téléchargement du modèle d'embedding (mémoire de Neo)...{RESET}")
-    try:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-        # Test rapide pour vérifier que le modèle fonctionne
-        _model.encode(["test"])
-        print(f"  {GREEN}✓{RESET} Modèle all-MiniLM-L6-v2 téléchargé et en cache")
-        del _model
-    except Exception as e:
-        print(f"  {YELLOW}⚠{RESET} Échec du téléchargement du modèle d'embedding: {e}")
-        print(f"  {DIM}  La mémoire fonctionnera en mode dégradé (bag-of-words).{RESET}")
-        print(f"  {DIM}  Pour corriger : pip install sentence-transformers && python -c 'from sentence_transformers import SentenceTransformer; SentenceTransformer(\"all-MiniLM-L6-v2\")'  {RESET}")
+    _download_embedding_model(provider_keys)
 
     # ─── Test final / Vérification ────────────────────────────────
     if not auto_mode:
