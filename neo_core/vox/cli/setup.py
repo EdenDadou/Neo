@@ -140,31 +140,28 @@ def ask_confirm(prompt: str, default: bool = True) -> bool:
     return response in ("o", "oui", "y", "yes")
 
 
-def _is_model_cached(model_name: str) -> bool:
-    """Vérifie si le modèle sentence-transformers est déjà en cache local."""
-    try:
-        from huggingface_hub import try_to_load_from_cache
-        # Le fichier modules.json est le premier fichier vérifié par SentenceTransformer
-        result = try_to_load_from_cache(
-            f"sentence-transformers/{model_name}", "modules.json"
-        )
-        return result is not None
-    except Exception:
-        pass
+def _ensure_hf_cache_dir():
+    """
+    S'assure que HF_HOME pointe vers un cache accessible.
 
-    # Fallback : chercher manuellement dans le cache HuggingFace
-    cache_dirs = [
-        Path.home() / ".cache" / "huggingface" / "hub",
-        Path.home() / ".cache" / "torch" / "sentence_transformers",
-        Path("/root/.cache/huggingface/hub"),
-    ]
-    for cache_dir in cache_dirs:
-        if not cache_dir.exists():
-            continue
-        for entry in cache_dir.iterdir():
-            if model_name.lower().replace("-", "") in entry.name.lower().replace("-", ""):
-                return True
-    return False
+    install.sh télécharge le modèle avec HOME=/home/neo, donc le cache
+    est dans /home/neo/.cache/huggingface/. Si on tourne en root (pendant
+    install.sh), il faut pointer HF_HOME vers ce cache.
+    """
+    # Si HF_HOME est déjà défini, on le respecte
+    if os.environ.get("HF_HOME"):
+        return
+
+    # Chercher le cache du user neo (créé par install.sh)
+    neo_cache = Path("/home/neo/.cache/huggingface")
+    if neo_cache.exists():
+        os.environ["HF_HOME"] = str(neo_cache)
+        return
+
+    # Chercher dans le cache courant
+    default_cache = Path.home() / ".cache" / "huggingface"
+    if default_cache.exists():
+        return  # Pas besoin de changer, le défaut marche
 
 
 def _download_embedding_model(provider_keys: dict | None = None) -> bool:
@@ -181,8 +178,10 @@ def _download_embedding_model(provider_keys: dict | None = None) -> bool:
 
     print(f"\n  {DIM}⧗ Vérification du modèle d'embedding ({model_name})...{RESET}")
 
+    # Pointer vers le cache HF du user neo (installé par install.sh)
+    _ensure_hf_cache_dir()
+
     # S'assurer que le HF_TOKEN est dans l'env si disponible
-    # Priorité : argument → vault → variable d'env
     hf_token = (provider_keys or {}).get("huggingface", "") or os.environ.get("HF_TOKEN", "")
     if not hf_token:
         try:
@@ -204,33 +203,30 @@ def _download_embedding_model(provider_keys: dict | None = None) -> bool:
         print(f"  {DIM}  Fix: pip install sentence-transformers{RESET}")
         return False
 
-    # ── 1. Si le modèle est déjà en cache, charger en local (pas de réseau) ──
-    if _is_model_cached(model_name):
+    # ── 1. Tenter le chargement offline (zéro requête réseau) ──
+    try:
+        old_offline = os.environ.get("TRANSFORMERS_OFFLINE")
+        old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_OFFLINE"] = "1"
         try:
-            # TRANSFORMERS_OFFLINE évite tout appel HEAD à HuggingFace
-            old_offline = os.environ.get("TRANSFORMERS_OFFLINE")
-            old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
-            os.environ["TRANSFORMERS_OFFLINE"] = "1"
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            try:
-                model = SentenceTransformer(model_name)
-                result = model.encode(["test de vérification"])
-                if result is not None and len(result) > 0:
-                    print(f"  {GREEN}✓{RESET} Modèle {model_name} déjà en cache (dim={len(result[0])})")
-                    del model
-                    return True
-            finally:
-                # Restaurer les variables d'env
-                if old_offline is None:
-                    os.environ.pop("TRANSFORMERS_OFFLINE", None)
-                else:
-                    os.environ["TRANSFORMERS_OFFLINE"] = old_offline
-                if old_hf_offline is None:
-                    os.environ.pop("HF_HUB_OFFLINE", None)
-                else:
-                    os.environ["HF_HUB_OFFLINE"] = old_hf_offline
-        except Exception:
-            pass  # Cache corrompu ou incomplet → retélécharger
+            model = SentenceTransformer(model_name)
+            result = model.encode(["test de vérification"])
+            if result is not None and len(result) > 0:
+                print(f"  {GREEN}✓{RESET} Modèle {model_name} déjà en cache (dim={len(result[0])})")
+                del model
+                return True
+        finally:
+            if old_offline is None:
+                os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            else:
+                os.environ["TRANSFORMERS_OFFLINE"] = old_offline
+            if old_hf_offline is None:
+                os.environ.pop("HF_HUB_OFFLINE", None)
+            else:
+                os.environ["HF_HUB_OFFLINE"] = old_hf_offline
+    except Exception:
+        pass  # Pas en cache → télécharger
 
     # ── 2. Téléchargement avec retry ──
     print(f"  {DIM}⧗ Téléchargement du modèle depuis HuggingFace...{RESET}")
