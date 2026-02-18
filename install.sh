@@ -572,7 +572,7 @@ echo
 # qui fait sudo -u neo, car sudo peut échouer si le disque est plein ou le PTY indisponible)
 # On chown les fichiers de config après
 echo -e "  ${DIM}Lancement du wizard...${RESET}\n"
-cd "${INSTALL_DIR}" && "${VENV_DIR}/bin/neo" setup --auto < /dev/tty
+cd "${INSTALL_DIR}" && "${VENV_DIR}/bin/neo" setup < /dev/tty
 WIZARD_EXIT=$?
 
 # Rendre les fichiers de config accessibles à l'utilisateur neo
@@ -600,7 +600,7 @@ if [[ $WIZARD_EXIT -eq 0 ]]; then
     echo -e "  ${BOLD}Commandes utiles :${RESET}"
     echo -e "    ${CYAN}neo chat${RESET}                            Discuter avec Neo"
     echo -e "    ${CYAN}neo status${RESET}                          État du système"
-    echo -e "    ${CYAN}neo setup${RESET}                           Relancer le wizard complet"
+    echo -e "    ${CYAN}neo setup${RESET}                           Reconfigurer (clés API, providers...)"
     echo -e "    ${CYAN}neo logs${RESET}                            Voir les logs Neo"
     echo -e "    ${CYAN}sudo journalctl -u neo-guardian -f${RESET}  Logs systemd en temps réel"
     echo -e "    ${CYAN}sudo systemctl restart neo-guardian${RESET} Redémarrer le service"
