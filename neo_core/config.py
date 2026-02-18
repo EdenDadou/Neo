@@ -62,16 +62,23 @@ def _load_vault_secrets() -> None:
         from neo_core.infra.security.vault import KeyVault
         data_dir = _PROJECT_ROOT / "data"
         if not (data_dir / ".vault.db").exists():
+            logger.info("Vault DB not found at %s — no secrets loaded", data_dir / ".vault.db")
             return
         vault = KeyVault(data_dir=data_dir)
         vault.initialize()
+        loaded_count = 0
         for name in ("anthropic_api_key", "groq_api_key", "gemini_api_key", "hf_token"):
             val = vault.retrieve(name)
             if val:
                 _vault_cache[name] = val
+                loaded_count += 1
+                logger.debug("Vault secret loaded: %s", name)
+            else:
+                logger.debug("Vault secret not found: %s", name)
         vault.close()
+        logger.info("Vault loaded: %d/%d secrets available", loaded_count, 4)
     except Exception as e:
-        logger.debug("Vault load skipped: %s", e)
+        logger.warning("Vault load FAILED: %s — secrets unavailable, mock mode likely", e)
 
 
 def _get_secret(vault_name: str, env_name: str) -> Optional[str]:

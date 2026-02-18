@@ -629,8 +629,10 @@ if [[ $WIZARD_EXIT -eq 0 ]]; then
     echo -e "  ${DIM}⧗ Démarrage du service Neo...${RESET}"
 
     # S'assurer que le .env est chargé par systemd
+    # IMPORTANT : restart (pas start) pour recharger la config du vault
+    # si le service tournait déjà d'une installation précédente
     systemctl daemon-reload 2>/dev/null || true
-    systemctl start neo-guardian 2>/dev/null || true
+    systemctl restart neo-guardian 2>/dev/null || true
     sleep 3
 
     if systemctl is-active --quiet neo-guardian; then
