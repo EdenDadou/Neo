@@ -16,6 +16,9 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
+
 from neo_core.config import NeoConfig
 from neo_core.infra.guardian import GracefulShutdown, StateSnapshot, EXIT_CODE_RESTART
 
@@ -482,14 +485,31 @@ def bootstrap():
     return vox
 
 
-def _drain_brain_results(brain_results: asyncio.Queue) -> None:
-    """Affiche tous les résultats Brain en attente dans la queue."""
-    while not brain_results.empty():
+async def _background_queue_watcher(brain_results: asyncio.Queue) -> None:
+    """
+    Surveille la queue Brain en continu et affiche les résultats
+    dès qu'ils arrivent — même si l'utilisateur est en train de taper.
+
+    Fonctionne grâce à patch_stdout() de prompt_toolkit qui permet
+    d'imprimer au-dessus du prompt sans corrompre l'input en cours.
+    """
+    while True:
         try:
-            result = brain_results.get_nowait()
-            console.print(f"\n  [bold cyan]Vox >[/bold cyan] {result}\n")
-        except asyncio.QueueEmpty:
+            while not brain_results.empty():
+                result = brain_results.get_nowait()
+                console.print(f"\n  [bold cyan]Vox >[/bold cyan] {result}\n")
+            await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            # Drain remaining items before exiting
+            while not brain_results.empty():
+                try:
+                    result = brain_results.get_nowait()
+                    console.print(f"\n  [bold cyan]Vox >[/bold cyan] {result}\n")
+                except asyncio.QueueEmpty:
+                    break
             break
+        except Exception:
+            await asyncio.sleep(0.1)
 
 
 async def conversation_loop(vox):
@@ -609,139 +629,152 @@ async def conversation_loop(vox):
         "[dim]  Tapez /help pour les commandes disponibles.[/dim]\n"
     )
 
-    while True:
-        # ── Lecture input asynchrone (permet à Brain de tourner en parallèle) ──
-        try:
-            user_input = await asyncio.to_thread(
-                console.input,
-                f"[bold green]  {config.user_name} >[/bold green] ",
-            )
-        except (KeyboardInterrupt, EOFError):
-            if heartbeat_manager:
-                heartbeat_manager.stop()
-            shutdown_handler.save_state(shutdown_reason="signal")
-            shutdown_handler.clear_state()
-            console.print("\n[dim]  Au revoir ![/dim]")
-            sys.exit(0)
+    # ── prompt_toolkit : input async + affichage Brain en temps réel ──
+    prompt_session = PromptSession()
+    queue_watcher_task = None
 
-        user_input = user_input.strip()
-        if not user_input:
-            continue
-
-        # Commandes spéciales (avec ou sans /)
-        cmd = user_input.lower()
-        if cmd in ("/quit", "/exit", "quit", "exit", "q"):
-            if heartbeat_manager:
-                heartbeat_manager.stop()
-            # Sauvegarder le state et nettoyer
-            session_id = vox.get_session_info().get("session_id", "") if vox.get_session_info() else ""
-            shutdown_handler.save_state(
-                shutdown_reason="user_quit",
-                turn_count=0,
-                heartbeat_pulse_count=heartbeat_manager.get_status()["pulse_count"] if heartbeat_manager else 0,
-                session_id=session_id,
-            )
-            shutdown_handler.clear_state()  # Quit normal → pas besoin du state
-            console.print("[dim]  Au revoir ![/dim]")
-            sys.exit(0)
-
-        if cmd in ("/restart", "restart"):
-            console.print("[bold yellow]  ⟳ Redémarrage de Neo...[/bold yellow]")
-            if heartbeat_manager:
-                heartbeat_manager.stop()
-            session_id = vox.get_session_info().get("session_id", "") if vox.get_session_info() else ""
-            shutdown_handler.save_state(
-                shutdown_reason="guardian_restart",
-                turn_count=0,
-                heartbeat_pulse_count=heartbeat_manager.get_status()["pulse_count"] if heartbeat_manager else 0,
-                session_id=session_id,
-            )
-            sys.exit(EXIT_CODE_RESTART)  # Code 42 → Guardian relance immédiatement
-
-        if cmd in ("/status", "status"):
-            print_status(vox)
-            continue
-
-        if cmd in ("/health", "health"):
-            print_health(vox)
-            continue
-
-        if cmd in ("/help", "help"):
-            print_help()
-            continue
-
-        if cmd in ("/history", "history"):
-            print_history(vox, limit=10)
-            continue
-
-        if cmd in ("/sessions", "sessions"):
-            print_sessions(vox)
-            continue
-
-        if cmd in ("/skills", "skills"):
-            print_skills(vox)
-            continue
-
-        if cmd in ("/tasks", "tasks"):
-            print_tasks(vox)
-            continue
-
-        if cmd in ("/epics", "epics"):
-            print_epics(vox)
-            continue
-
-        if cmd in ("/heartbeat", "heartbeat"):
-            print_heartbeat(heartbeat_manager)
-            continue
-
-        if cmd in ("/persona", "persona"):
-            print_persona(vox)
-            continue
-
-        if cmd in ("/profile", "profile"):
-            print_user_profile(vox)
-            continue
-
-        if cmd in ("/reflect", "reflect"):
-            console.print("[dim]  Lancement de l'auto-réflexion...[/dim]")
+    async def _cleanup_and_exit(code: int = 0):
+        """Arrêt propre : cancel le watcher, stop heartbeat, exit."""
+        if queue_watcher_task:
+            queue_watcher_task.cancel()
             try:
-                result = await vox.memory.perform_self_reflection()
-                if result.get("success"):
-                    console.print(
-                        f"[green]  ✓ Réflexion effectuée : "
-                        f"{result.get('traits_updated', 0)} traits ajustés, "
-                        f"{result.get('observations_recorded', 0)} observations[/green]"
-                    )
-                    if result.get("summary"):
-                        console.print(f"  [dim]{result['summary'][:200]}[/dim]")
-                else:
-                    console.print(f"[yellow]  ⚠ {result.get('reason', 'Erreur')}[/yellow]")
+                await queue_watcher_task
+            except asyncio.CancelledError:
+                pass
+        if heartbeat_manager:
+            heartbeat_manager.stop()
+
+    with patch_stdout():
+        queue_watcher_task = asyncio.create_task(
+            _background_queue_watcher(brain_results)
+        )
+
+        while True:
+            # ── Lecture input async (Brain peut afficher pendant qu'on tape) ──
+            try:
+                user_input = await prompt_session.prompt_async(
+                    f"  {config.user_name} > ",
+                )
+            except (KeyboardInterrupt, EOFError):
+                await _cleanup_and_exit()
+                shutdown_handler.save_state(shutdown_reason="signal")
+                shutdown_handler.clear_state()
+                console.print("\n[dim]  Au revoir ![/dim]")
+                sys.exit(0)
+
+            user_input = user_input.strip()
+            if not user_input:
+                continue
+
+            # Commandes spéciales (avec ou sans /)
+            cmd = user_input.lower()
+            if cmd in ("/quit", "/exit", "quit", "exit", "q"):
+                await _cleanup_and_exit()
+                # Sauvegarder le state et nettoyer
+                session_id = vox.get_session_info().get("session_id", "") if vox.get_session_info() else ""
+                shutdown_handler.save_state(
+                    shutdown_reason="user_quit",
+                    turn_count=0,
+                    heartbeat_pulse_count=heartbeat_manager.get_status()["pulse_count"] if heartbeat_manager else 0,
+                    session_id=session_id,
+                )
+                shutdown_handler.clear_state()  # Quit normal → pas besoin du state
+                console.print("[dim]  Au revoir ![/dim]")
+                sys.exit(0)
+
+            if cmd in ("/restart", "restart"):
+                console.print("[bold yellow]  ⟳ Redémarrage de Neo...[/bold yellow]")
+                await _cleanup_and_exit()
+                session_id = vox.get_session_info().get("session_id", "") if vox.get_session_info() else ""
+                shutdown_handler.save_state(
+                    shutdown_reason="guardian_restart",
+                    turn_count=0,
+                    heartbeat_pulse_count=heartbeat_manager.get_status()["pulse_count"] if heartbeat_manager else 0,
+                    session_id=session_id,
+                )
+                sys.exit(EXIT_CODE_RESTART)  # Code 42 → Guardian relance immédiatement
+
+            if cmd in ("/status", "status"):
+                print_status(vox)
+                continue
+
+            if cmd in ("/health", "health"):
+                print_health(vox)
+                continue
+
+            if cmd in ("/help", "help"):
+                print_help()
+                continue
+
+            if cmd in ("/history", "history"):
+                print_history(vox, limit=10)
+                continue
+
+            if cmd in ("/sessions", "sessions"):
+                print_sessions(vox)
+                continue
+
+            if cmd in ("/skills", "skills"):
+                print_skills(vox)
+                continue
+
+            if cmd in ("/tasks", "tasks"):
+                print_tasks(vox)
+                continue
+
+            if cmd in ("/epics", "epics"):
+                print_epics(vox)
+                continue
+
+            if cmd in ("/heartbeat", "heartbeat"):
+                print_heartbeat(heartbeat_manager)
+                continue
+
+            if cmd in ("/persona", "persona"):
+                print_persona(vox)
+                continue
+
+            if cmd in ("/profile", "profile"):
+                print_user_profile(vox)
+                continue
+
+            if cmd in ("/reflect", "reflect"):
+                console.print("[dim]  Lancement de l'auto-réflexion...[/dim]")
+                try:
+                    result = await vox.memory.perform_self_reflection()
+                    if result.get("success"):
+                        console.print(
+                            f"[green]  ✓ Réflexion effectuée : "
+                            f"{result.get('traits_updated', 0)} traits ajustés, "
+                            f"{result.get('observations_recorded', 0)} observations[/green]"
+                        )
+                        if result.get("summary"):
+                            console.print(f"  [dim]{result['summary'][:200]}[/dim]")
+                    else:
+                        console.print(f"[yellow]  ⚠ {result.get('reason', 'Erreur')}[/yellow]")
+                except Exception as e:
+                    console.print(f"[red]  Erreur: {e}[/red]")
+                continue
+
+            # ── Callback ack : Vox envoie un accusé de réception pendant que Brain réfléchit ──
+            ack_displayed = False
+
+            def on_thinking(ack_text: str):
+                nonlocal ack_displayed
+                if not ack_displayed:
+                    console.print(f"\n  [dim cyan]Vox >[/dim cyan] [dim]{ack_text}[/dim]")
+                    ack_displayed = True
+
+            vox.set_thinking_callback(on_thinking)
+
+            # Process via Vox → Brain → Vox
+            try:
+                with console.status("[bold cyan]  Brain analyse...[/bold cyan]"):
+                    response = await vox.process_message(user_input)
+
+                console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response}\n")
             except Exception as e:
-                console.print(f"[red]  Erreur: {e}[/red]")
-            continue
-
-        # ── Afficher les résultats Brain en attente ──
-        _drain_brain_results(brain_results)
-
-        # ── Callback ack : Vox envoie un accusé de réception pendant que Brain réfléchit ──
-        ack_displayed = False
-
-        def on_thinking(ack_text: str):
-            nonlocal ack_displayed
-            if not ack_displayed:
-                console.print(f"\n  [dim cyan]Vox >[/dim cyan] [dim]{ack_text}[/dim]")
-                ack_displayed = True
-
-        vox.set_thinking_callback(on_thinking)
-
-        # Process via Vox → Brain → Vox
-        try:
-            with console.status("[bold cyan]  Brain analyse...[/bold cyan]"):
-                response = await vox.process_message(user_input)
-
-            console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response}\n")
-        except Exception as e:
-            console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
+                console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
 
 
 def _get_api_key(config: NeoConfig) -> str:
@@ -868,144 +901,148 @@ async def api_conversation_loop(config: NeoConfig, api_url: str):
         finally:
             brain_pending -= 1
 
-    def _drain_brain_results_api():
-        """Affiche tous les résultats Brain en attente."""
-        while not brain_results.empty():
+    # ── prompt_toolkit : input async + affichage Brain en temps réel ──
+    prompt_session = PromptSession()
+    queue_watcher_task = None
+
+    async def _cleanup_api():
+        """Arrêt propre : cancel le watcher."""
+        if queue_watcher_task:
+            queue_watcher_task.cancel()
             try:
-                result = brain_results.get_nowait()
-                console.print(f"\n  [bold cyan]Vox >[/bold cyan] {result}\n")
-            except asyncio.QueueEmpty:
-                break
+                await queue_watcher_task
+            except asyncio.CancelledError:
+                pass
 
     async with httpx.AsyncClient(timeout=130.0) as client:
-        while True:
-            # ── Afficher les résultats Brain en attente avant le prompt ──
-            _drain_brain_results_api()
+        with patch_stdout():
+            queue_watcher_task = asyncio.create_task(
+                _background_queue_watcher(brain_results)
+            )
 
-            try:
-                user_input = await asyncio.to_thread(
-                    console.input,
-                    f"[bold green]  {config.user_name} >[/bold green] ",
-                )
-            except (KeyboardInterrupt, EOFError):
-                console.print("\n[dim]  Au revoir ![/dim]")
-                sys.exit(0)
-
-            # Drainer aussi après input (Brain a pu terminer pendant qu'on tapait)
-            _drain_brain_results_api()
-
-            user_input = user_input.strip()
-            if not user_input:
-                continue
-
-            cmd = user_input.lower()
-            if cmd in ("/quit", "/exit", "quit", "exit", "q"):
-                console.print("[dim]  Au revoir ![/dim]")
-                sys.exit(0)
-
-            if cmd in ("/help", "help"):
-                print_help()
-                continue
-
-            # Commandes /status, /health → appeler les endpoints API
-            if cmd in ("/status", "status"):
+            while True:
                 try:
-                    resp = await client.get(f"{api_url}/status", headers=headers)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        lines = [
-                            f"  Core    : {data.get('core_name', '?')}",
-                            f"  Status  : {data.get('status', '?')}",
-                            f"  Uptime  : {data.get('uptime_seconds', 0):.0f}s",
-                            f"  Guardian: {'oui' if data.get('guardian_mode') else 'non'}",
-                        ]
-                        if brain_pending > 0:
-                            lines.append(f"  Brain   : [bold cyan]⟳ {brain_pending} requête(s) en cours[/bold cyan]")
-                        agents = data.get("agents", {})
-                        for name, info in agents.items():
-                            lines.append(f"  {name:10}: {info}")
-                        console.print(Panel("\n".join(lines), title="[bold]État du système[/bold]", border_style="dim"))
-                    else:
-                        console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
-                except Exception as e:
-                    console.print(f"[red]  Erreur: {e}[/red]")
-                continue
+                    user_input = await prompt_session.prompt_async(
+                        f"  {config.user_name} > ",
+                    )
+                except (KeyboardInterrupt, EOFError):
+                    await _cleanup_api()
+                    console.print("\n[dim]  Au revoir ![/dim]")
+                    sys.exit(0)
 
-            if cmd in ("/health", "health"):
-                try:
-                    resp = await client.get(f"{api_url}/health")
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        checks = data.get("checks", {})
-                        lines = [f"  {k}: {v}" for k, v in checks.items()]
-                        console.print(Panel("\n".join(lines), title="[bold]Health[/bold]", border_style="dim"))
-                except Exception as e:
-                    console.print(f"[red]  Erreur: {e}[/red]")
-                continue
+                user_input = user_input.strip()
+                if not user_input:
+                    continue
 
-            if cmd in ("/tasks", "tasks"):
-                try:
-                    resp = await client.get(f"{api_url}/tasks", headers=headers)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        summary = data.get("summary", {})
-                        lines = ["[bold]Registre des tâches[/bold]\n"]
-                        if data.get("tasks"):
-                            for t_str in data["tasks"][:20]:
-                                lines.append(f"  {t_str}")
+                cmd = user_input.lower()
+                if cmd in ("/quit", "/exit", "quit", "exit", "q"):
+                    await _cleanup_api()
+                    console.print("[dim]  Au revoir ![/dim]")
+                    sys.exit(0)
+
+                if cmd in ("/help", "help"):
+                    print_help()
+                    continue
+
+                # Commandes /status, /health → appeler les endpoints API
+                if cmd in ("/status", "status"):
+                    try:
+                        resp = await client.get(f"{api_url}/status", headers=headers)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            lines = [
+                                f"  Core    : {data.get('core_name', '?')}",
+                                f"  Status  : {data.get('status', '?')}",
+                                f"  Uptime  : {data.get('uptime_seconds', 0):.0f}s",
+                                f"  Guardian: {'oui' if data.get('guardian_mode') else 'non'}",
+                            ]
+                            if brain_pending > 0:
+                                lines.append(f"  Brain   : [bold cyan]⟳ {brain_pending} requête(s) en cours[/bold cyan]")
+                            agents = data.get("agents", {})
+                            for name, info in agents.items():
+                                lines.append(f"  {name:10}: {info}")
+                            console.print(Panel("\n".join(lines), title="[bold]État du système[/bold]", border_style="dim"))
                         else:
-                            lines.append("  [dim]Aucune tâche enregistrée.[/dim]")
-                        if summary:
-                            lines.append(f"\n[bold]Résumé[/bold]")
-                            lines.append(
-                                f"  Total : {summary.get('total_tasks', 0)} tâches, "
-                                f"{summary.get('total_epics', 0)} epics"
-                            )
-                            if summary.get("tasks_by_status"):
-                                parts = [f"{k}: {v}" for k, v in summary["tasks_by_status"].items()]
-                                lines.append(f"  Statuts : {', '.join(parts)}")
-                        console.print(Panel("\n".join(lines), title="[bold cyan]Task Registry[/bold cyan]", border_style="cyan"))
-                    else:
-                        console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
-                except Exception as e:
-                    console.print(f"[red]  Erreur: {e}[/red]")
-                continue
+                            console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
+                    except Exception as e:
+                        console.print(f"[red]  Erreur: {e}[/red]")
+                    continue
 
-            if cmd in ("/epics", "epics"):
-                try:
-                    resp = await client.get(f"{api_url}/epics", headers=headers)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        epics = data.get("epics", [])
-                        if not epics:
-                            console.print(Panel("[dim]Aucun epic actif.[/dim]", title="[bold cyan]Epics[/bold cyan]", border_style="cyan"))
-                        else:
-                            status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
-                            table = Table(title="Epics Actifs", title_style="bold cyan", border_style="cyan", show_header=True, header_style="bold white", padding=(0, 1))
-                            table.add_column("Status", justify="center", width=3)
-                            table.add_column("ID", style="dim", width=10)
-                            table.add_column("Description", min_width=30)
-                            table.add_column("Progrès", justify="center", width=12)
-                            table.add_column("Stratégie", style="italic dim", max_width=25)
-                            for epic in epics:
-                                icon = status_icons.get(epic.get("status", ""), "?")
-                                table.add_row(
-                                    icon,
-                                    epic.get("id", "")[:10],
-                                    epic.get("description", ""),
-                                    epic.get("progress", "0/0"),
-                                    epic.get("strategy", "")[:25],
+                if cmd in ("/health", "health"):
+                    try:
+                        resp = await client.get(f"{api_url}/health")
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            checks = data.get("checks", {})
+                            lines = [f"  {k}: {v}" for k, v in checks.items()]
+                            console.print(Panel("\n".join(lines), title="[bold]Health[/bold]", border_style="dim"))
+                    except Exception as e:
+                        console.print(f"[red]  Erreur: {e}[/red]")
+                    continue
+
+                if cmd in ("/tasks", "tasks"):
+                    try:
+                        resp = await client.get(f"{api_url}/tasks", headers=headers)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            summary = data.get("summary", {})
+                            lines = ["[bold]Registre des tâches[/bold]\n"]
+                            if data.get("tasks"):
+                                for t_str in data["tasks"][:20]:
+                                    lines.append(f"  {t_str}")
+                            else:
+                                lines.append("  [dim]Aucune tâche enregistrée.[/dim]")
+                            if summary:
+                                lines.append(f"\n[bold]Résumé[/bold]")
+                                lines.append(
+                                    f"  Total : {summary.get('total_tasks', 0)} tâches, "
+                                    f"{summary.get('total_epics', 0)} epics"
                                 )
-                            console.print(table)
-                    else:
-                        console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
-                except Exception as e:
-                    console.print(f"[red]  Erreur: {e}[/red]")
-                continue
+                                if summary.get("tasks_by_status"):
+                                    parts = [f"{k}: {v}" for k, v in summary["tasks_by_status"].items()]
+                                    lines.append(f"  Statuts : {', '.join(parts)}")
+                            console.print(Panel("\n".join(lines), title="[bold cyan]Task Registry[/bold cyan]", border_style="cyan"))
+                        else:
+                            console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
+                    except Exception as e:
+                        console.print(f"[red]  Erreur: {e}[/red]")
+                    continue
 
-            # ── Envoyer le message en arrière-plan via SSE ──
-            # Le prompt revient immédiatement, la réponse Brain arrive dans la queue
-            asyncio.create_task(_stream_chat(client, user_input))
+                if cmd in ("/epics", "epics"):
+                    try:
+                        resp = await client.get(f"{api_url}/epics", headers=headers)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            epics = data.get("epics", [])
+                            if not epics:
+                                console.print(Panel("[dim]Aucun epic actif.[/dim]", title="[bold cyan]Epics[/bold cyan]", border_style="cyan"))
+                            else:
+                                status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
+                                table = Table(title="Epics Actifs", title_style="bold cyan", border_style="cyan", show_header=True, header_style="bold white", padding=(0, 1))
+                                table.add_column("Status", justify="center", width=3)
+                                table.add_column("ID", style="dim", width=10)
+                                table.add_column("Description", min_width=30)
+                                table.add_column("Progrès", justify="center", width=12)
+                                table.add_column("Stratégie", style="italic dim", max_width=25)
+                                for epic in epics:
+                                    icon = status_icons.get(epic.get("status", ""), "?")
+                                    table.add_row(
+                                        icon,
+                                        epic.get("id", "")[:10],
+                                        epic.get("description", ""),
+                                        epic.get("progress", "0/0"),
+                                        epic.get("strategy", "")[:25],
+                                    )
+                                console.print(table)
+                        else:
+                            console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
+                    except Exception as e:
+                        console.print(f"[red]  Erreur: {e}[/red]")
+                    continue
+
+                # ── Envoyer le message en arrière-plan via SSE ──
+                # Le prompt revient immédiatement, la réponse Brain arrive dans la queue
+                asyncio.create_task(_stream_chat(client, user_input))
 
 
 def run_chat():
