@@ -93,35 +93,26 @@ class TestChatCommands:
 class TestSetupUtilities:
     """Tests des fonctions utilitaires de setup.py."""
 
-    def test_check_python_version(self, capsys):
-        """check_python_version détecte Python 3.10+."""
-        from neo_core.vox.cli.setup import check_python_version
-        import sys
-        # On est forcément en 3.10+ (requis par le projet)
-        assert check_python_version() is True
+    def test_mask_key(self):
+        """_mask_key masque correctement les clés."""
+        from neo_core.vox.cli.setup import _mask_key
+        masked = _mask_key("sk-ant-api-xxxxxxxxxxxxxxxx")
+        assert masked.startswith("sk-ant-api-x")
+        assert "..." in masked
 
-    def test_check_venv(self):
-        """check_venv détecte l'état du venv."""
-        from neo_core.vox.cli.setup import check_venv
-        # Ne crash pas
-        result = check_venv()
-        assert isinstance(result, bool)
+    def test_load_existing_env(self, tmp_path):
+        """_load_existing_env lit les variables depuis .env."""
+        from neo_core.vox.cli.setup import _load_existing_env
 
-    def test_run_command_success(self, capsys):
-        """run_command exécute une commande simple."""
-        from neo_core.vox.cli.setup import run_command
-        assert run_command("echo hello", "Test echo") is True
+        env_file = tmp_path / ".env"
+        env_file.write_text("NEO_CORE_NAME=Test\nNEO_USER_NAME=Bob\n")
 
-    def test_run_command_failure(self, capsys):
-        """run_command détecte un échec."""
-        from neo_core.vox.cli.setup import run_command
-        assert run_command("false", "Test fail") is False
+        with patch("neo_core.vox.cli.setup.ENV_FILE", env_file):
+            with patch("neo_core.vox.cli.setup.CONFIG_DIR", tmp_path / "data"):
+                result = _load_existing_env()
 
-    def test_run_command_timeout(self, capsys):
-        """run_command gère le timeout."""
-        from neo_core.vox.cli.setup import run_command
-        # La commande `sleep 999` devrait timeout (timeout=300s dans le code)
-        # mais on teste juste que la méthode ne crash pas
+        assert result["NEO_CORE_NAME"] == "Test"
+        assert result["NEO_USER_NAME"] == "Bob"
 
     def test_save_config(self, tmp_path):
         """save_config crée les fichiers."""
@@ -135,7 +126,7 @@ class TestSetupUtilities:
         with patch("neo_core.vox.cli.setup.CONFIG_DIR", config_dir):
             with patch("neo_core.vox.cli.setup.CONFIG_FILE", config_file):
                 with patch("neo_core.vox.cli.setup.ENV_FILE", env_file):
-                    save_config("TestCore", "TestUser", "sk-test", "/usr/bin/python3")
+                    save_config("TestCore", "TestUser", "sk-test")
 
         assert config_file.exists()
         data = json.loads(config_file.read_text())
@@ -144,7 +135,16 @@ class TestSetupUtilities:
 
         assert env_file.exists()
         env_content = env_file.read_text()
-        assert "ANTHROPIC_API_KEY=sk-test" in env_content
+        # Les clés API sont dans le vault, pas dans .env
+        assert "ANTHROPIC_API_KEY" not in env_content
+        assert "NEO_CORE_NAME=TestCore" in env_content
+
+        # Vérifier que la clé est dans le vault
+        from neo_core.infra.security.vault import KeyVault
+        vault = KeyVault(data_dir=config_dir)
+        vault.initialize()
+        assert vault.retrieve("anthropic_api_key") == "sk-test"
+        vault.close()
 
 
 class TestStatusModule:

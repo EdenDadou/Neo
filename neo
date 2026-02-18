@@ -4,9 +4,8 @@
 # ==============
 # Commande unique : ./neo setup | ./neo chat | ./neo status
 #
-# Première utilisation :
-#   git clone https://github.com/EdenDadou/Neo.git && cd Neo
-#   ./neo setup
+# Installation :
+#   curl -fsSL https://raw.githubusercontent.com/EdenDadou/Neo/main/install.sh | sudo bash
 #
 
 set -e
@@ -53,24 +52,6 @@ neo_installed() {
     $PYTHON -c "import neo_core.vox.cli" 2>/dev/null
 }
 
-# ─── Bootstrap : installer si nécessaire ─────────────────────
-bootstrap() {
-    echo -e "\n${CYAN}${BOLD}  Neo Core — Bootstrap${RESET}\n"
-    echo -e "  ${DIM}Première exécution détectée, installation en cours...${RESET}\n"
-
-    # Upgrade pip
-    $PYTHON -m pip install --upgrade pip -q 2>/dev/null || true
-
-    # Install en mode éditable
-    if $PYTHON -m pip install -e "${SCRIPT_DIR}[dev]" -q 2>/dev/null; then
-        echo -e "  ${GREEN}✓${RESET} Neo Core installé avec succès !\n"
-    else
-        echo -e "  ${RED}✗ Erreur d'installation${RESET}"
-        echo -e "  ${DIM}Essayez : $PYTHON -m pip install -e '${SCRIPT_DIR}[dev]'${RESET}\n"
-        exit 1
-    fi
-}
-
 # ─── Main ─────────────────────────────────────────────────────
 
 # Si pas d'argument, afficher l'aide
@@ -79,16 +60,21 @@ if [ $# -eq 0 ]; then
     echo -e "  ${BOLD}Usage :${RESET}"
     echo -e "    ./neo ${CYAN}<commande>${RESET}\n"
     echo -e "  ${BOLD}Commandes :${RESET}"
-    echo -e "    ${CYAN}setup${RESET}      Onboarding complet (install + config + chat)"
+    echo -e "    ${CYAN}setup${RESET}      Configurer Neo (clés API, providers...)"
     echo -e "    ${CYAN}chat${RESET}       Lancer le chat"
     echo -e "    ${CYAN}status${RESET}     Santé du système"
     echo -e "    ${CYAN}version${RESET}    Version\n"
     exit 0
 fi
 
-# Bootstrap si nécessaire
+# Vérifier que Neo est installé
 if ! neo_installed; then
-    bootstrap
+    echo -e "\n  ${RED}✗ Neo Core n'est pas installé.${RESET}"
+    echo -e "  ${DIM}Lancez l'installation complète :${RESET}\n"
+    echo -e "  ${CYAN}${BOLD}  sudo bash install.sh${RESET}\n"
+    echo -e "  ${DIM}Ou depuis un serveur :${RESET}"
+    echo -e "  ${CYAN}  curl -fsSL https://raw.githubusercontent.com/EdenDadou/Neo/main/install.sh | sudo bash${RESET}\n"
+    exit 1
 fi
 
 # Lancer la commande

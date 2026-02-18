@@ -29,8 +29,7 @@ def print_usage():
     neo {CYAN}<commande>{RESET}
 
   {BOLD}Commandes :{RESET}
-    {CYAN}setup{RESET}             Onboarding complet (install deps + config + lance le chat)
-    {CYAN}setup --auto{RESET}      Installation rapide (minimum de questions)
+    {CYAN}setup{RESET}             Configurer Neo (identité, clés API, providers, Telegram)
     {CYAN}chat{RESET}              Lancer le chat directement
     {CYAN}api{RESET}               Lancer le serveur REST API
 
@@ -69,8 +68,7 @@ def main():
 
     if command == "setup":
         from neo_core.vox.cli.setup import run_setup
-        auto_mode = "--auto" in sys.argv or "-a" in sys.argv
-        run_setup(auto_mode=auto_mode)
+        run_setup()
 
     elif command == "chat":
         from neo_core.vox.cli.chat import run_chat

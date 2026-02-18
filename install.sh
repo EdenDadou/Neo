@@ -71,6 +71,37 @@ check_root() {
     fi
 }
 
+# ─── Fonctions de préservation des données utilisateur ────
+
+_preserve_user_data() {
+    rm -rf /tmp/neo-data-backup 2>/dev/null || true
+    rm -f /tmp/neo-env-backup 2>/dev/null || true
+
+    if [[ -d "${INSTALL_DIR}/data" ]]; then
+        cp -r "${INSTALL_DIR}/data" /tmp/neo-data-backup 2>/dev/null || true
+        log_info "Données existantes sauvegardées"
+    fi
+    if [[ -f "${INSTALL_DIR}/.env" ]]; then
+        cp "${INSTALL_DIR}/.env" /tmp/neo-env-backup 2>/dev/null || true
+        chmod 600 /tmp/neo-env-backup 2>/dev/null || true
+        log_info "Configuration .env sauvegardée"
+    fi
+}
+
+_restore_user_data() {
+    if [[ -d /tmp/neo-data-backup ]]; then
+        cp -r /tmp/neo-data-backup "${INSTALL_DIR}/data" 2>/dev/null || true
+        rm -rf /tmp/neo-data-backup 2>/dev/null || true
+        log_info "Données restaurées"
+    fi
+    if [[ -f /tmp/neo-env-backup ]]; then
+        cp /tmp/neo-env-backup "${INSTALL_DIR}/.env" 2>/dev/null || true
+        chmod 600 "${INSTALL_DIR}/.env" 2>/dev/null || true
+        shred -u /tmp/neo-env-backup 2>/dev/null || rm -f /tmp/neo-env-backup 2>/dev/null || true
+        log_info "Configuration .env restaurée"
+    fi
+}
+
 # ─── Banner ───────────────────────────────────────────────
 
 clear
@@ -95,8 +126,11 @@ echo -e "${RESET}"
 
 check_root
 
-# Initialiser le fichier de log
-echo "=== Neo Core Install — $(date) ===" > "$LOG_FILE"
+# Initialiser le fichier de log (tronquer si > 10MB)
+if [[ -f "$LOG_FILE" ]] && [[ $(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) -gt 10485760 ]]; then
+    tail -1000 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+fi
+echo "=== Neo Core Install — $(date) ===" >> "$LOG_FILE"
 
 # ─── Vérification de l'espace disque ─────────────────────
 check_disk_space() {
@@ -274,57 +308,62 @@ if [[ "$REAL_USER" != "root" ]] && [[ -f "/home/${REAL_USER}/.bashrc" ]]; then
 fi
 
 # ═══════════════════════════════════════════════════════════
-#  Étape 3 : Cloner le dépôt
+#  Étape 3 : Code source Neo Core
 # ═══════════════════════════════════════════════════════════
 
-log_step 3 $TOTAL_STEPS "Téléchargement de Neo Core"
+log_step 3 $TOTAL_STEPS "Code source Neo Core"
 
-# Toujours supprimer et re-cloner pour garantir un code à jour
-# (évite les problèmes de safe.directory quand le dossier appartient à un autre user)
+REPO_URL="https://github.com/EdenDadou/Neo.git"
+
 if [[ -d "$INSTALL_DIR" ]]; then
-    # Nettoyer d'anciens backups avant d'en créer de nouveaux
-    rm -rf /tmp/neo-data-backup 2>/dev/null || true
-    rm -f /tmp/neo-env-backup 2>/dev/null || true
+    if [[ -d "${INSTALL_DIR}/.git" ]]; then
+        # ─── Repo git existant → mise à jour ───
+        log_info "Code existant détecté dans ${INSTALL_DIR}"
 
-    # Sauvegarder les données utilisateur si elles existent
-    if [[ -d "${INSTALL_DIR}/data" ]]; then
-        cp -r "${INSTALL_DIR}/data" /tmp/neo-data-backup 2>/dev/null || true
-        log_info "Données existantes sauvegardées dans /tmp/neo-data-backup"
-    fi
-    if [[ -f "${INSTALL_DIR}/.env" ]]; then
-        cp "${INSTALL_DIR}/.env" /tmp/neo-env-backup 2>/dev/null || true
-        chmod 600 /tmp/neo-env-backup 2>/dev/null || true
-        log_info "Configuration .env sauvegardée (permissions restreintes)"
-    fi
-    # Arrêter le service avant suppression
-    systemctl stop neo-guardian 2>/dev/null || true
-    rm -rf "$INSTALL_DIR"
-fi
+        # Fix safe.directory (root exécute git sur un dossier d'un autre user)
+        git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
 
-if run_or_fail "Clonage du dépôt dans $INSTALL_DIR" git clone --quiet https://github.com/EdenDadou/Neo.git "$INSTALL_DIR"; then
-    :
+        systemctl stop neo-guardian 2>/dev/null || true
+
+        cd "$INSTALL_DIR"
+        if run_or_fail "Mise à jour du code (git pull)" git pull --ff-only origin main; then
+            :
+        else
+            log_warn "git pull échoué — tentative de synchronisation forcée"
+            if git fetch origin >> "$LOG_FILE" 2>&1 && \
+               git reset --hard origin/main >> "$LOG_FILE" 2>&1; then
+                log_info "Code synchronisé depuis GitHub"
+            else
+                log_warn "Mise à jour impossible — utilisation du code existant"
+                log_warn "Vérifiez votre connexion internet pour les prochaines mises à jour"
+            fi
+        fi
+    else
+        # ─── Dossier existant mais PAS un repo git (install cassée) ───
+        log_warn "${INSTALL_DIR} existe mais n'est pas un dépôt Git — réinstallation"
+
+        _preserve_user_data
+
+        systemctl stop neo-guardian 2>/dev/null || true
+        rm -rf "$INSTALL_DIR"
+
+        if run_or_fail "Clonage du dépôt dans $INSTALL_DIR" git clone --quiet "$REPO_URL" "$INSTALL_DIR"; then
+            :
+        else
+            log_error "Impossible de cloner le dépôt. Vérifiez votre connexion internet."
+            exit 1
+        fi
+
+        _restore_user_data
+    fi
 else
-    log_error "Impossible de cloner le dépôt. Vérifiez votre connexion internet."
-    exit 1
-fi
-
-# Restaurer les données si backup existe
-if [[ -d /tmp/neo-data-backup ]]; then
-    cp -r /tmp/neo-data-backup "${INSTALL_DIR}/data" 2>/dev/null || true
-    rm -rf /tmp/neo-data-backup 2>/dev/null || true
-    log_info "Données restaurées"
-fi
-if [[ -f /tmp/neo-env-backup ]]; then
-    cp /tmp/neo-env-backup "${INSTALL_DIR}/.env" 2>/dev/null || true
-    chmod 600 "${INSTALL_DIR}/.env" 2>/dev/null || true
-    # Suppression sécurisée du backup (évite de laisser des secrets dans /tmp)
-    shred -u /tmp/neo-env-backup 2>/dev/null || rm -f /tmp/neo-env-backup 2>/dev/null || true
-    log_info "Configuration .env restaurée et backup supprimé"
-fi
-
-# Nettoyer le log précédent s'il est volumineux (> 10MB)
-if [[ -f "$LOG_FILE" ]] && [[ $(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) -gt 10485760 ]]; then
-    tail -1000 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+    # ─── Aucun code présent → installation fraîche ───
+    if run_or_fail "Clonage du dépôt dans $INSTALL_DIR" git clone --quiet "$REPO_URL" "$INSTALL_DIR"; then
+        :
+    else
+        log_error "Impossible de cloner le dépôt. Vérifiez votre connexion internet."
+        exit 1
+    fi
 fi
 
 cd "$INSTALL_DIR"
@@ -533,7 +572,7 @@ echo
 # qui fait sudo -u neo, car sudo peut échouer si le disque est plein ou le PTY indisponible)
 # On chown les fichiers de config après
 echo -e "  ${DIM}Lancement du wizard...${RESET}\n"
-cd "${INSTALL_DIR}" && "${VENV_DIR}/bin/neo" setup --auto < /dev/tty
+cd "${INSTALL_DIR}" && "${VENV_DIR}/bin/neo" setup < /dev/tty
 WIZARD_EXIT=$?
 
 # Rendre les fichiers de config accessibles à l'utilisateur neo
@@ -561,7 +600,7 @@ if [[ $WIZARD_EXIT -eq 0 ]]; then
     echo -e "  ${BOLD}Commandes utiles :${RESET}"
     echo -e "    ${CYAN}neo chat${RESET}                            Discuter avec Neo"
     echo -e "    ${CYAN}neo status${RESET}                          État du système"
-    echo -e "    ${CYAN}neo setup${RESET}                           Relancer le wizard complet"
+    echo -e "    ${CYAN}neo setup${RESET}                           Reconfigurer (clés API, providers...)"
     echo -e "    ${CYAN}neo logs${RESET}                            Voir les logs Neo"
     echo -e "    ${CYAN}sudo journalctl -u neo-guardian -f${RESET}  Logs systemd en temps réel"
     echo -e "    ${CYAN}sudo systemctl restart neo-guardian${RESET} Redémarrer le service"
