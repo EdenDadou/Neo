@@ -443,6 +443,15 @@ class Brain:
         re.IGNORECASE,
     )
 
+    # Mots-clés signalant une intention de projet/epic (force delegate_crew)
+    _EPIC_INTENT_RE = re.compile(
+        r"\b(epic|projet|project|plan|roadmap|planifi[eé]|organise|"
+        r"stratégie|strategy|étapes|steps|feuille de route|programme|"
+        r"décompose|decompose|multi[- ]?étapes|multi[- ]?step|"
+        r"lance[- ]moi un|monte[- ]moi un|prépare[- ]moi un|"
+        r"mets en place|set up|blueprint)\b", re.IGNORECASE,
+    )
+
     # Mots-clés indiquant des sous-tâches implicites (complexité élevée)
     _COMPLEXITY_MULTI_ACTION = re.compile(
         r"\b(puis|ensuite|après|et aussi|également|en plus|aussi|"
@@ -473,6 +482,11 @@ class Brain:
         """
         word_count = len(request.split())
         score = 0
+
+        # Intention explicite de projet/epic → immédiatement complexe
+        epic_intent = self._EPIC_INTENT_RE.findall(request)
+        if epic_intent:
+            score += 5  # Force "complex"
 
         # Verbes d'action multiples → sous-tâches implicites
         action_verbs = self._COMPLEXITY_ACTION_VERBS.findall(request)
@@ -526,6 +540,9 @@ class Brain:
         complexity = self.analyze_complexity(request)
         worker_type = self.factory.classify_task(classification_input)
 
+        # 0. Détection d'intention epic (projet, plan, roadmap...)
+        has_epic_intent = bool(self._EPIC_INTENT_RE.search(request))
+
         # 1. Application des patches comportementaux
         patch_overrides = self._apply_behavior_patches(request, worker_type)
         if "override_worker_type" in patch_overrides:
@@ -534,7 +551,11 @@ class Brain:
             except ValueError:
                 pass
 
-        # 2. Route selon le type détecté
+        # 2. Si intention epic explicite → toujours route vers complex/epic
+        if has_epic_intent:
+            return self._decide_complex_generic(request, worker_type)
+
+        # 3. Route selon le type détecté
         if worker_type != WorkerType.GENERIC:
             return self._decide_typed_worker(
                 request, complexity, worker_type, patch_overrides
@@ -589,7 +610,12 @@ class Brain:
     def _decide_complex_generic(
         self, request: str, worker_type: WorkerType,
     ) -> BrainDecision:
-        """Décision pour une requête complexe sans type spécifique."""
+        """Décision pour une requête complexe sans type spécifique.
+
+        Quand une intention epic est détectée, force delegate_crew
+        même si la décomposition heuristique ne donne que peu de sous-tâches.
+        """
+        has_epic_intent = bool(self._EPIC_INTENT_RE.search(request))
         subtasks = self._decompose_task(request)
         confidence = 0.5
 
@@ -611,9 +637,11 @@ class Brain:
                 except ValueError as e:
                     logger.debug("Invalid worker type for skill %s: %s", best_skill.worker_type, e)
 
-        # Si 3+ sous-tâches → delegate_crew (Epic)
+        # Si intention epic ou 3+ sous-tâches → delegate_crew (Epic)
         metadata = {"_cached_learning_advice": advice} if advice else {}
-        if len(subtasks) >= 3:
+        if has_epic_intent:
+            metadata["epic_intent"] = True
+        if has_epic_intent or len(subtasks) >= 3:
             return BrainDecision(
                 action="delegate_crew",
                 subtasks=subtasks,
