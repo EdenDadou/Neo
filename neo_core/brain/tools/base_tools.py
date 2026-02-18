@@ -98,7 +98,7 @@ def web_search_tool(query: str) -> str:
         for i, r in enumerate(results, 1):
             title = r.get("title", "Sans titre")
             href = r.get("href", "")
-            body = r.get("body", "")[:300]
+            body = r.get("body", "")[:800]
             formatted.append(f"{i}. «{title}» — {href}\n   {body}")
 
         return "\n".join(formatted)

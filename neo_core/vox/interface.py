@@ -361,14 +361,16 @@ class Vox:
                     if any(msg_lower.startswith(p) or msg_lower == p for p in confirmation_patterns):
                         return False  # → passer à Brain avec le contexte
 
-        # Salutations et conversation légère (uniquement quand pas en conversation active)
+        # Salutations et conversation légère — UNIQUEMENT si le message n'est QUE ça
+        # "Merci pour les notes, résume-les" NE doit PAS être classé simple
+        import re as _re
         simple_patterns = [
-            "salut", "hello", "bonjour", "bonsoir", "hey", "hi", "yo",
-            "ça va", "ca va", "comment tu vas", "comment vas-tu",
-            "merci", "thanks",
-            "quoi de neuf", "coucou", "wesh", "slt",
+            r"^(salut|hello|bonjour|bonsoir|hey|hi|yo)\s*[!.]*$",
+            r"^(ça va|ca va|comment tu vas|comment vas-tu)\s*[?!.]*$",
+            r"^(merci|thanks)\s*[!.]*$",
+            r"^(quoi de neuf|coucou|wesh|slt)\s*[!.]*$",
         ]
-        if any(msg_lower.startswith(p) or msg_lower == p for p in simple_patterns):
+        if any(_re.match(pat, msg_lower) for pat in simple_patterns):
             return True
 
         # Questions sur Neo lui-même
@@ -484,7 +486,7 @@ class Vox:
         """
         return human_message
 
-    def _build_recent_context(self, max_turns: int = 3) -> str:
+    def _build_recent_context(self, max_turns: int = 8) -> str:
         """
         Construit un résumé des derniers échanges pour contextualiser
         les messages courts ou ambigus (pronoms, références implicites).
@@ -501,7 +503,7 @@ class Vox:
         for msg in recent:
             role = "User" if isinstance(msg, HumanMessage) else "Neo"
             # Tronquer les réponses longues pour ne pas saturer le prompt
-            content = msg.content[:150] + "..." if len(msg.content) > 150 else msg.content
+            content = msg.content[:400] + "..." if len(msg.content) > 400 else msg.content
             lines.append(f"  {role}: {content}")
         lines.append("")  # Ligne vide avant la demande
         return "\n".join(lines)
@@ -516,9 +518,14 @@ class Vox:
             return human_message
 
         try:
-            # Injecter le contexte récent pour les messages courts/ambigus
+            # Injecter le contexte récent pour les messages courts/ambigus ou avec pronoms
             recent_context = ""
-            if len(human_message.split()) < 10 and self.conversation_history:
+            _has_pronoun = any(p in human_message.lower() for p in [
+                "ça", "cela", "ce", "pareil", "même", "ça", "il", "elle",
+                "les", "les mêmes", "eux", "celle", "celui", "continue",
+                "enchaîne", "la suite", "fais-le", "fais le",
+            ])
+            if (len(human_message.split()) < 20 or _has_pronoun) and self.conversation_history:
                 recent_context = self._build_recent_context()
 
             prompt = VOX_REFORMULATE_PROMPT.format(
@@ -554,10 +561,10 @@ class Vox:
         if not self.brain:
             return "[Erreur] Brain n'est pas connecté à Vox."
 
-        # Enregistre le message dans l'historique (borné à 20 messages max — perf)
+        # Enregistre le message dans l'historique (borné à 50 messages max)
         self.conversation_history.append(HumanMessage(content=human_message))
-        if len(self.conversation_history) > 20:
-            self.conversation_history = self.conversation_history[-20:]
+        if len(self.conversation_history) > 50:
+            self.conversation_history = self.conversation_history[-50:]
 
         # ── Message simple → Vox répond seul (instantané) ──
         if self._is_simple_message(human_message):
