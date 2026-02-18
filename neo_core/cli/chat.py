@@ -696,12 +696,169 @@ async def conversation_loop(vox):
             console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
 
 
+def _get_api_key(config: NeoConfig) -> str:
+    """Récupère la clé API pour se connecter au daemon."""
+    key = getattr(config.llm, "api_key", None) or ""
+    if not key:
+        key = os.environ.get("NEO_API_KEY", "")
+    if not key:
+        key = os.environ.get("ANTHROPIC_API_KEY", "")
+    return key
+
+
+async def api_conversation_loop(config: NeoConfig, api_url: str):
+    """
+    Boucle de conversation via l'API du daemon.
+
+    Au lieu de créer un Vox local, envoie les messages au daemon
+    via HTTP POST /chat. Résultat : même conversation que Telegram,
+    même Vox, même mémoire, même contexte.
+    """
+    import httpx
+
+    api_key = _get_api_key(config)
+    headers = {}
+    if api_key:
+        headers["X-Neo-Key"] = api_key
+
+    print_banner(config)
+
+    console.print(
+        f"\n  [bold]Bienvenue {config.user_name}[/bold] — "
+        f"[dim]{config.core_name} est prêt.[/dim]"
+    )
+    console.print(
+        f"  [dim green]✓ Connecté au daemon ({api_url})[/dim green]"
+    )
+    console.print(
+        f"  [dim]  Conversation unifiée avec Telegram.[/dim]\n"
+    )
+    console.print(
+        "[dim]  Tapez /help pour les commandes disponibles.[/dim]\n"
+    )
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        while True:
+            try:
+                user_input = await asyncio.to_thread(
+                    console.input,
+                    f"[bold green]  {config.user_name} >[/bold green] ",
+                )
+            except (KeyboardInterrupt, EOFError):
+                console.print("\n[dim]  Au revoir ![/dim]")
+                sys.exit(0)
+
+            user_input = user_input.strip()
+            if not user_input:
+                continue
+
+            cmd = user_input.lower()
+            if cmd in ("/quit", "/exit", "quit", "exit", "q"):
+                console.print("[dim]  Au revoir ![/dim]")
+                sys.exit(0)
+
+            if cmd in ("/help", "help"):
+                print_help()
+                continue
+
+            # Commandes /status, /health → appeler les endpoints API
+            if cmd in ("/status", "status"):
+                try:
+                    resp = await client.get(f"{api_url}/status", headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        lines = [
+                            f"  Core    : {data.get('core_name', '?')}",
+                            f"  Status  : {data.get('status', '?')}",
+                            f"  Uptime  : {data.get('uptime_seconds', 0):.0f}s",
+                            f"  Guardian: {'oui' if data.get('guardian_mode') else 'non'}",
+                        ]
+                        agents = data.get("agents", {})
+                        for name, info in agents.items():
+                            lines.append(f"  {name:10}: {info}")
+                        console.print(Panel("\n".join(lines), title="[bold]État du système[/bold]", border_style="dim"))
+                    else:
+                        console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
+                except Exception as e:
+                    console.print(f"[red]  Erreur: {e}[/red]")
+                continue
+
+            if cmd in ("/health", "health"):
+                try:
+                    resp = await client.get(f"{api_url}/health")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        checks = data.get("checks", {})
+                        lines = [f"  {k}: {v}" for k, v in checks.items()]
+                        console.print(Panel("\n".join(lines), title="[bold]Health[/bold]", border_style="dim"))
+                except Exception as e:
+                    console.print(f"[red]  Erreur: {e}[/red]")
+                continue
+
+            # Envoyer le message au daemon via POST /chat
+            try:
+                resp = await client.post(
+                    f"{api_url}/chat",
+                    json={"message": user_input},
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    response_text = data.get("response", "")
+                    console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response_text}\n")
+                elif resp.status_code == 401:
+                    console.print(
+                        "[red]  ⚠ Accès refusé — clé API invalide. "
+                        "Vérifiez NEO_API_KEY ou ANTHROPIC_API_KEY.[/red]"
+                    )
+                elif resp.status_code == 503:
+                    console.print("[yellow]  ⚠ Neo Core pas encore initialisé — réessayez.[/yellow]")
+                else:
+                    console.print(f"[red]  Erreur API ({resp.status_code}): {resp.text[:200]}[/red]")
+            except httpx.ConnectError:
+                console.print(
+                    "[red]  ⚠ Connexion au daemon perdue. "
+                    "Vérifiez avec: neo status[/red]"
+                )
+            except Exception as e:
+                console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
+
+
 def run_chat():
-    """Point d'entrée du chat."""
+    """
+    Point d'entrée du chat.
+
+    Si le daemon tourne (API sur localhost:8000), utilise le mode API
+    pour partager la même conversation avec Telegram.
+    Sinon, crée un Vox local (mode standalone).
+    """
     config = NeoConfig()
 
     if not check_installation(config):
         return
 
-    vox = bootstrap()
-    asyncio.run(conversation_loop(vox))
+    # Vérifier si le daemon tourne
+    daemon_running = False
+    api_url = "http://localhost:8000"
+    try:
+        from neo_core.core.daemon import is_running
+        if is_running():
+            # Vérifier que l'API répond
+            import httpx
+            resp = httpx.get(f"{api_url}/health", timeout=3.0)
+            if resp.status_code == 200:
+                daemon_running = True
+    except Exception:
+        pass
+
+    if daemon_running:
+        console.print(
+            "[dim]  Daemon détecté — mode unifié (même conversation que Telegram).[/dim]"
+        )
+        asyncio.run(api_conversation_loop(config, api_url))
+    else:
+        console.print(
+            "[dim]  Daemon non détecté — mode local (conversation isolée).[/dim]"
+        )
+        vox = bootstrap()
+        asyncio.run(conversation_loop(vox))
