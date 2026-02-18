@@ -366,7 +366,7 @@ class NeoTUI(App):
 
         # Afficher le message utilisateur
         user_text = Text()
-        user_text.append(f"  {self.config.user_name} > ", style="bold white")
+        user_text.append(f"  {self.config.user_name} > ", style="bold red")
         user_text.append(user_input)
         chat.write(user_text)
 
