@@ -558,127 +558,121 @@ class Brain:
         """
         Prend une décision stratégique sur la manière de traiter la requête.
 
-        Boucle d'apprentissage fermée :
+        Pipeline :
         1. Classifie la tâche (Factory)
-        2. Consulte l'historique des erreurs (Memory/LearningEngine)
-        3. Ajuste la stratégie si nécessaire
-        4. Retourne la décision avec confiance ajustée
+        2. Applique les patches comportementaux (Level 3)
+        3. Consulte l'historique d'apprentissage
+        4. Route vers le bon type de réponse
         """
         complexity = self.analyze_complexity(request)
         worker_type = self.factory.classify_task(request)
 
-        # ── Application des patches comportementaux (Level 3) ──
-        patch_overrides = {}
-        if self.self_patcher:
-            try:
-                patch_overrides = self.self_patcher.apply_patches(
-                    request, worker_type.value if worker_type != WorkerType.GENERIC else "generic"
-                )
-            except Exception as exc:
-                logger.debug("SelfPatcher apply_patches error: %s", exc)
-
-        # Si un patch force un changement de worker_type
+        # 1. Application des patches comportementaux
+        patch_overrides = self._apply_behavior_patches(request, worker_type)
         if "override_worker_type" in patch_overrides:
             try:
                 worker_type = WorkerType(patch_overrides["override_worker_type"])
             except ValueError:
                 pass
 
-        # Si un type spécifique est détecté → TOUJOURS déléguer
+        # 2. Route selon le type détecté
         if worker_type != WorkerType.GENERIC:
-            subtasks = self.factory._basic_decompose(request, worker_type)
-            confidence = 0.8
-
-            # ── Consultation de l'historique (Learning Loop) ──
-            advice = self._consult_learning(request, worker_type.value)
-
-            if advice:
-                # Ajuster la confiance en fonction de l'historique
-                confidence += advice.confidence_adjustment
-                confidence = max(0.1, min(1.0, confidence))
-
-                reasoning_parts = [f"Type {worker_type.value} détecté"]
-
-                # Si un worker alternatif est recommandé
-                if advice.recommended_worker and advice.recommended_worker != worker_type.value:
-                    try:
-                        alt_type = WorkerType(advice.recommended_worker)
-                        worker_type = alt_type
-                        subtasks = self.factory._basic_decompose(request, alt_type)
-                        reasoning_parts.append(
-                            f"→ substitué par {alt_type.value} (historique)"
-                        )
-                    except ValueError as e:
-                        logger.debug("Type de worker invalide %s: %s", advice.recommended_worker, e)
-
-                # Si des avertissements existent, les inclure
-                if advice.warnings:
-                    reasoning_parts.append(f"⚠ {'; '.join(advice.warnings[:2])}")
-
-                reasoning = " | ".join(reasoning_parts)
-            else:
-                reasoning = f"Type {worker_type.value} détecté → Worker (complexité: {complexity})"
-
-            decision = BrainDecision(
-                action="delegate_worker",
-                subtasks=subtasks,
-                confidence=confidence,
-                worker_type=worker_type.value,
-                reasoning=reasoning,
-                metadata=patch_overrides if patch_overrides else {},
+            return self._decide_typed_worker(
+                request, complexity, worker_type, patch_overrides
             )
-            return decision
 
-        # Requêtes complexes sans type spécifique → Worker generic ou Epic (crew)
         if complexity == "complex":
-            subtasks = self._decompose_task(request)
-            confidence = 0.5
+            return self._decide_complex_generic(request, worker_type)
 
-            # Consultation learning même pour les workers génériques
-            advice = self._consult_learning(request, "generic")
-            reasoning = f"Tâche complexe → Worker {worker_type.value}"
+        return self._decide_simple_generic(request, complexity)
 
-            if advice and advice.relevant_skills:
-                # Si on a une compétence passée pertinente, l'utiliser
-                best_skill = advice.relevant_skills[0]
-                if best_skill.worker_type != "generic":
-                    try:
-                        alt_type = WorkerType(best_skill.worker_type)
-                        worker_type = alt_type
-                        subtasks = self.factory._basic_decompose(request, alt_type)
-                        reasoning = (
-                            f"Tâche complexe → substitué par {alt_type.value} "
-                            f"(compétence acquise: {best_skill.name})"
-                        )
-                        confidence = 0.7
-                    except ValueError as e:
-                        logger.debug("Type de worker invalide pour compétence %s: %s", best_skill.worker_type, e)
+    def _apply_behavior_patches(self, request: str, worker_type: WorkerType) -> dict:
+        """Applique les patches comportementaux du SelfPatcher (Level 3)."""
+        if not self.self_patcher:
+            return {}
+        try:
+            return self.self_patcher.apply_patches(
+                request, worker_type.value if worker_type != WorkerType.GENERIC else "generic"
+            )
+        except Exception as exc:
+            logger.debug("SelfPatcher apply_patches error: %s", exc)
+            return {}
 
-            # Si 3+ sous-tâches distinctes → delegate_crew (Epic)
-            if len(subtasks) >= 3:
-                return BrainDecision(
-                    action="delegate_crew",
-                    subtasks=subtasks,
-                    confidence=confidence,
-                    worker_type=worker_type.value,
-                    reasoning=f"Tâche complexe ({len(subtasks)} sous-tâches) → Epic (crew)",
-                )
+    def _decide_typed_worker(
+        self, request: str, complexity: str,
+        worker_type: WorkerType, patch_overrides: dict,
+    ) -> BrainDecision:
+        """Décision pour une requête avec un type de worker spécifique détecté."""
+        subtasks = self.factory._basic_decompose(request, worker_type)
+        confidence = 0.8
 
+        advice = self._consult_learning(request, worker_type.value)
+        if advice:
+            confidence = max(0.1, min(1.0, confidence + advice.confidence_adjustment))
+            worker_type, subtasks, reasoning = self._apply_learning_advice(
+                request, worker_type, subtasks, advice
+            )
+        else:
+            reasoning = f"Type {worker_type.value} détecté → Worker (complexité: {complexity})"
+
+        return BrainDecision(
+            action="delegate_worker",
+            subtasks=subtasks,
+            confidence=confidence,
+            worker_type=worker_type.value,
+            reasoning=reasoning,
+            metadata=patch_overrides if patch_overrides else {},
+        )
+
+    def _decide_complex_generic(
+        self, request: str, worker_type: WorkerType,
+    ) -> BrainDecision:
+        """Décision pour une requête complexe sans type spécifique."""
+        subtasks = self._decompose_task(request)
+        confidence = 0.5
+
+        advice = self._consult_learning(request, "generic")
+        reasoning = f"Tâche complexe → Worker {worker_type.value}"
+
+        if advice and advice.relevant_skills:
+            best_skill = advice.relevant_skills[0]
+            if best_skill.worker_type != "generic":
+                try:
+                    alt_type = WorkerType(best_skill.worker_type)
+                    worker_type = alt_type
+                    subtasks = self.factory._basic_decompose(request, alt_type)
+                    reasoning = (
+                        f"Tâche complexe → substitué par {alt_type.value} "
+                        f"(compétence acquise: {best_skill.name})"
+                    )
+                    confidence = 0.7
+                except ValueError as e:
+                    logger.debug("Invalid worker type for skill %s: %s", best_skill.worker_type, e)
+
+        # Si 3+ sous-tâches → delegate_crew (Epic)
+        if len(subtasks) >= 3:
             return BrainDecision(
-                action="delegate_worker",
+                action="delegate_crew",
                 subtasks=subtasks,
                 confidence=confidence,
                 worker_type=worker_type.value,
-                reasoning=reasoning,
+                reasoning=f"Tâche complexe ({len(subtasks)} sous-tâches) → Epic (crew)",
             )
 
-        # Requêtes simples/modérées sans type spécifique → réponse directe
-        # Mais vérifier si une compétence passée suggère de déléguer
+        return BrainDecision(
+            action="delegate_worker",
+            subtasks=subtasks,
+            confidence=confidence,
+            worker_type=worker_type.value,
+            reasoning=reasoning,
+        )
+
+    def _decide_simple_generic(self, request: str, complexity: str) -> BrainDecision:
+        """Décision pour une requête simple/modérée sans type spécifique."""
         advice = self._consult_learning(request, "generic")
         if advice and advice.relevant_skills:
             best_skill = advice.relevant_skills[0]
             if best_skill.success_count >= 2:
-                # On a une compétence prouvée pour ce type de requête → déléguer
                 try:
                     skill_type = WorkerType(best_skill.worker_type)
                     subtasks = self.factory._basic_decompose(request, skill_type)
@@ -693,7 +687,7 @@ class Brain:
                         ),
                     )
                 except ValueError as e:
-                    logger.debug("Type de worker invalide pour compétence acquise %s: %s", best_skill.worker_type, e)
+                    logger.debug("Invalid worker type for acquired skill %s: %s", best_skill.worker_type, e)
 
         return BrainDecision(
             action="direct_response",
@@ -701,6 +695,27 @@ class Brain:
             confidence=0.9 if complexity == "simple" else 0.7,
             reasoning=f"Requête {complexity} générique → réponse directe",
         )
+
+    def _apply_learning_advice(
+        self, request: str, worker_type: WorkerType,
+        subtasks: list[str], advice: object,
+    ) -> tuple[WorkerType, list[str], str]:
+        """Ajuste le worker_type et les subtasks selon les conseils du LearningEngine."""
+        reasoning_parts = [f"Type {worker_type.value} détecté"]
+
+        if advice.recommended_worker and advice.recommended_worker != worker_type.value:
+            try:
+                alt_type = WorkerType(advice.recommended_worker)
+                worker_type = alt_type
+                subtasks = self.factory._basic_decompose(request, alt_type)
+                reasoning_parts.append(f"→ substitué par {alt_type.value} (historique)")
+            except ValueError as e:
+                logger.debug("Invalid recommended worker %s: %s", advice.recommended_worker, e)
+
+        if advice.warnings:
+            reasoning_parts.append(f"⚠ {'; '.join(advice.warnings[:2])}")
+
+        return worker_type, subtasks, " | ".join(reasoning_parts)
 
     def _consult_learning(self, request: str, worker_type: str) -> object | None:
         """

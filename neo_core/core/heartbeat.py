@@ -170,11 +170,22 @@ class HeartbeatManager:
         2. Détecter les tâches stale → alerter
         3. Consolider Memory si nécessaire
         """
-        if not self.memory or not self.memory.is_initialized:
+        if not self.memory:
+            logger.warning("[Heartbeat] Memory non disponible, pulse ignoré")
             return
+
+        if not self.memory.is_initialized:
+            logger.warning("[Heartbeat] Memory non initialisé, tentative de réinit...")
+            try:
+                self.memory.initialize()
+                logger.info("[Heartbeat] Memory réinitialisé avec succès")
+            except Exception as e:
+                logger.error("[Heartbeat] Réinit Memory échouée: %s — pulse ignoré", e)
+                return
 
         registry = self.memory.task_registry
         if not registry:
+            logger.warning("[Heartbeat] TaskRegistry non disponible, pulse ignoré")
             return
 
         # 1. Avancer les Epics actifs
@@ -197,19 +208,20 @@ class HeartbeatManager:
             self._save_guardian_state()
 
         # 6. Auto-tuning périodique (Level 1 self-improvement)
-        if (self.config.auto_tuning and
+        from neo_core.features import feature_enabled
+        if (self.config.auto_tuning and feature_enabled("auto_tuning") and
                 self._pulse_count > 0 and
                 self._pulse_count % self.config.auto_tuning_interval_pulses == 0):
             self._run_auto_tuning()
 
         # 7. Self-patching périodique (Level 3 — auto-correction)
-        if (self.config.self_patching and
+        if (self.config.self_patching and feature_enabled("self_patching") and
                 self._pulse_count > 0 and
                 self._pulse_count % self.config.self_patching_interval_pulses == 0):
             self._run_self_patching()
 
         # 8. Tool generation périodique (Level 4 — création d'outils)
-        if (self.config.tool_generation and
+        if (self.config.tool_generation and feature_enabled("tool_generation") and
                 self._pulse_count > 0 and
                 self._pulse_count % self.config.tool_generation_interval_pulses == 0):
             self._run_tool_generation()

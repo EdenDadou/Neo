@@ -150,6 +150,10 @@ class MemoryAgent:
 
     def _init_working_memory(self) -> None:
         """Initialise la mémoire de travail (scratchpad contextuel)."""
+        from neo_core.features import feature_enabled
+        if not feature_enabled("working_memory"):
+            logger.info("[Memory] WorkingMemory désactivé par feature flag")
+            return
         try:
             self._working_memory = WorkingMemory(self.config.data_dir)
             self._working_memory.initialize()
@@ -345,13 +349,28 @@ class MemoryAgent:
         if self._turn_count % self._consolidation_interval == 0:
             self.consolidate()
 
+    # Mots vides pour le filtrage de pertinence (pré-calculé)
+    _STOP_WORDS = frozenset({
+        "le", "la", "les", "de", "du", "des", "un", "une",
+        "et", "est", "en", "pour", "dans", "sur", "avec",
+        "que", "qui", "je", "tu", "il", "on", "ce", "ça",
+        "ne", "pas", "se", "me", "te", "nous", "vous",
+        "the", "a", "an", "is", "are", "to", "of", "and",
+        "in", "for", "on", "with", "at", "by", "from",
+    })
+
     def _enrich_active_tasks(self, user_message: str, ai_response: str) -> None:
         """
-        Enrichit automatiquement les tâches in_progress avec le contexte
-        des conversations. Memory collecte les informations pertinentes
-        et les associe aux missions en cours.
+        Enrichit les tâches in_progress avec le contexte de la conversation.
+
+        Optimisé : pré-calcule les mots du message une seule fois,
+        et ne s'exécute que tous les 3 tours pour réduire la charge.
         """
         if not self._task_registry:
+            return
+
+        # Batching : enrichir seulement tous les 3 tours
+        if self._turn_count % 3 != 0:
             return
 
         try:
@@ -359,31 +378,22 @@ class MemoryAgent:
             if not active_tasks:
                 return
 
-            # Extraire un résumé court de l'échange pour le contexte
             exchange_summary = (
                 f"[{self._turn_count}] Q: {user_message[:100]} "
                 f"→ R: {ai_response[:150]}"
             )
 
-            for task in active_tasks:
-                # Vérifier si l'échange est pertinent pour cette tâche
-                # (heuristique simple : mots clés en commun)
-                task_words = set(task.description.lower().split())
-                msg_words = set(user_message.lower().split())
-                common = task_words & msg_words
+            # Pré-calculer les mots significatifs du message (une seule fois)
+            msg_words = set(user_message.lower().split()) - self._STOP_WORDS
 
-                # Au moins 2 mots en commun (hors mots vides) → pertinent
-                stop_words = {"le", "la", "les", "de", "du", "des", "un", "une",
-                              "et", "est", "en", "pour", "dans", "sur", "avec",
-                              "que", "qui", "je", "tu", "il", "on", "ce", "ça"}
-                meaningful_common = common - stop_words
+            for task in active_tasks:
+                task_words = set(task.description.lower().split()) - self._STOP_WORDS
+                meaningful_common = task_words & msg_words
 
                 if len(meaningful_common) >= 2:
                     self._task_registry.add_task_context(
                         task.id, exchange_summary
                     )
-
-                    # Si la tâche fait partie d'un epic, enrichir l'epic aussi
                     if task.epic_id:
                         self._task_registry.add_epic_context(
                             task.epic_id,
@@ -391,7 +401,7 @@ class MemoryAgent:
                         )
 
         except Exception as e:
-            logger.debug("Task enrichment failed: %s", e)  # Ne jamais bloquer le flux principal
+            logger.debug("Task enrichment failed: %s", e)
 
     async def smart_summarize(self, entries: list[MemoryRecord]) -> Optional[str]:
         """

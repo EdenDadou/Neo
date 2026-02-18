@@ -456,12 +456,21 @@ class Worker:
             # Ajouter le message assistant avec ses tool_use
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # Exécuter chaque outil et construire les résultats
+            # Exécuter chaque outil avec timeout individuel (30s)
             tool_results = []
+            tool_timeout = 30.0
             for tu in pending_tool_uses:
                 try:
-                    result = ToolRegistry.execute_tool(tu["name"], tu["input"])
+                    result = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, ToolRegistry.execute_tool, tu["name"], tu["input"]
+                        ),
+                        timeout=tool_timeout,
+                    )
                     logger.info("Tool executed: %s", tu['name'])
+                except asyncio.TimeoutError:
+                    logger.error("Tool timeout (>%.0fs): %s", tool_timeout, tu['name'])
+                    result = f"Timeout: outil {tu['name']} dépassé ({tool_timeout:.0f}s)"
                 except Exception as e:
                     logger.error("Tool execution failed: %s: %s", tu['name'], e)
                     result = f"Erreur outil {tu['name']}: {e}"
