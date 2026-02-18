@@ -209,13 +209,28 @@ class MemoryStore:
         """Implémentation interne du chargement du modèle (appelée sous lock)."""
         global _EMBEDDING_MODEL_CACHE
 
-        # Tenter FastEmbed (ONNX — pas de PyTorch, pas d'API HuggingFace Hub)
-        # Le modèle est téléchargé/caché par FastEmbed lui-même.
-        # Si pas en cache, FastEmbed le télécharge automatiquement (~80 Mo ONNX).
+        # Tenter FastEmbed (ONNX)
+        # Le modèle est téléchargé/caché par FastEmbed lui-même (~80 Mo ONNX).
         try:
             from fastembed import TextEmbedding
 
             model_name = f"sentence-transformers/{EMBEDDING_MODEL}"
+
+            # Si le modèle est déjà en cache local, activer le mode offline HuggingFace.
+            # Évite un hit API HF qui retourne 429 (rate-limiting fréquent sur VPS)
+            # même quand le modèle est disponible localement.
+            _cache_dir = Path(os.environ.get(
+                "FASTEMBED_CACHE_PATH",
+                Path.home() / ".cache" / "fastembed"
+            ))
+            if _cache_dir.exists() and not os.environ.get("HF_HUB_OFFLINE"):
+                try:
+                    next(_cache_dir.rglob("*.onnx"))  # lazy — s'arrête au 1er fichier
+                    os.environ["HF_HUB_OFFLINE"] = "1"
+                    logger.debug("Fastembed cache détecté — mode HF offline activé")
+                except StopIteration:
+                    pass  # Pas encore en cache, téléchargement normal
+
             _EMBEDDING_MODEL_CACHE = TextEmbedding(model_name=model_name)
             self._embedding_model = _EMBEDDING_MODEL_CACHE
             self._using_fallback_embeddings = False
