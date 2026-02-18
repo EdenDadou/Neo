@@ -89,11 +89,22 @@ Date et heure actuelles : {current_date}, {current_time}
 RÈGLES ABSOLUES :
 1. Tu DOIS utiliser l'outil web_search pour CHAQUE recherche. Ne réponds JAMAIS sans avoir cherché.
 2. Formule des requêtes PRÉCISES et EN ANGLAIS. Inclus la date si pertinent.
-   Exemple : "Fils Majchrzak ATP live score today" ou "ATP Doha results {current_date}"
-3. Fais 2-3 recherches avec des angles différents si la première ne suffit pas.
+   Exemple : "ATP Doha schedule {current_date}" ou "ATP tennis matches today odds"
+3. Fais MAXIMUM 3 appels d'outils au total (web_search et/ou web_fetch combinés), puis SYNTHÉTISE.
 4. Présente les RÉSULTATS TROUVÉS directement. Ne dis JAMAIS "je n'ai pas accès".
 5. Si les résultats sont partiels, présente ce que tu as trouvé + liens utiles.
-6. Réponds de manière concise et naturelle, sans markdown excessif.
+
+CONVERGENCE — CRITIQUE :
+- Après tes appels d'outils, tu DOIS produire ta RÉPONSE FINALE immédiatement.
+- Ne dis JAMAIS "Laissez-moi chercher...", "Je vais récupérer...", "Excellent, laisse-moi...".
+- Ne NARRATE PAS ton processus de recherche. L'utilisateur veut le RÉSULTAT, pas le journal de bord.
+- Si web_fetch échoue (site JavaScript), N'INSISTE PAS. Utilise les extraits de web_search et donne le lien.
+- Tu as 3 appels d'outils MAX. Si après 3 appels tu n'as pas tout, présente ce que tu as + liens directs.
+
+FORMAT DE SORTIE :
+- Quand tu appelles un outil, n'écris AUCUN texte d'accompagnement (pas de "Je vais chercher...").
+- Écris ta réponse UNIQUEMENT quand tu as fini TOUS tes appels d'outils.
+- Réponds de manière concise et naturelle, sans markdown excessif.
 
 ANTI-HALLUCINATION — TRÈS IMPORTANT :
 - N'INVENTE JAMAIS de scores, de classements, de cotes, ou de données chiffrées.
@@ -414,7 +425,15 @@ class Worker:
 
         # Tracking des tool calls
         tool_calls = []
-        max_iterations = self.config.resilience.max_tool_iterations
+        # Limites par type de worker : les researchers n'ont pas besoin de 10 itérations
+        _type_max_iterations = {
+            WorkerType.RESEARCHER: 4,   # 3-4 search/fetch max, puis synthétiser
+            WorkerType.CODER: 8,        # Peut nécessiter plus d'allers-retours
+            WorkerType.ANALYST: 6,
+        }
+        max_iterations = _type_max_iterations.get(
+            self.worker_type, self.config.resilience.max_tool_iterations
+        )
         total_text_parts = []
 
         for iteration in range(max_iterations):
@@ -463,8 +482,16 @@ class Worker:
                     })
 
             if stop_reason == "end_turn" or not pending_tool_uses:
-                # Le LLM a terminé — retourner la réponse
-                final_output = "\n".join(total_text_parts) if total_text_parts else "Tâche exécutée."
+                # Le LLM a terminé — retourner UNIQUEMENT le texte final
+                # Les text_parts intermédiaires (pendant les tool_use) sont du
+                # "thinking out loud" que l'utilisateur ne veut pas voir.
+                # On prend le texte de cette dernière itération, sinon tout.
+                current_text = [b["text"] for b in content_blocks if b["type"] == "text"]
+                if current_text:
+                    final_output = "\n".join(current_text)
+                else:
+                    # Fallback : si le dernier tour n'a pas de texte, utiliser tout
+                    final_output = "\n".join(total_text_parts) if total_text_parts else "Tâche exécutée."
                 return WorkerResult(
                     success=True,
                     output=final_output,
@@ -506,8 +533,12 @@ class Worker:
             # Renvoyer les résultats au LLM
             messages.append({"role": "user", "content": tool_results})
 
-        # Max iterations atteint
-        final_output = "\n".join(total_text_parts) if total_text_parts else "Tâche interrompue (max itérations atteint)."
+        # Max iterations atteint — prendre le texte le plus récent
+        # (le dernier text_part est la réponse la plus complète)
+        if total_text_parts:
+            final_output = total_text_parts[-1]
+        else:
+            final_output = "Tâche interrompue (max itérations atteint)."
         return WorkerResult(
             success=True,
             output=final_output,
