@@ -81,7 +81,7 @@ class MemoryConsolidator:
 
     # Seuil de distance L2 FAISS sous lequel deux entrées sont considérées similaires.
     # Plus le seuil est bas, plus la fusion est stricte.
-    # Calibré pour sentence-transformers all-MiniLM-L6-v2 (dimension 384).
+    # Calibré pour FastEmbed/ONNX all-MiniLM-L6-v2 (dimension 384).
     MERGE_DISTANCE_THRESHOLD = 0.3
 
     def merge_similar(self, similarity_threshold: float = 0.85) -> ConsolidationReport:

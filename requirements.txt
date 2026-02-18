@@ -10,7 +10,7 @@ httpx>=0.25
 psutil>=6.0
 cryptography>=42.0
 faiss-cpu>=1.7
-sentence-transformers>=2.2
+fastembed>=0.7
 
 # Dev
 pytest>=8.0

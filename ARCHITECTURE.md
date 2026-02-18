@@ -354,7 +354,7 @@ Table Rich : session_id, user_name, message_count, dates
 |--------|-------------|------|
 | Vecteurs | FAISS IndexFlatIP (384 dim) | Recherche semantique |
 | Metadata | SQLite (memory_meta.db) | Stockage structure |
-| Embeddings | sentence-transformers/all-MiniLM-L6-v2 | Vectorisation |
+| Embeddings | FastEmbed/ONNX all-MiniLM-L6-v2 | Vectorisation |
 
 **Methodes** :
 - `store(content, source, tags, importance)` → embedding + FAISS + SQLite (atomique)
@@ -622,7 +622,7 @@ Utilise par CLI, API, Telegram et Daemon pour partager les memes agents.
 ```
 langchain, langchain-anthropic, langchain-community  — LLM integration
 faiss-cpu                                             — Recherche vectorielle
-sentence-transformers                                 — Embeddings (all-MiniLM-L6-v2)
+fastembed (ONNX)                                      — Embeddings (all-MiniLM-L6-v2)
 fastapi, uvicorn                                      — API REST
 httpx                                                 — Client HTTP async
 rich                                                  — TUI terminal
