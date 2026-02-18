@@ -139,8 +139,8 @@ class Sidebar(Static):
             for epic in epics[:5]:
                 icon = status_icons.get(epic.get("status", ""), "?")
                 desc = epic.get("description", "?")
-                if len(desc) > 18:
-                    desc = desc[:17] + "…"
+                if len(desc) > 28:
+                    desc = desc[:27] + "…"
                 progress = epic.get("progress", "")
                 t.append(f"  {icon} {desc}\n", style="white")
                 if progress:
@@ -156,8 +156,8 @@ class Sidebar(Static):
             for task in tasks[:8]:
                 status = task.get("status", "")
                 desc = task.get("description", "?")
-                if len(desc) > 20:
-                    desc = desc[:19] + "…"
+                if len(desc) > 30:
+                    desc = desc[:29] + "…"
                 icon = "🔄" if status == "in_progress" else "⏳"
                 t.append(f"  {icon} {desc}\n", style="white" if status == "in_progress" else "dim")
         else:
@@ -190,23 +190,27 @@ class NeoTUI(App):
     CSS = """
     #main-row {
         height: 1fr;
+        min-height: 20;
     }
 
     #chat-area {
-        width: 1fr;
+        width: 3fr;
+        height: 100%;
         border: solid $primary;
         padding: 0 1;
         scrollbar-size: 1 1;
     }
 
     #sidebar {
-        width: 26;
+        width: 1fr;
+        height: 100%;
         border: solid $secondary;
         padding: 1;
+        min-width: 28;
     }
 
     #input-field {
-        dock: bottom;
+        height: 3;
         margin: 0 0;
     }
     """
