@@ -331,6 +331,8 @@ class TelegramBot:
                 "La conversation est partagée avec le CLI.\n\n"
                 "*Commandes :*\n"
                 "/status — État du système\n"
+                "/tasks — Registre des tâches\n"
+                "/epics — Registre des epics (projets)\n"
                 "/whoami — Info sur votre accès\n"
                 "/help — Cette aide",
                 parse_mode="Markdown",
@@ -348,6 +350,53 @@ class TelegramBot:
                 await message.reply_text(f"📊 État du système :\n\n{clean_status}")
             else:
                 await message.reply_text("⚠️ Système non initialisé")
+
+        elif cmd == "/tasks":
+            if self._vox and self._vox.memory and self._vox.memory.is_initialized:
+                try:
+                    registry = self._vox.memory.task_registry
+                    if registry:
+                        tasks = registry.get_active_tasks()
+                        if tasks:
+                            lines = ["📋 *Tâches actives :*\n"]
+                            for t in tasks[:10]:
+                                status_emoji = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}.get(t.status, "❓")
+                                lines.append(f"{status_emoji} {t.description[:60]} ({t.worker_type})")
+                            await message.reply_text("\n".join(lines), parse_mode="Markdown")
+                        else:
+                            await message.reply_text("📋 Aucune tâche active.")
+                    else:
+                        await message.reply_text("⚠️ TaskRegistry non disponible.")
+                except Exception as e:
+                    logger.warning("Telegram /tasks error: %s", e)
+                    await message.reply_text("❌ Erreur lors de la récupération des tâches.")
+            else:
+                await message.reply_text("⚠️ Memory non initialisé.")
+
+        elif cmd == "/epics":
+            if self._vox and self._vox.memory and self._vox.memory.is_initialized:
+                try:
+                    registry = self._vox.memory.task_registry
+                    if registry:
+                        epics = registry.get_all_epics(limit=10)
+                        active_epics = [e for e in epics if e.status in ("pending", "in_progress")]
+                        if active_epics:
+                            lines = ["🎯 *Epics actifs :*\n"]
+                            for epic in active_epics:
+                                epic_tasks = registry.get_epic_tasks(epic.id)
+                                done = sum(1 for t in epic_tasks if t.status == "done")
+                                total = len(epic_tasks)
+                                lines.append(f"📦 {epic.description[:60]} [{done}/{total}]")
+                            await message.reply_text("\n".join(lines), parse_mode="Markdown")
+                        else:
+                            await message.reply_text("🎯 Aucun epic actif.")
+                    else:
+                        await message.reply_text("⚠️ TaskRegistry non disponible.")
+                except Exception as e:
+                    logger.warning("Telegram /epics error: %s", e)
+                    await message.reply_text("❌ Erreur lors de la récupération des epics.")
+            else:
+                await message.reply_text("⚠️ Memory non initialisé.")
 
         elif cmd == "/whoami":
             user = message.from_user

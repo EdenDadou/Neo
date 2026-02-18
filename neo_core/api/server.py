@@ -91,13 +91,19 @@ def create_app(config=None) -> FastAPI:
             },
         )
 
-    # CORS middleware — allow_credentials=False avec wildcard origins (spec-compliant)
+    # CORS middleware — restreint aux origines locales et au VPS
+    # Note : si tu ajoutes un front-end externe, ajoute son domaine ici.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[
+            "http://localhost:3000",
+            "http://localhost:8000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:8000",
+        ],
         allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["X-Neo-Key", "Content-Type", "Authorization"],
     )
 
     # --- Security middlewares ---

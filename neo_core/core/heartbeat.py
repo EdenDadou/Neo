@@ -332,8 +332,8 @@ class HeartbeatManager:
                     task.id, "failed",
                     result=f"{type(e).__name__}: {str(e)[:200]}",
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to update task status after execution error: %s", e)
 
     # ─── Détection des tâches stale ───────────────────
 
@@ -474,8 +474,8 @@ class HeartbeatManager:
                     try:
                         from neo_core.tools.plugin_loader import PluginLoader
                         plugin_loader = PluginLoader(config.data_dir)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("PluginLoader init failed (optional): %s", e)
 
                     self._tool_generator = ToolGenerator(
                         config.data_dir,
@@ -558,8 +558,8 @@ class HeartbeatManager:
                 try:
                     active = registry.get_active_tasks()
                     active_tasks = [t.id for t in active[:10]]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to get active tasks for guardian snapshot: %s", e)
 
             snapshot = StateSnapshot(
                 heartbeat_pulse_count=self._pulse_count,
@@ -589,16 +589,16 @@ class HeartbeatManager:
         if self._on_event:
             try:
                 self._on_event(event)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Event callback failed for %s: %s", event.event_type, e)
 
         # Notifier sur Telegram les événements importants
         if event.event_type in self._TELEGRAM_NOTIFY_EVENTS:
             try:
                 from neo_core.core.registry import core_registry
                 core_registry.send_telegram(f"🧠 {event.message}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Telegram notification failed for %s: %s", event.event_type, e)
 
     # ─── Statut ───────────────────────────────────────
 

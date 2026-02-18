@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -70,6 +71,8 @@ class MemoryStore:
         self._semantic_cache: dict[str, list] = {}  # query → results
         self._semantic_cache_hits: int = 0
         self._needs_rebuild: bool = False
+        # Lock thread-safety pour les opérations FAISS (index + id_map)
+        self._faiss_lock = threading.Lock()
 
     def initialize(self) -> None:
         """Initialise les deux systèmes de stockage."""
@@ -309,10 +312,10 @@ class MemoryStore:
             all_embeddings.append(emb)
 
         embeddings = np.vstack(all_embeddings)
-        self._faiss_index.add(embeddings)
-        self._id_map = ids
-
-        self._save_faiss_index()
+        with self._faiss_lock:
+            self._faiss_index.add(embeddings)
+            self._id_map = ids
+            self._save_faiss_index()
         logger.info("FAISS index rebuilt from SQLite: %d vectors", len(ids))
 
     def _save_faiss_index(self) -> None:
@@ -377,13 +380,14 @@ class MemoryStore:
                 return record_id  # Graceful degradation: return ID but don't crash
             raise
 
-        # FAISS (si disponible)
+        # FAISS (si disponible) — protégé par lock pour thread-safety
         if self._faiss_index is not None and self._embedding_model is not None:
             try:
                 embedding = self._embed([content])
-                self._faiss_index.add(embedding)
-                self._id_map.append(record_id)
-                self._save_faiss_index()
+                with self._faiss_lock:
+                    self._faiss_index.add(embedding)
+                    self._id_map.append(record_id)
+                    self._save_faiss_index()
             except OSError as e:
                 logger.critical("DISK FULL — FAISS write failed: %s", e)
 
@@ -420,17 +424,18 @@ class MemoryStore:
                 return [r for r in cached if r.importance >= min_importance]
             return list(cached)
 
-        n_results = min(n_results, self._faiss_index.ntotal)
         query_embedding = self._embed([query])
 
-        # Recherche FAISS — retourne les n_results plus proches
-        scores, indices = self._faiss_index.search(query_embedding, n_results)
+        # Recherche FAISS — protégée par lock pour thread-safety
+        with self._faiss_lock:
+            n_results = min(n_results, self._faiss_index.ntotal)
+            scores, indices = self._faiss_index.search(query_embedding, n_results)
 
-        # Mapper les indices FAISS vers les IDs mémoire
-        record_ids = []
-        for idx in indices[0]:
-            if 0 <= idx < len(self._id_map):
-                record_ids.append(self._id_map[idx])
+            # Mapper les indices FAISS vers les IDs mémoire
+            record_ids = []
+            for idx in indices[0]:
+                if 0 <= idx < len(self._id_map):
+                    record_ids.append(self._id_map[idx])
 
         if not record_ids:
             return []
@@ -555,9 +560,10 @@ class MemoryStore:
         self._db_conn.commit()
 
         # Marquer comme supprimé dans le id_map (sera nettoyé au rebuild)
-        if record_id in self._id_map:
-            idx = self._id_map.index(record_id)
-            self._id_map[idx] = "__deleted__"
+        with self._faiss_lock:
+            if record_id in self._id_map:
+                idx = self._id_map.index(record_id)
+                self._id_map[idx] = "__deleted__"
 
     def rebuild_index(self) -> None:
         """
@@ -570,13 +576,15 @@ class MemoryStore:
 
         import faiss
 
-        deleted_count = self._id_map.count("__deleted__")
-        if deleted_count == 0:
-            return
+        with self._faiss_lock:
+            deleted_count = self._id_map.count("__deleted__")
+            if deleted_count == 0:
+                return
 
-        # Recréer l'index propre
-        self._faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
-        self._id_map = []
+            # Recréer l'index propre
+            self._faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
+            self._id_map = []
+
         self._rebuild_index_from_sqlite()
         logger.info("FAISS index rebuilt: removed %d deleted entries", deleted_count)
 

@@ -169,7 +169,7 @@ class SanitizerMiddleware(BaseHTTPMiddleware):
                                 "detail": "Request contains potentially harmful content",
                             },
                         )
-                except Exception:
-                    pass  # Pas de body → on laisse passer
+                except Exception as e:
+                    logger.debug("Sanitizer body parse failed (allowing request): %s", e)
 
         return await call_next(request)

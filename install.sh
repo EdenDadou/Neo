@@ -239,10 +239,19 @@ else
     log_info "Utilisateur '$NEO_USER' créé"
 fi
 
-# Donner les droits sudo sans mot de passe à Neo (autonomie complète)
-echo "${NEO_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/neo
+# Donner les droits sudo RESTREINTS à Neo (sécurité : commandes spécifiques uniquement)
+cat > /etc/sudoers.d/neo << 'SUDOERS'
+# Neo Core — droits sudo restreints (pas de NOPASSWD: ALL)
+neo ALL=(ALL) NOPASSWD: /bin/systemctl start neo-guardian, \
+                        /bin/systemctl stop neo-guardian, \
+                        /bin/systemctl restart neo-guardian, \
+                        /bin/systemctl status neo-guardian, \
+                        /bin/systemctl daemon-reload, \
+                        /usr/bin/journalctl -u neo-guardian *, \
+                        /usr/bin/pip install *
+SUDOERS
 chmod 440 /etc/sudoers.d/neo
-log_info "Droits sudo accordés à '$NEO_USER' (NOPASSWD)"
+log_info "Droits sudo restreints accordés à '$NEO_USER' (commandes spécifiques)"
 
 # Ajouter le venv au PATH du user neo (accès direct aux binaires)
 NEO_PATH_LINE='export PATH="/opt/neo-core/.venv/bin:/usr/local/bin:$PATH"'

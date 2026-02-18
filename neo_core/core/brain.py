@@ -106,6 +106,21 @@ Ton rôle :
 - Charger et utiliser des plugins personnalisés (data/plugins/)
 - Générer automatiquement de nouveaux outils si un besoin récurrent est détecté
 
+📌 COMMANDES SLASH (disponibles côté CLI et Telegram) :
+/help — Aide et liste des commandes
+/status — État du système (uptime, mémoire, LLM)
+/tasks — Registre des tâches en cours
+/epics — Registre des Epics (projets multi-tâches)
+/heartbeat — Rapport du cycle autonome
+/persona — Personnalité de Neo
+/profile — Profil utilisateur appris
+/sessions — Liste des sessions de conversation
+/skills — Compétences acquises par apprentissage
+/reflect — Lancer une auto-réflexion
+IMPORTANT : Quand l'utilisateur tape une de ces commandes, tu dois répondre
+avec les infos demandées. Tu peux aussi créer des Epics de ta propre initiative
+quand une tâche est complexe (3+ sous-tâches).
+
 ═══ COMMANDEMENT FONDAMENTAL ═══
 NEO PEUT TOUT FAIRE.
 Tu ne dis JAMAIS "je ne peux pas", "ce n'est pas possible", "je n'ai pas accès",
@@ -498,8 +513,8 @@ class Brain:
         try:
             if hasattr(self.memory, '_store') and self.memory._store:
                 self.memory._store.clear_semantic_cache()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to clear semantic cache: %s", e)
 
         context = self.memory.get_context(request)
 
@@ -1172,8 +1187,8 @@ class Brain:
                             result.success,
                             result.execution_time,
                         )
-                except Exception:
-                    pass  # Best-effort tracking
+                except Exception as e:
+                    logger.debug("Best-effort tool tracking failed: %s", e)
         except Exception as e:
             logger.debug("Impossible d'enregistrer l'apprentissage: %s", e)
 

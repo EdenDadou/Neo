@@ -395,16 +395,16 @@ def start(foreground: bool = False, host: str = "0.0.0.0", port: int = 8000) -> 
     # Fermer les anciens descripteurs (hérités du parent)
     try:
         _old_stdin.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to close old stdin: %s", e)
     try:
         _old_stdout.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to close old stdout: %s", e)
     try:
         _old_stderr.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to close old stderr: %s", e)
 
     try:
         asyncio.run(_run_daemon(host=host, port=port))
@@ -416,8 +416,8 @@ def start(foreground: bool = False, host: str = "0.0.0.0", port: int = 8000) -> 
         for f in (_new_stdin, _new_stdout, _new_stderr):
             try:
                 f.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to close daemon FD: %s", e)
         sys.exit(0)
 
 
@@ -522,8 +522,9 @@ def install_service() -> dict:
 
     try:
         service_path.write_text(service_content)
-        os.system("systemctl daemon-reload")
-        os.system("systemctl enable neo.service")
+        import subprocess
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "enable", "neo.service"], check=True)
         return {
             "success": True,
             "message": f"Service installé: {service_path}",
