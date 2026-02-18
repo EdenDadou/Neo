@@ -548,7 +548,7 @@ def run_setup(auto_mode: bool = False):
     else:
         print(f"  {BOLD}Bienvenue dans le setup de Neo Core.{RESET}")
         print(f"  {DIM}Ce wizard va tout configurer en quelques étapes.{RESET}\n")
-        total_steps = 9
+        total_steps = 8
 
     # ─── Étape 1 : Vérifications système ─────────────────────────
     print_step(1, total_steps, "Vérifications système")
@@ -718,13 +718,13 @@ def run_setup(auto_mode: bool = False):
 
     # ─── Sauvegarde ───────────────────────────────────────────────
     step_save = 4 if auto_mode else 6
-    print_step(step_save, total_steps, "Sauvegarde")
+    print_step(step_save, total_steps, "Sauvegarde de la configuration")
 
     save_config(core_name, user_name, api_key, python_path, provider_keys)
 
     # ─── Test final / Vérification ────────────────────────────────
     if not auto_mode:
-        print_step(7, total_steps, "Vérification finale")
+        print_step(7, total_steps, "Test de connexion")
 
     if api_key:
         test_connection(api_key)
@@ -732,49 +732,6 @@ def run_setup(auto_mode: bool = False):
     # Compter les providers configurés
     active_providers = [k for k, v in provider_keys.items() if v]
     provider_list = ", ".join(active_providers) if active_providers else "Mode mock"
-
-    # ─── Configuration Telegram (mode interactif seulement) ───────
-    if not auto_mode:
-        print_step(8, total_steps, "Bot Telegram (optionnel)")
-
-        print(f"  {DIM}Connectez Neo à Telegram pour discuter via votre téléphone.{RESET}")
-        print(f"  {DIM}La conversation est partagée avec le CLI (même session).{RESET}")
-        print()
-
-        if ask_confirm("Configurer le bot Telegram ?", default=False):
-            print()
-            print(f"  {DIM}1. Ouvrez Telegram et cherchez @BotFather{RESET}")
-            print(f"  {DIM}2. Envoyez /newbot et suivez les instructions{RESET}")
-            print(f"  {DIM}3. Copiez le token du bot ici{RESET}")
-            print()
-
-            tg_token = ask("Token du bot Telegram", secret=True)
-            if tg_token:
-                print()
-                print(f"  {DIM}Pour trouver votre user_id Telegram :{RESET}")
-                print(f"  {DIM}  → Envoyez /start à @userinfobot{RESET}")
-                print()
-
-                tg_ids_input = ask("User IDs autorisés (séparés par des virgules)")
-                try:
-                    tg_user_ids = [int(x.strip()) for x in tg_ids_input.split(",") if x.strip()]
-                except ValueError:
-                    tg_user_ids = []
-                    print(f"  {YELLOW}⚠{RESET} IDs invalides — Telegram non configuré")
-
-                if tg_user_ids:
-                    try:
-                        from neo_core.integrations.telegram import save_telegram_config
-                        save_telegram_config(CONFIG_DIR, tg_token, tg_user_ids)
-                        print(f"  {GREEN}✓{RESET} Token chiffré dans le vault")
-                        print(f"  {GREEN}✓{RESET} {len(tg_user_ids)} utilisateur(s) autorisé(s)")
-                        print(f"  {DIM}  Le bot sera lancé automatiquement avec le daemon.{RESET}")
-                    except Exception as e:
-                        print(f"  {YELLOW}⚠{RESET} Erreur config Telegram: {e}")
-            else:
-                print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
-        else:
-            print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
 
     # ─── Démarrage du daemon ──────────────────────────────────────
     if auto_mode:
@@ -802,50 +759,57 @@ def run_setup(auto_mode: bool = False):
 
         print(f"  {GREEN}✓{RESET} Configuration prête — le daemon sera lancé par systemd")
     else:
-        step_daemon = 9
-        print_step(step_daemon, total_steps, "Démarrage du daemon Neo")
+        step_daemon = 8
+        print_step(step_daemon, total_steps, "Make it live ?")
 
-        # Reload la config depuis le .env qu'on vient de créer
-        from dotenv import load_dotenv
-        load_dotenv(ENV_FILE, override=True)
+        print(f"  {BOLD}Neo est configuré ! Voulez-vous le mettre en ligne ?{RESET}")
+        print(f"  {DIM}Cela va démarrer le daemon, installer le service systemd,{RESET}")
+        print(f"  {DIM}et optionnellement connecter le bot Telegram.{RESET}")
+        print()
 
-        # Installer les dépendances finales si nécessaire
-        print(f"  {DIM}⧗ Vérification des dépendances du daemon...{RESET}", end="", flush=True)
-        try:
-            import psutil
-            import cryptography
-            print(f"\r  {GREEN}✓{RESET} Dépendances daemon OK (psutil, cryptography)")
-        except ImportError as e:
-            print(f"\r  {YELLOW}⚠{RESET} Dépendance manquante: {e}")
-            run_command(
-                f"{python_path} -m pip install psutil cryptography -q",
-                "Installation des dépendances daemon"
-            )
+        if ask_confirm("Mettre Neo en ligne maintenant ?", default=True):
+            # Reload la config depuis le .env qu'on vient de créer
+            from dotenv import load_dotenv
+            load_dotenv(ENV_FILE, override=True)
 
-        # Démarrer le daemon
-        from neo_core.core.daemon import start, is_running, get_status
+            # Vérifier les dépendances finales
+            print(f"  {DIM}⧗ Vérification des dépendances du daemon...{RESET}", end="", flush=True)
+            try:
+                import psutil
+                import cryptography
+                print(f"\r  {GREEN}✓{RESET} Dépendances daemon OK (psutil, cryptography)")
+            except ImportError as e:
+                print(f"\r  {YELLOW}⚠{RESET} Dépendance manquante: {e}")
+                run_command(
+                    f"{python_path} -m pip install psutil cryptography -q",
+                    "Installation des dépendances daemon"
+                )
 
-        if is_running():
-            print(f"  {GREEN}✓{RESET} Neo daemon déjà en cours d'exécution")
-            status = get_status()
-            if status.get("pid"):
-                print(f"  {DIM}  PID {status['pid']} — {status.get('memory_mb', '?')} MB RAM{RESET}")
-        else:
-            print(f"  {DIM}⧗ Démarrage du daemon Neo (heartbeat + API)...{RESET}")
-            result = start(foreground=False)
-            if result["success"]:
-                print(f"  {GREEN}✓{RESET} {result['message']}")
-                print(f"  {DIM}  API disponible sur http://0.0.0.0:8000{RESET}")
-                print(f"  {DIM}  Logs : neo logs{RESET}")
-            else:
-                print(f"  {YELLOW}⚠{RESET} {result['message']}")
-                print(f"  {DIM}  Vous pouvez démarrer manuellement : neo start{RESET}")
-
-        # Proposer l'installation du service systemd
-        import platform
-        if platform.system() == "Linux":
+            # ── 9a. Démarrer le daemon ──
             print()
-            if ask_confirm("Installer le service systemd (démarrage automatique au boot) ?", default=False):
+            print(f"  {BOLD}① Daemon Neo{RESET}")
+            from neo_core.core.daemon import start, is_running, get_status
+
+            if is_running():
+                print(f"  {GREEN}✓{RESET} Neo daemon déjà en cours d'exécution")
+                status = get_status()
+                if status.get("pid"):
+                    print(f"  {DIM}  PID {status['pid']} — {status.get('memory_mb', '?')} MB RAM{RESET}")
+            else:
+                print(f"  {DIM}⧗ Démarrage du daemon Neo (heartbeat + API)...{RESET}")
+                result = start(foreground=False)
+                if result["success"]:
+                    print(f"  {GREEN}✓{RESET} {result['message']}")
+                    print(f"  {DIM}  API disponible sur http://0.0.0.0:8000{RESET}")
+                else:
+                    print(f"  {YELLOW}⚠{RESET} {result['message']}")
+                    print(f"  {DIM}  Vous pouvez démarrer manuellement : neo start{RESET}")
+
+            # ── 9b. Service systemd (auto au boot) ──
+            import platform
+            if platform.system() == "Linux":
+                print()
+                print(f"  {BOLD}② Service systemd (auto-start au boot){RESET}")
                 from neo_core.core.daemon import install_service
                 svc_result = install_service()
                 if svc_result["success"]:
@@ -854,6 +818,54 @@ def run_setup(auto_mode: bool = False):
                     print(f"  {YELLOW}⚠{RESET} {svc_result['message']}")
                     for cmd in svc_result.get("commands", []):
                         print(f"    {DIM}{cmd}{RESET}")
+
+            # ── 9c. Bot Telegram ──
+            print()
+            print(f"  {BOLD}③ Bot Telegram (optionnel){RESET}")
+            print(f"  {DIM}Connectez Neo à Telegram pour discuter via votre téléphone.{RESET}")
+            print()
+
+            if ask_confirm("Configurer le bot Telegram ?", default=False):
+                print()
+                print(f"  {DIM}1. Ouvrez Telegram et cherchez @BotFather{RESET}")
+                print(f"  {DIM}2. Envoyez /newbot et suivez les instructions{RESET}")
+                print(f"  {DIM}3. Copiez le token du bot ici{RESET}")
+                print()
+
+                tg_token = ask("Token du bot Telegram", secret=True)
+                if tg_token:
+                    print()
+                    print(f"  {DIM}Pour trouver votre user_id Telegram :{RESET}")
+                    print(f"  {DIM}  → Envoyez /start à @userinfobot{RESET}")
+                    print()
+
+                    tg_ids_input = ask("User IDs autorisés (séparés par des virgules)")
+                    try:
+                        tg_user_ids = [int(x.strip()) for x in tg_ids_input.split(",") if x.strip()]
+                    except ValueError:
+                        tg_user_ids = []
+                        print(f"  {YELLOW}⚠{RESET} IDs invalides — Telegram non configuré")
+
+                    if tg_user_ids:
+                        try:
+                            from neo_core.integrations.telegram import save_telegram_config
+                            save_telegram_config(CONFIG_DIR, tg_token, tg_user_ids)
+                            print(f"  {GREEN}✓{RESET} Token chiffré dans le vault")
+                            print(f"  {GREEN}✓{RESET} {len(tg_user_ids)} utilisateur(s) autorisé(s)")
+                            print(f"  {DIM}  Le bot sera lancé automatiquement avec le daemon.{RESET}")
+                        except Exception as e:
+                            print(f"  {YELLOW}⚠{RESET} Erreur config Telegram: {e}")
+                else:
+                    print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
+            else:
+                print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
+
+            print()
+            print(f"  {GREEN}{BOLD}Neo est en ligne !{RESET}")
+        else:
+            print(f"  {DIM}Neo n'est pas démarré. Vous pouvez le lancer plus tard :{RESET}")
+            print(f"    {CYAN}neo start{RESET}           Démarrer le daemon")
+            print(f"    {CYAN}neo telegram-setup{RESET}  Configurer Telegram")
 
     # ─── Résumé final ─────────────────────────────────────────────
     print(f"""

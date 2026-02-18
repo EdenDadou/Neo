@@ -334,7 +334,7 @@ class TestTelegramInfra:
         from pathlib import Path
         pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
         content = pyproject.read_text()
-        assert 'version = "0.9.3"' in content
+        assert 'version = "0.9.4"' in content
 
     def test_telegram_optional_dep(self):
         """python-telegram-bot est dans les extras."""

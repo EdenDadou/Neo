@@ -132,8 +132,9 @@ check_disk_space() {
         rm -rf /root/.cache/pip 2>/dev/null || true
         rm -rf /home/*/.cache/pip 2>/dev/null || true
 
-        # Nettoyer le cache Rust/Cargo si présent
-        rm -rf /root/.cargo/registry/cache 2>/dev/null || true
+        # Nettoyer les caches HuggingFace/torch si présents
+        rm -rf /root/.cache/huggingface 2>/dev/null || true
+        rm -rf /root/.cache/torch 2>/dev/null || true
 
         # Re-vérifier
         available_mb=$(df -BM / | awk 'NR==2{gsub(/M/,"",$4); print $4}')
@@ -173,20 +174,7 @@ run_or_fail "Installation de Python 3 + outils de base" apt-get install -y -qq \
     sqlite3 \
     cmake
 
-# Rust (nécessaire pour chromadb/tokenizers)
-if ! command -v rustc &>/dev/null; then
-    echo -e "  ${DIM}⧗ Installation de Rust (requis pour chromadb)...${RESET}"
-    curl -fsSL https://sh.rustup.rs | sh -s -- -y >> "$LOG_FILE" 2>&1
-    source "$HOME/.cargo/env" 2>/dev/null || true
-    export PATH="$HOME/.cargo/bin:$PATH"
-    if command -v rustc &>/dev/null; then
-        log_info "Rust installé ($(rustc --version 2>/dev/null | head -1))"
-    else
-        log_warn "Rust non installé — chromadb pourrait échouer"
-    fi
-else
-    log_info "Rust déjà installé ($(rustc --version 2>/dev/null | head -1))"
-fi
+# Note : Rust n'est plus nécessaire (FAISS remplace ChromaDB depuis v0.9.3)
 
 # Vérifier la version Python
 PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -200,7 +188,7 @@ fi
 
 log_info "Python $PYTHON_VERSION détecté"
 
-# Swap file si RAM < 2GB (aide à la compilation de chromadb)
+# Swap file si RAM < 2GB (aide au chargement des modèles d'embedding)
 TOTAL_RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
 SWAP_ACTIVE=$(swapon --show --noheadings 2>/dev/null | wc -l)
 if [[ $TOTAL_RAM_MB -lt 2048 ]] && [[ $SWAP_ACTIVE -eq 0 ]]; then
@@ -344,9 +332,6 @@ fi
 # Activer le venv
 source "${VENV_DIR}/bin/activate"
 
-# S'assurer que Rust est dans le PATH pour le venv aussi
-export PATH="$HOME/.cargo/bin:$PATH"
-
 # Installer pip à jour
 run_or_fail "Mise à jour de pip" pip install --upgrade pip --no-cache-dir
 
@@ -369,16 +354,26 @@ else
     log_warn "Installation partielle — certains modules pourraient manquer"
 fi
 
-# Installer chromadb séparément (c'est souvent lui qui pose problème)
-if python3 -c "import chromadb" 2>/dev/null; then
-    log_info "chromadb déjà installé"
+# Vérifier FAISS + sentence-transformers (installés via pyproject.toml)
+if python3 -c "import faiss" 2>/dev/null; then
+    log_info "faiss-cpu déjà installé"
 else
-    echo -e "  ${DIM}⧗ Installation de chromadb (compilation, peut prendre 3-5 min)...${RESET}"
-    if pip install chromadb >> "$LOG_FILE" 2>&1; then
-        log_info "chromadb installé"
+    echo -e "  ${DIM}⧗ Installation de faiss-cpu (mémoire vectorielle)...${RESET}"
+    if pip install faiss-cpu --no-cache-dir >> "$LOG_FILE" 2>&1; then
+        log_info "faiss-cpu installé"
     else
-        log_warn "chromadb échoué — les fonctions de mémoire vectorielle seront limitées"
-        echo -e "  ${DIM}  Vous pouvez réessayer plus tard : ${VENV_DIR}/bin/pip install chromadb${RESET}"
+        log_warn "faiss-cpu échoué — les fonctions de mémoire vectorielle seront limitées"
+    fi
+fi
+
+if python3 -c "from sentence_transformers import SentenceTransformer" 2>/dev/null; then
+    log_info "sentence-transformers déjà installé"
+else
+    echo -e "  ${DIM}⧗ Installation de sentence-transformers (embeddings)...${RESET}"
+    if pip install sentence-transformers --no-cache-dir >> "$LOG_FILE" 2>&1; then
+        log_info "sentence-transformers installé"
+    else
+        log_warn "sentence-transformers échoué — embeddings limités"
     fi
 fi
 
@@ -422,14 +417,35 @@ log_info "Commande 'neo' ajoutée au PATH (/usr/local/bin/neo → sudo -u neo)"
 
 log_step 5 $TOTAL_STEPS "Configuration des permissions"
 
-# Créer le dossier data
+# Créer les dossiers data
 mkdir -p "${INSTALL_DIR}/data"
+mkdir -p "${INSTALL_DIR}/data/memory"
+mkdir -p "${INSTALL_DIR}/data/plugins"
+mkdir -p "${INSTALL_DIR}/data/patches"
+mkdir -p "${INSTALL_DIR}/data/tool_metadata"
+mkdir -p "${INSTALL_DIR}/data/system_docs"
 
 # Donner la propriété à l'utilisateur neo
 chown -R ${NEO_USER}:${NEO_USER} "$INSTALL_DIR"
+
+# Le répertoire principal doit être lisible/traversable par tous
+# pour que 'ubuntu' puisse cd dans /opt/neo-core et lancer le wrapper
+chmod 755 "$INSTALL_DIR"
+
+# data/ est privé à neo (contient .env, mémoire, etc.)
 chmod 700 "${INSTALL_DIR}/data"
 
-log_info "Permissions configurées (propriétaire: $NEO_USER)"
+# Le .venv doit être exécutable par neo
+chmod 755 "${INSTALL_DIR}/.venv" 2>/dev/null || true
+
+# Ajouter ubuntu au groupe neo pour accès lecture
+REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
+if [[ "$REAL_USER" != "root" ]] && [[ "$REAL_USER" != "$NEO_USER" ]]; then
+    usermod -aG ${NEO_USER} ${REAL_USER} 2>/dev/null || true
+    log_info "Utilisateur '${REAL_USER}' ajouté au groupe '${NEO_USER}'"
+fi
+
+log_info "Permissions configurées (propriétaire: $NEO_USER, accès: 755)"
 
 # ═══════════════════════════════════════════════════════════
 #  Étape 6 : Service systemd
@@ -458,14 +474,14 @@ Environment=NEO_ENV=production
 EnvironmentFile=-/opt/neo-core/.env
 
 # Timeouts
-TimeoutStartSec=60
+TimeoutStartSec=120
 TimeoutStopSec=30
 
-# Security hardening (lecture seule sauf data + fichiers Neo)
+# Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/neo-core
+ProtectHome=read-only
+ReadWritePaths=/opt/neo-core/data /opt/neo-core/.env /tmp
 
 # Logging
 StandardOutput=journal
