@@ -119,10 +119,30 @@ class AnthropicProvider(LLMProvider):
             except Exception:
                 pass
             error_msg = error_data.get("error", {}).get("message", response.text[:300])
-            raise RuntimeError(f"Anthropic HTTP {response.status_code}: {error_msg}")
+            status = response.status_code
+            # Diagnostic clair selon le code HTTP
+            if status == 401:
+                raise RuntimeError(f"Anthropic 401 Unauthorized — clé API ou token OAuth invalide/expiré")
+            elif status == 429:
+                raise RuntimeError(f"Anthropic 429 Rate Limited — trop de requêtes")
+            elif status == 529:
+                raise RuntimeError(f"Anthropic 529 Overloaded — API surchargée, réessayer plus tard")
+            raise RuntimeError(f"Anthropic HTTP {status}: {error_msg}")
 
         data = response.json()
-        return self._parse_response(data, model)
+        parsed = self._parse_response(data, model)
+
+        # Diagnostic : réponse vide = souvent un problème d'auth ou de payload
+        if not parsed.text and not parsed.tool_calls:
+            stop = data.get("stop_reason", "unknown")
+            usage = data.get("usage", {})
+            raise RuntimeError(
+                f"Anthropic réponse vide (stop_reason={stop}, "
+                f"input_tokens={usage.get('input_tokens', '?')}, "
+                f"output_tokens={usage.get('output_tokens', '?')})"
+            )
+
+        return parsed
 
     def _parse_response(self, data: dict, model: str) -> ChatResponse:
         """Parse la réponse Anthropic en format unifié."""

@@ -828,6 +828,20 @@ def run_setup(auto_mode: bool = False):
 
     save_config(core_name, user_name, api_key, python_path, provider_keys)
 
+    # ─── Pré-téléchargement du modèle d'embedding ─────────────────
+    print(f"\n  {DIM}⧗ Téléchargement du modèle d'embedding (mémoire de Neo)...{RESET}")
+    try:
+        from sentence_transformers import SentenceTransformer
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+        # Test rapide pour vérifier que le modèle fonctionne
+        _model.encode(["test"])
+        print(f"  {GREEN}✓{RESET} Modèle all-MiniLM-L6-v2 téléchargé et en cache")
+        del _model
+    except Exception as e:
+        print(f"  {YELLOW}⚠{RESET} Échec du téléchargement du modèle d'embedding: {e}")
+        print(f"  {DIM}  La mémoire fonctionnera en mode dégradé (bag-of-words).{RESET}")
+        print(f"  {DIM}  Pour corriger : pip install sentence-transformers && python -c 'from sentence_transformers import SentenceTransformer; SentenceTransformer(\"all-MiniLM-L6-v2\")'  {RESET}")
+
     # ─── Test final / Vérification ────────────────────────────────
     if not auto_mode:
         print_step(8, total_steps, "Test de connexion")

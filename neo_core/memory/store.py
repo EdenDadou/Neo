@@ -205,11 +205,16 @@ class MemoryStore:
         try:
             from sentence_transformers import SentenceTransformer
 
-            # Forcer mode offline — charge depuis le cache HuggingFace uniquement
-            _old_offline = os.environ.get("HF_HUB_OFFLINE")
+            # Forcer mode 100% offline — aucun appel réseau
+            _old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
+            _old_tf_offline = os.environ.get("TRANSFORMERS_OFFLINE")
             os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
             try:
-                _EMBEDDING_MODEL_CACHE = SentenceTransformer(EMBEDDING_MODEL)
+                _EMBEDDING_MODEL_CACHE = SentenceTransformer(
+                    EMBEDDING_MODEL,
+                    local_files_only=True,  # Critique : empêche TOUT appel HTTP
+                )
                 self._embedding_model = _EMBEDDING_MODEL_CACHE
                 self._using_fallback_embeddings = False
                 logger.info("Embedding model loaded from cache: %s", EMBEDDING_MODEL)
@@ -221,10 +226,14 @@ class MemoryStore:
                     EMBEDDING_MODEL,
                 )
             finally:
-                if _old_offline is None:
+                if _old_hf_offline is None:
                     os.environ.pop("HF_HUB_OFFLINE", None)
                 else:
-                    os.environ["HF_HUB_OFFLINE"] = _old_offline
+                    os.environ["HF_HUB_OFFLINE"] = _old_hf_offline
+                if _old_tf_offline is None:
+                    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+                else:
+                    os.environ["TRANSFORMERS_OFFLINE"] = _old_tf_offline
 
         except ImportError:
             logger.warning("sentence-transformers non installé")

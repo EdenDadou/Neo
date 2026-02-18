@@ -78,14 +78,22 @@ async def route_chat(
                     return response
 
                 # Réponse d'erreur du provider → noter et continuer
-                error_msg = f"{model.model_id}: {response.text[:100]}"
+                detail = response.text[:100] if response.text else "(réponse vide)"
+                if not response.text:
+                    # Diagnostic : réponse vide = souvent token expiré ou payload invalide
+                    raw = getattr(response, "raw_response", None)
+                    if raw:
+                        detail = f"(vide) raw_stop={raw.get('stop_reason', '?')} usage={raw.get('usage', {})}"
+                    else:
+                        detail = f"(vide) stop={response.stop_reason}"
+                error_msg = f"{model.model_id}: {detail}"
                 errors.append(error_msg)
-                logger.warning("[Router] Échec %s, fallback...", error_msg)
+                logger.warning("[Router] Échec %s — fallback...", error_msg)
 
             except Exception as e:
-                error_msg = f"{model.model_id}: {type(e).__name__}: {str(e)[:100]}"
+                error_msg = f"{model.model_id}: {type(e).__name__}: {str(e)[:200]}"
                 errors.append(error_msg)
-                logger.warning("[Router] Échec %s, fallback...", error_msg)
+                logger.warning("[Router] Échec %s — fallback...", error_msg)
                 continue
 
     except Exception as e:
@@ -235,10 +243,35 @@ async def _fallback_anthropic(
 
         if response.status_code == 200:
             data = response.json()
-            return _parse_anthropic_response(data, model_config.model)
+            parsed = _parse_anthropic_response(data, model_config.model)
+            if not parsed.text and not parsed.tool_calls:
+                stop = data.get("stop_reason", "unknown")
+                return ChatResponse(
+                    text=f"[Erreur] Réponse Anthropic vide (stop_reason={stop})",
+                    model=model_config.model,
+                    provider="anthropic",
+                    stop_reason="error",
+                )
+            return parsed
+
+        # Messages d'erreur clairs selon le code HTTP
+        status = response.status_code
+        error_body = ""
+        try:
+            error_body = response.json().get("error", {}).get("message", "")
+        except Exception:
+            pass
+        if status == 401:
+            msg = "Clé API ou token OAuth invalide/expiré"
+        elif status == 429:
+            msg = "Rate limit — trop de requêtes"
+        elif status == 529:
+            msg = "API Anthropic surchargée"
+        else:
+            msg = error_body or response.text[:200]
 
         return ChatResponse(
-            text=f"[Erreur API] HTTP {response.status_code}",
+            text=f"[Erreur API] HTTP {status}: {msg}",
             model=model_config.model,
             provider="anthropic",
             stop_reason="error",
