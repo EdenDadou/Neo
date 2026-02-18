@@ -196,22 +196,42 @@ class MemoryStore:
             return
 
         # Tenter sentence-transformers (meilleure qualité)
+        # Stratégie : toujours essayer le cache local d'abord (offline),
+        # puis réseau seulement si le modèle n'est pas encore téléchargé.
+        # Ça évite 60s de retries 429 quand HuggingFace rate-limit.
         try:
             from sentence_transformers import SentenceTransformer
 
-            # Sans HF_TOKEN → forcer mode offline pour éviter 60s de retries 429.
-            # Le modèle se charge depuis le cache local s'il a déjà été téléchargé,
-            # sinon fail immédiat → fallback HashingVectorizer.
-            hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-            if not hf_token:
-                os.environ.setdefault("HF_HUB_OFFLINE", "1")
-                logger.debug("No HF_TOKEN — forcing HF_HUB_OFFLINE=1 (cache-only)")
+            # 1) Essai offline (cache uniquement) — instantané
+            _old_offline = os.environ.get("HF_HUB_OFFLINE")
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            try:
+                _EMBEDDING_MODEL_CACHE = SentenceTransformer(EMBEDDING_MODEL)
+                self._embedding_model = _EMBEDDING_MODEL_CACHE
+                self._using_fallback_embeddings = False
+                logger.info("Embedding model loaded from cache: %s", EMBEDDING_MODEL)
+                return
+            except Exception:
+                pass  # Pas en cache → essayer le réseau
+            finally:
+                # Restaurer la valeur originale
+                if _old_offline is None:
+                    os.environ.pop("HF_HUB_OFFLINE", None)
+                else:
+                    os.environ["HF_HUB_OFFLINE"] = _old_offline
 
-            _EMBEDDING_MODEL_CACHE = SentenceTransformer(EMBEDDING_MODEL)
-            self._embedding_model = _EMBEDDING_MODEL_CACHE
-            self._using_fallback_embeddings = False
-            logger.info("Embedding model loaded: %s", EMBEDDING_MODEL)
-            return
+            # 2) Essai réseau (seulement si token HF dispo)
+            hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+            if hf_token:
+                logger.info("Modèle pas en cache — téléchargement avec HF_TOKEN...")
+                _EMBEDDING_MODEL_CACHE = SentenceTransformer(EMBEDDING_MODEL)
+                self._embedding_model = _EMBEDDING_MODEL_CACHE
+                self._using_fallback_embeddings = False
+                logger.info("Embedding model downloaded: %s", EMBEDDING_MODEL)
+                return
+            else:
+                logger.warning("Modèle pas en cache et pas de HF_TOKEN — fallback local")
+
         except ImportError:
             logger.warning("sentence-transformers non installé")
         except Exception as e:
