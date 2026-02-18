@@ -339,12 +339,15 @@ def start(foreground: bool = False, host: str = "0.0.0.0", port: int = 8000) -> 
         return {"success": False, "message": f"Fork failed: {e}"}
 
     if pid > 0:
-        # Parent — attend un peu pour vérifier que le fils a démarré
-        time.sleep(0.5)
-        if is_running():
-            return {"success": True, "pid": pid, "message": f"Neo démarré (PID {pid})"}
-        else:
-            return {"success": False, "message": "Le processus a démarré puis s'est arrêté"}
+        # Parent — attendre que le double-fork écrive le PID file
+        # Le premier fils meurt vite (double-fork), le deuxième fils
+        # écrit le PID après _setup_logging() + _write_pid()
+        for _ in range(10):  # 10 x 0.5s = 5s max
+            time.sleep(0.5)
+            if is_running():
+                daemon_pid = _read_pid() or pid
+                return {"success": True, "pid": daemon_pid, "message": f"Neo démarré (PID {daemon_pid})"}
+        return {"success": False, "message": "Le processus a démarré puis s'est arrêté — vérifiez neo logs"}
 
     # Fils — devenir un daemon
     os.setsid()  # Nouvelle session (détaché du terminal)
