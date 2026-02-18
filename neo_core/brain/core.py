@@ -443,13 +443,24 @@ class Brain:
         re.IGNORECASE,
     )
 
-    # Mots-clés signalant une intention de projet/epic (force delegate_crew)
+    # Mots-clés signalant une intention EXPLICITE de projet/epic
+    # Très strict : seulement quand l'utilisateur demande clairement un projet multi-étapes
     _EPIC_INTENT_RE = re.compile(
-        r"\b(epic|projet|project|plan|roadmap|planifi[eé]|organise|"
-        r"stratégie|strategy|étapes|steps|feuille de route|programme|"
-        r"décompose|decompose|multi[- ]?étapes|multi[- ]?step|"
-        r"lance[- ]moi un|monte[- ]moi un|prépare[- ]moi un|"
-        r"mets en place|set up|blueprint)\b", re.IGNORECASE,
+        r"\b(epic|crée[- ]?(?:un|mon|le)\s+(?:epic|projet)|"
+        r"roadmap|feuille de route|"
+        r"multi[- ]?étapes|multi[- ]?step)\b", re.IGNORECASE,
+    )
+
+    # Mots-clés qui NÉCESSITENT un outil externe (= worker requis)
+    # Si ces patterns matchent, Brain ne peut PAS répondre seul
+    _NEEDS_TOOL_RE = re.compile(
+        r"\b(recherch\w+\s+(?:sur\s+)?(?:internet|le\s+web|google|en\s+ligne)|"
+        r"cherch\w+\s+(?:sur\s+)?(?:internet|le\s+web|en\s+ligne)|"
+        r"exécute|execute|lance\s+(?:le|un|du)\s+code|run\s+(?:the|this)?\s*code|"
+        r"écris\s+(?:un|le|du)\s+(?:fichier|file)|"
+        r"lis\s+(?:le|un|du)\s+(?:fichier|file)|"
+        r"pip\s+install|npm\s+install|"
+        r"scrape|scraping|crawl)\b", re.IGNORECASE,
     )
 
     # Mots-clés indiquant des sous-tâches implicites (complexité élevée)
@@ -479,14 +490,12 @@ class Brain:
         - Présence de connecteurs multi-étapes ("puis", "ensuite")
         - Références à des concepts techniques avancés
         - Longueur du message (signal secondaire)
+
+        Note : la complexité n'influe PAS sur la décision direct/worker.
+        Elle sert uniquement à calibrer le contexte mémoire chargé.
         """
         word_count = len(request.split())
         score = 0
-
-        # Intention explicite de projet/epic → immédiatement complexe
-        epic_intent = self._EPIC_INTENT_RE.findall(request)
-        if epic_intent:
-            score += 5  # Force "complex"
 
         # Verbes d'action multiples → sous-tâches implicites
         action_verbs = self._COMPLEXITY_ACTION_VERBS.findall(request)
@@ -519,31 +528,29 @@ class Brain:
         """
         Prend une décision stratégique sur la manière de traiter la requête.
 
+        Philosophie v0.9.8 — "Direct by default" :
+        Brain répond DIRECTEMENT via Claude Sonnet (avec mémoire + contexte)
+        pour la grande majorité des requêtes. Un Worker n'est spawné QUE
+        quand un outil externe est explicitement nécessaire (web search,
+        exécution de code, accès fichier).
+
         Pipeline :
-        1. Enrichit la requête avec le contexte de travail (topic, actions en attente)
-        2. Classifie la tâche (Factory)
-        3. Applique les patches comportementaux (Level 3)
-        4. Consulte l'historique d'apprentissage
-        5. Route vers le bon type de réponse
+        1. Epic explicite ? → delegate_crew
+        2. Outil externe nécessaire ? → delegate_worker
+        3. Sinon → direct_response (Claude Sonnet répond avec intelligence)
 
         Le working_context (mémoire de travail) permet de comprendre les requêtes
         courtes qui font référence à une conversation en cours ("continue", "fais pareil").
         """
         # Enrichir la requête pour la classification si contexte de travail disponible.
-        # Seulement pour les messages qui font explicitement référence au contexte
-        # ("continue", "pareil", "la suite", pronoms déictiques).
-        # Les salutations simples ("Salut", "Bonjour") ne doivent PAS être enrichies.
         classification_input = request
         if working_context and self._CONTEXT_DEPENDENT_RE.search(request):
             classification_input = f"{working_context}\n\nRequête: {request}"
 
         complexity = self.analyze_complexity(request)
-        worker_type = self.factory.classify_task(classification_input)
-
-        # 0. Détection d'intention epic (projet, plan, roadmap...)
-        has_epic_intent = bool(self._EPIC_INTENT_RE.search(request))
 
         # 1. Application des patches comportementaux
+        worker_type = WorkerType.GENERIC
         patch_overrides = self._apply_behavior_patches(request, worker_type)
         if "override_worker_type" in patch_overrides:
             try:
@@ -551,20 +558,22 @@ class Brain:
             except ValueError:
                 pass
 
-        # 2. Si intention epic explicite → toujours route vers complex/epic
+        # 2. Intention epic EXPLICITE → delegate_crew
+        has_epic_intent = bool(self._EPIC_INTENT_RE.search(request))
         if has_epic_intent:
+            worker_type = self.factory.classify_task(classification_input)
             return self._decide_complex_generic(request, worker_type)
 
-        # 3. Route selon le type détecté
-        if worker_type != WorkerType.GENERIC:
+        # 3. Besoin d'un outil externe ? → delegate_worker
+        needs_tool = bool(self._NEEDS_TOOL_RE.search(request))
+        if needs_tool:
+            worker_type = self.factory.classify_task(classification_input)
             return self._decide_typed_worker(
                 request, complexity, worker_type, patch_overrides
             )
 
-        if complexity == "complex":
-            return self._decide_complex_generic(request, worker_type)
-
-        return self._decide_simple_generic(request, complexity)
+        # 4. Défaut → direct_response (Claude Sonnet + mémoire)
+        return self._decide_direct(request, complexity)
 
     def _apply_behavior_patches(self, request: str, worker_type: WorkerType) -> dict:
         """Applique les patches comportementaux du SelfPatcher (Level 3)."""
@@ -582,7 +591,17 @@ class Brain:
         self, request: str, complexity: str,
         worker_type: WorkerType, patch_overrides: dict,
     ) -> BrainDecision:
-        """Décision pour une requête avec un type de worker spécifique détecté."""
+        """
+        Décision pour une requête nécessitant un outil externe.
+
+        Appelé UNIQUEMENT quand _NEEDS_TOOL_RE a matché (recherche web,
+        exécution de code, accès fichier, etc.).
+        """
+        # Si la Factory ne trouve pas de type spécifique, utiliser RESEARCHER
+        # car _NEEDS_TOOL_RE a déjà validé qu'un outil est nécessaire
+        if worker_type == WorkerType.GENERIC:
+            worker_type = WorkerType.RESEARCHER
+
         subtasks = self.factory._basic_decompose(request, worker_type)
         confidence = 0.8
 
@@ -593,7 +612,7 @@ class Brain:
                 request, worker_type, subtasks, advice
             )
         else:
-            reasoning = f"Type {worker_type.value} détecté → Worker (complexité: {complexity})"
+            reasoning = f"Outil externe requis → Worker {worker_type.value}"
 
         metadata = dict(patch_overrides) if patch_overrides else {}
         if advice:
@@ -660,34 +679,21 @@ class Brain:
             metadata=metadata,
         )
 
-    def _decide_simple_generic(self, request: str, complexity: str) -> BrainDecision:
-        """Décision pour une requête simple/modérée sans type spécifique."""
+    def _decide_direct(self, request: str, complexity: str) -> BrainDecision:
+        """
+        Décision par défaut : réponse directe via Claude Sonnet.
+
+        Brain utilise toute l'intelligence de Claude avec le contexte
+        mémoire de Neo pour répondre directement. C'est le chemin
+        principal pour la majorité des requêtes.
+        """
         advice = self._consult_learning(request, "generic")
-        if advice and advice.relevant_skills:
-            best_skill = advice.relevant_skills[0]
-            if best_skill.success_count >= 2:
-                try:
-                    skill_type = WorkerType(best_skill.worker_type)
-                    subtasks = self.factory._basic_decompose(request, skill_type)
-                    return BrainDecision(
-                        action="delegate_worker",
-                        subtasks=subtasks,
-                        confidence=0.7,
-                        worker_type=skill_type.value,
-                        reasoning=(
-                            f"Requête {complexity} mais compétence acquise "
-                            f"({best_skill.name}, ×{best_skill.success_count}) → Worker"
-                        ),
-                        metadata={"_cached_learning_advice": advice},
-                    )
-                except ValueError as e:
-                    logger.debug("Invalid worker type for acquired skill %s: %s", best_skill.worker_type, e)
 
         return BrainDecision(
             action="direct_response",
-            subtasks=[request] if complexity == "moderate" else [],
-            confidence=0.9 if complexity == "simple" else 0.7,
-            reasoning=f"Requête {complexity} générique → réponse directe",
+            subtasks=[],
+            confidence=0.9 if complexity == "simple" else 0.8,
+            reasoning=f"Réponse directe Claude Sonnet (complexité: {complexity})",
             metadata={"_cached_learning_advice": advice} if advice else {},
         )
 
@@ -817,10 +823,9 @@ class Brain:
 
         decision = self.make_decision(request, working_context=working_context)
 
-        # Contexte mémoire chargé uniquement quand nécessaire
-        # Workers → toujours besoin de contexte
-        # direct_response → seulement si requête complexe
-        needs_context = decision.action != "direct_response" or self.analyze_complexity(request) == "complex"
+        # Contexte mémoire chargé pour TOUTES les réponses
+        # direct_response est maintenant le chemin principal → toujours enrichir
+        needs_context = True
         # Réutilise le working_context et le learning advice déjà calculés
         cached_advice = decision.metadata.pop("_cached_learning_advice", None)
         memory_context = (
