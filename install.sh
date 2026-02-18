@@ -435,6 +435,50 @@ run_optional "Installation de Gemini (LLM cloud gratuit)" pip install google-gen
 run_optional "Installation de Ollama (LLM local)" pip install ollama
 run_optional "Installation du bot Telegram" pip install python-telegram-bot
 
+# Pré-télécharger le modèle d'embedding (mémoire de Neo)
+# Le faire ici garantit que le cache existe AVANT le wizard setup.
+# Avec le cache présent, setup.py charge en mode offline → zéro 429.
+# On utilise le HOME du user neo pour que le cache soit au bon endroit.
+echo -e "  ${DIM}⧗ Pré-téléchargement du modèle d'embedding...${RESET}"
+EMBEDDING_OK=false
+NEO_HOME=$(eval echo ~${NEO_USER})
+
+for ATTEMPT in 1 2 3; do
+    if HOME="$NEO_HOME" python3 -c "
+import os, sys
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+try:
+    from sentence_transformers import SentenceTransformer
+    m = SentenceTransformer('all-MiniLM-L6-v2')
+    r = m.encode(['test'])
+    if r is not None and len(r) > 0:
+        print(f'OK dim={len(r[0])}')
+        sys.exit(0)
+except Exception as e:
+    print(f'FAIL: {e}', file=sys.stderr)
+    sys.exit(1)
+" >> "$LOG_FILE" 2>&1; then
+        EMBEDDING_OK=true
+        break
+    else
+        if [[ $ATTEMPT -lt 3 ]]; then
+            WAIT=$((5 * ATTEMPT))
+            echo -e "  ${YELLOW}⚠${RESET} Tentative ${ATTEMPT}/3 échouée — retry dans ${WAIT}s..."
+            sleep $WAIT
+        fi
+    fi
+done
+
+# S'assurer que le cache HF appartient à neo
+chown -R ${NEO_USER}:${NEO_USER} "${NEO_HOME}/.cache" 2>/dev/null || true
+
+if [[ "$EMBEDDING_OK" = true ]]; then
+    log_info "Modèle d'embedding all-MiniLM-L6-v2 en cache"
+else
+    log_warn "Modèle d'embedding non téléchargé — mémoire en mode dégradé (bag-of-words)"
+    echo -e "  ${DIM}  Fix: neo setup (relancera le téléchargement)${RESET}"
+fi
+
 # Nettoyer les caches pour libérer de l'espace disque
 echo -e "  ${DIM}⧗ Nettoyage des caches...${RESET}"
 pip cache purge >> "$LOG_FILE" 2>&1 || true
