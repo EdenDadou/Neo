@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -197,6 +198,15 @@ class MemoryStore:
         # Tenter sentence-transformers (meilleure qualité)
         try:
             from sentence_transformers import SentenceTransformer
+
+            # Sans HF_TOKEN → forcer mode offline pour éviter 60s de retries 429.
+            # Le modèle se charge depuis le cache local s'il a déjà été téléchargé,
+            # sinon fail immédiat → fallback HashingVectorizer.
+            hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+            if not hf_token:
+                os.environ.setdefault("HF_HUB_OFFLINE", "1")
+                logger.debug("No HF_TOKEN — forcing HF_HUB_OFFLINE=1 (cache-only)")
+
             _EMBEDDING_MODEL_CACHE = SentenceTransformer(EMBEDDING_MODEL)
             self._embedding_model = _EMBEDDING_MODEL_CACHE
             self._using_fallback_embeddings = False

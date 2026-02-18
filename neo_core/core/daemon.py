@@ -342,14 +342,24 @@ def start(foreground: bool = False, host: str = "0.0.0.0", port: int = 8000) -> 
         return {"success": False, "message": f"Fork failed: {e}"}
 
     if pid > 0:
-        # Parent — attendre que le double-fork écrive le PID file
-        # Le premier fils meurt vite (double-fork), le deuxième fils
-        # écrit le PID après _setup_logging() + _write_pid()
-        for _ in range(10):  # 10 x 0.5s = 5s max
+        # Reap le premier fils (double-fork) pour éviter les zombies
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+        # Parent — attendre que le deuxième fils (vrai daemon) écrive le PID file.
+        # Le PID est écrit juste après le double-fork, AVANT le chargement des modèles,
+        # donc ça devrait être quasi instantané. On laisse 15s de marge au cas où.
+        for _ in range(30):  # 30 x 0.5s = 15s max
             time.sleep(0.5)
             if is_running():
                 daemon_pid = _read_pid() or pid
                 return {"success": True, "pid": daemon_pid, "message": f"Neo démarré (PID {daemon_pid})"}
+        # Vérifier si le PID file existe même si is_running() échoue
+        daemon_pid = _read_pid()
+        if daemon_pid:
+            return {"success": True, "pid": daemon_pid, "message": f"Neo démarré (PID {daemon_pid}) — initialisation en cours"}
         return {"success": False, "message": "Le processus a démarré puis s'est arrêté — vérifiez neo logs"}
 
     # Fils — devenir un daemon
