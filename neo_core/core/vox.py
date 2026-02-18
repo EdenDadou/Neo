@@ -297,14 +297,52 @@ class Vox:
         """
         Détermine si un message peut être traité par Vox seul
         (sans Brain) — conversation légère, salutations, statut.
+
+        IMPORTANT : Si le dernier message de Neo se terminait par une question
+        ou une proposition (ex: "Tu veux que je...?"), les réponses courtes
+        comme "oui", "non", "ok" sont des CONFIRMATIONS, pas des salutations.
+        Elles doivent passer par Brain pour être traitées avec le contexte.
         """
         msg_lower = message.lower().strip()
 
-        # Salutations et conversation légère
+        # ── Vérifier si le dernier message AI était une question/proposition ──
+        # Si oui, les réponses courtes sont des continuations, pas des simples
+        if self.conversation_history:
+            last_ai = None
+            for msg in reversed(self.conversation_history):
+                if isinstance(msg, AIMessage):
+                    last_ai = msg.content
+                    break
+
+            if last_ai:
+                last_ai_stripped = last_ai.strip()
+                # Si le dernier message AI finit par "?" ou contient des marqueurs
+                # de proposition/question, c'est une conversation en cours
+                is_question = last_ai_stripped.endswith("?")
+                proposal_markers = [
+                    "tu veux que", "veux-tu que", "voulez-vous",
+                    "je peux", "on fait", "on lance", "je lance",
+                    "je démarre", "je crée", "je te fais",
+                    "shall i", "should i", "want me to",
+                ]
+                is_proposal = any(m in last_ai.lower() for m in proposal_markers)
+
+                if is_question or is_proposal:
+                    # Réponses de confirmation → pas simple, envoyer à Brain
+                    confirmation_patterns = [
+                        "oui", "yes", "ok", "d'accord", "go", "vas-y",
+                        "allez", "fais-le", "lance", "démarre", "crée",
+                        "non", "no", "pas maintenant", "annule", "stop",
+                        "parfait", "super", "exactement", "bien sûr",
+                    ]
+                    if any(msg_lower.startswith(p) or msg_lower == p for p in confirmation_patterns):
+                        return False  # → passer à Brain avec le contexte
+
+        # Salutations et conversation légère (uniquement quand pas en conversation active)
         simple_patterns = [
             "salut", "hello", "bonjour", "bonsoir", "hey", "hi", "yo",
             "ça va", "ca va", "comment tu vas", "comment vas-tu",
-            "merci", "thanks", "ok", "oui", "non", "d'accord",
+            "merci", "thanks",
             "quoi de neuf", "coucou", "wesh", "slt",
         ]
         if any(msg_lower.startswith(p) or msg_lower == p for p in simple_patterns):
@@ -321,9 +359,15 @@ class Vox:
         if any(q in msg_lower for q in neo_questions):
             return True
 
-        # Messages très courts de conversation
+        # Messages très courts — mais seulement si pas en conversation active
         if len(msg_lower.split()) <= 3 and "?" not in msg_lower:
-            return True
+            # Vérifier qu'il n'y a pas d'historique récent qui attend une suite
+            recent_ai_count = sum(1 for m in self.conversation_history[-4:] if isinstance(m, AIMessage))
+            if recent_ai_count == 0:
+                # Pas d'historique récent → probablement un nouveau sujet simple
+                return True
+            # Il y a un historique → possible continuation → envoyer à Brain
+            return False
 
         return False
 
