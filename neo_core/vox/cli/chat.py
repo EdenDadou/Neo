@@ -1047,18 +1047,33 @@ async def api_conversation_loop(config: NeoConfig, api_url: str):
 
 def run_chat():
     """
-    Point d'entrée du chat.
+    Point d'entrée du chat — lance le TUI Textual.
 
-    Si le daemon tourne (API sur localhost:8000), utilise le mode API
-    pour partager la même conversation avec Telegram.
-    Sinon, crée un Vox local (mode standalone).
+    Délègue au module tui.py qui auto-détecte daemon/local.
+    Les anciennes boucles conversation_loop / api_conversation_loop
+    sont conservées comme fallback.
     """
+    try:
+        from neo_core.vox.cli.tui import run_tui
+        run_tui()
+    except ImportError:
+        # Fallback si textual n'est pas installé
+        console.print("[yellow]  ⚠ textual non installé — mode legacy.[/yellow]")
+        console.print("[dim]  Installez avec : pip install 'textual>=1.0'[/dim]\n")
+        _run_chat_legacy()
+    except Exception as e:
+        console.print(f"[red]  Erreur TUI: {e}[/red]")
+        console.print("[dim]  Fallback mode legacy...[/dim]\n")
+        _run_chat_legacy()
+
+
+def _run_chat_legacy():
+    """Fallback : ancien mode prompt_toolkit (si textual indisponible)."""
     config = NeoConfig()
 
     if not check_installation(config):
         return
 
-    # Vérifier si le daemon tourne (PID file + process check)
     daemon_running = False
     api_url = "http://localhost:8000"
     try:
@@ -1066,8 +1081,6 @@ def run_chat():
         if is_running():
             daemon_running = True
         else:
-            # Fallback : le daemon systemd peut tourner sans PID file
-            # (mode --foreground via systemd). Tester l'API directement.
             import httpx
             try:
                 resp = httpx.get(f"{api_url}/health", timeout=5.0)
@@ -1079,14 +1092,10 @@ def run_chat():
         pass
 
     if daemon_running:
-        # Attendre que l'API soit prête (le daemon peut être en train d'init)
-        console.print(
-            "[dim]  Daemon détecté — connexion à l'API...[/dim]",
-            end="",
-        )
+        console.print("[dim]  Daemon détecté — connexion à l'API...[/dim]", end="")
         import httpx
         api_ready = False
-        for _ in range(24):  # 24 x 5s = 2 minutes max
+        for _ in range(24):
             try:
                 resp = httpx.get(f"{api_url}/health", timeout=5.0)
                 if resp.status_code == 200:
@@ -1099,19 +1108,13 @@ def run_chat():
             console.print(".", end="")
 
         if api_ready:
-            console.print(
-                f"\r[dim]  Daemon détecté — mode unifié (même conversation que Telegram).[/dim]"
-            )
+            console.print(f"\r[dim]  Daemon détecté — mode unifié.[/dim]")
             asyncio.run(api_conversation_loop(config, api_url))
         else:
-            console.print(
-                f"\r[yellow]  ⚠ Daemon actif mais API pas encore prête. Mode local.[/yellow]"
-            )
+            console.print(f"\r[yellow]  ⚠ API pas prête — mode local.[/yellow]")
             vox = bootstrap()
             asyncio.run(conversation_loop(vox))
     else:
-        console.print(
-            "[dim]  Daemon non détecté — mode local (conversation isolée).[/dim]"
-        )
+        console.print("[dim]  Mode local.[/dim]")
         vox = bootstrap()
         asyncio.run(conversation_loop(vox))
