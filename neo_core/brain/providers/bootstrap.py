@@ -64,7 +64,7 @@ def bootstrap_providers(config: NeoConfig = None) -> ModelRegistry:
             logger.warning("Failed to register Anthropic provider: %s", e)
 
     # 2. Groq (cloud gratuit)
-    groq_key = os.getenv("GROQ_API_KEY", "")
+    groq_key = config.groq_api_key or os.getenv("GROQ_API_KEY", "")
     if groq_key:
         try:
             from neo_core.brain.providers.groq_provider import GroqProvider
@@ -74,7 +74,7 @@ def bootstrap_providers(config: NeoConfig = None) -> ModelRegistry:
             logger.warning("Failed to register Groq provider: %s", e)
 
     # 3. Gemini (cloud gratuit)
-    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    gemini_key = config.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
     if gemini_key:
         try:
             from neo_core.brain.providers.gemini_provider import GeminiProvider

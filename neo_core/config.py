@@ -46,6 +46,49 @@ def _load_wizard_config() -> dict:
     return {}
 
 
+# ─── Lecture des secrets depuis le KeyVault ───────────────
+
+_vault_cache: dict[str, Optional[str]] = {}
+_vault_loaded = False
+
+
+def _load_vault_secrets() -> None:
+    """Charge tous les secrets du vault en mémoire (une seule fois)."""
+    global _vault_loaded
+    if _vault_loaded:
+        return
+    _vault_loaded = True
+    try:
+        from neo_core.infra.security.vault import KeyVault
+        data_dir = _PROJECT_ROOT / "data"
+        if not (data_dir / ".vault.db").exists():
+            return
+        vault = KeyVault(data_dir=data_dir)
+        vault.initialize()
+        for name in ("anthropic_api_key", "groq_api_key", "gemini_api_key", "hf_token"):
+            val = vault.retrieve(name)
+            if val:
+                _vault_cache[name] = val
+        vault.close()
+    except Exception as e:
+        logger.debug("Vault load skipped: %s", e)
+
+
+def _get_secret(vault_name: str, env_name: str) -> Optional[str]:
+    """
+    Récupère un secret : vault d'abord, puis fallback os.getenv().
+
+    Args:
+        vault_name: Nom du secret dans le vault (ex: "anthropic_api_key")
+        env_name: Variable d'environnement fallback (ex: "ANTHROPIC_API_KEY")
+    """
+    _load_vault_secrets()
+    val = _vault_cache.get(vault_name)
+    if val:
+        return val
+    return os.getenv(env_name) or None
+
+
 @dataclass
 class AgentModelConfig:
     """Configuration du modèle pour un agent spécifique."""
@@ -226,7 +269,7 @@ class LLMConfig:
 
     def __post_init__(self):
         if self.api_key is None:
-            self.api_key = os.getenv("ANTHROPIC_API_KEY")
+            self.api_key = _get_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
         # Toujours strip la clé (espaces, newlines, guillemets résiduels)
         if self.api_key:
             self.api_key = self.api_key.strip().strip('"').strip("'")
@@ -296,9 +339,9 @@ class NeoConfig:
     api_host: str = field(default_factory=lambda: os.getenv("NEO_API_HOST", "0.0.0.0"))
     api_port: int = field(default_factory=lambda: int(os.getenv("NEO_API_PORT", "8000")))
 
-    # Provider configuration
-    groq_api_key: Optional[str] = field(default_factory=lambda: os.getenv("GROQ_API_KEY", None))
-    gemini_api_key: Optional[str] = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", None))
+    # Provider configuration (vault → env fallback)
+    groq_api_key: Optional[str] = field(default_factory=lambda: _get_secret("groq_api_key", "GROQ_API_KEY"))
+    gemini_api_key: Optional[str] = field(default_factory=lambda: _get_secret("gemini_api_key", "GEMINI_API_KEY"))
     ollama_url: str = field(default_factory=lambda: os.getenv("OLLAMA_URL", "http://localhost:11434"))
     provider_mode: str = field(default_factory=lambda: os.getenv("NEO_PROVIDER_MODE", "economic"))
 
@@ -345,27 +388,31 @@ class NeoConfig:
         # Si une clé Anthropic existe, pas mock
         if self.llm.api_key:
             return False
-        # Vérifier les autres providers via le .env
-        if os.getenv("GROQ_API_KEY"):
+        # Vérifier les autres providers (vault → env)
+        if self.groq_api_key:
             return False
-        if os.getenv("GEMINI_API_KEY"):
+        if self.gemini_api_key:
             return False
         # Pas de vérification Ollama ici (trop lent au startup)
         return True
 
     def reload(self) -> None:
-        """Recharge la configuration depuis le .env et neo_config.json (thread-safe)."""
+        """Recharge la configuration depuis le vault, .env et neo_config.json (thread-safe)."""
+        global _vault_loaded
         with self._reload_lock:
             from dotenv import load_dotenv
             load_dotenv(override=True)
+            # Forcer le rechargement du vault
+            _vault_loaded = False
+            _vault_cache.clear()
             # Re-read env vars
             self.debug = os.getenv("NEO_DEBUG", "false").lower() == "true"
             self.log_level = os.getenv("NEO_LOG_LEVEL", "INFO")
-            self.groq_api_key = os.getenv("GROQ_API_KEY", None)
-            self.gemini_api_key = os.getenv("GEMINI_API_KEY", None)
+            self.groq_api_key = _get_secret("groq_api_key", "GROQ_API_KEY")
+            self.gemini_api_key = _get_secret("gemini_api_key", "GEMINI_API_KEY")
             self.provider_mode = os.getenv("NEO_PROVIDER_MODE", "economic")
-            # Re-read LLM config
-            api_key = os.getenv("ANTHROPIC_API_KEY", "")
+            # Re-read LLM config (vault → env fallback)
+            api_key = _get_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
             if api_key:
                 self.llm.api_key = api_key.strip().strip("'\"")
             # Re-read wizard config
@@ -375,7 +422,7 @@ class NeoConfig:
                     self.core_name = wizard["core_name"]
                 if "user_name" in wizard:
                     self.user_name = wizard["user_name"]
-            logger.info("Configuration reloaded from .env and neo_config.json")
+            logger.info("Configuration reloaded from vault, .env and neo_config.json")
 
     def is_installed(self) -> bool:
         """Vérifie si le wizard d'installation a été exécuté."""

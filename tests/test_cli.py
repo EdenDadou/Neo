@@ -144,7 +144,16 @@ class TestSetupUtilities:
 
         assert env_file.exists()
         env_content = env_file.read_text()
-        assert "ANTHROPIC_API_KEY=sk-test" in env_content
+        # Les clés API sont dans le vault, pas dans .env
+        assert "ANTHROPIC_API_KEY" not in env_content
+        assert "NEO_CORE_NAME=TestCore" in env_content
+
+        # Vérifier que la clé est dans le vault
+        from neo_core.infra.security.vault import KeyVault
+        vault = KeyVault(data_dir=config_dir)
+        vault.initialize()
+        assert vault.retrieve("anthropic_api_key") == "sk-test"
+        vault.close()
 
 
 class TestStatusModule:

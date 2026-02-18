@@ -33,8 +33,9 @@ ENV_FILE = PROJECT_ROOT / ".env"
 
 
 def _load_existing_env() -> dict:
-    """Charge les clés existantes depuis le .env (si présent)."""
+    """Charge les clés existantes depuis le vault + .env (si présent)."""
     existing = {}
+    # 1. Lire le .env (variables non-sensibles + fallback legacy)
     if ENV_FILE.exists():
         try:
             for line in ENV_FILE.read_text().splitlines():
@@ -49,6 +50,26 @@ def _load_existing_env() -> dict:
                         existing[key] = value
         except OSError:
             pass
+    # 2. Lire le vault (clés chiffrées — prioritaire sur .env)
+    try:
+        from neo_core.infra.security.vault import KeyVault
+        vault_dir = CONFIG_DIR
+        if (vault_dir / ".vault.db").exists():
+            vault = KeyVault(data_dir=vault_dir)
+            vault.initialize()
+            _vault_map = {
+                "anthropic_api_key": "ANTHROPIC_API_KEY",
+                "groq_api_key": "GROQ_API_KEY",
+                "gemini_api_key": "GEMINI_API_KEY",
+                "hf_token": "HF_TOKEN",
+            }
+            for vault_name, env_name in _vault_map.items():
+                val = vault.retrieve(vault_name)
+                if val:
+                    existing[env_name] = val
+            vault.close()
+    except Exception:
+        pass
     return existing
 
 
@@ -169,7 +190,18 @@ def _download_embedding_model(provider_keys: dict | None = None) -> bool:
     print(f"\n  {DIM}⧗ Téléchargement du modèle d'embedding ({model_name})...{RESET}")
 
     # S'assurer que le HF_TOKEN est dans l'env si disponible
+    # Priorité : argument → vault → variable d'env
     hf_token = (provider_keys or {}).get("huggingface", "") or os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        try:
+            from neo_core.infra.security.vault import KeyVault
+            if (CONFIG_DIR / ".vault.db").exists():
+                vault = KeyVault(data_dir=CONFIG_DIR)
+                vault.initialize()
+                hf_token = vault.retrieve("hf_token") or ""
+                vault.close()
+        except Exception:
+            pass
     if hf_token:
         os.environ["HF_TOKEN"] = hf_token
 
@@ -386,6 +418,23 @@ def test_connection(api_key: str) -> bool:
         return False
 
 
+def _write_env_fallback(api_key: str, provider_keys: dict | None = None):
+    """Fallback : écrit les clés en .env si le vault est indisponible."""
+    lines = []
+    if api_key:
+        lines.append(f"ANTHROPIC_API_KEY={api_key}")
+    if provider_keys:
+        if provider_keys.get("huggingface"):
+            lines.append(f"HF_TOKEN={provider_keys['huggingface']}")
+        if provider_keys.get("groq") and provider_keys["groq"] != "local":
+            lines.append(f"GROQ_API_KEY={provider_keys['groq']}")
+        if provider_keys.get("gemini") and provider_keys["gemini"] != "local":
+            lines.append(f"GEMINI_API_KEY={provider_keys['gemini']}")
+    if lines:
+        with open(ENV_FILE, "a") as f:
+            f.write("\n".join(lines) + "\n")
+
+
 def save_config(core_name: str, user_name: str, api_key: str,
                 python_path: str, provider_keys: dict | None = None):
     """Sauvegarde la configuration."""
@@ -423,30 +472,38 @@ def save_config(core_name: str, user_name: str, api_key: str,
 
     print(f"  {GREEN}✓{RESET} Configuration sauvegardée: {CONFIG_FILE}")
 
-    # .env avec toutes les clés
+    # ── Stocker les clés API dans le KeyVault (chiffré) ──
+    try:
+        from neo_core.infra.security.vault import KeyVault
+        vault = KeyVault(data_dir=CONFIG_DIR)
+        vault.initialize()
+        if api_key:
+            vault.store("anthropic_api_key", api_key)
+        if provider_keys:
+            if provider_keys.get("groq") and provider_keys["groq"] != "local":
+                vault.store("groq_api_key", provider_keys["groq"])
+            if provider_keys.get("gemini") and provider_keys["gemini"] != "local":
+                vault.store("gemini_api_key", provider_keys["gemini"])
+            if provider_keys.get("huggingface"):
+                vault.store("hf_token", provider_keys["huggingface"])
+        vault.close()
+        print(f"  {GREEN}✓{RESET} Clés API chiffrées dans le vault")
+    except Exception as e:
+        print(f"  {YELLOW}⚠{RESET} Vault indisponible ({e}) — clés en fallback .env")
+        # Fallback : écrire dans .env si le vault échoue
+        _write_env_fallback(api_key, provider_keys)
+
+    # ── .env : uniquement les variables non-sensibles ──
     env_lines = [
         "# Neo Core — Configuration Environnement",
-        "# Généré par neo.py setup",
-        "",
-        f"ANTHROPIC_API_KEY={api_key}",
-    ]
-
-    if provider_keys:
-        if provider_keys.get("huggingface"):
-            env_lines.append(f"HF_TOKEN={provider_keys['huggingface']}")
-        if provider_keys.get("groq") and provider_keys["groq"] != "local":
-            env_lines.append(f"GROQ_API_KEY={provider_keys['groq']}")
-        if provider_keys.get("gemini") and provider_keys["gemini"] != "local":
-            env_lines.append(f"GEMINI_API_KEY={provider_keys['gemini']}")
-
-    env_lines.extend([
+        "# Les clés API sont stockées dans le vault chiffré (data/.vault.db)",
         "",
         f"NEO_CORE_NAME={core_name}",
         f"NEO_USER_NAME={user_name}",
         "NEO_DEBUG=false",
         "NEO_LOG_LEVEL=INFO",
         "",
-    ])
+    ]
 
     with open(ENV_FILE, "w") as f:
         f.write("\n".join(env_lines))
