@@ -602,17 +602,18 @@ echo -e "  ${DIM}Il va vous demander votre nom et optionnellement vos clés API.
 echo -e "  ${DIM}Sans clé API, Neo fonctionne en mode démo (réponses simulées).${RESET}"
 echo
 
-# Lancer le wizard en tant que user neo — c'est le même user qui crée le vault
-# (chiffrement) et qui le lit ensuite (daemon systemd User=neo).
-# S'assurer que data/ et .env appartiennent à neo AVANT le wizard
+# Lancer le wizard en tant que root (accès TTY garanti),
+# puis chown tout data/ pour que le daemon (User=neo) puisse lire le vault.
+# Le vault utilise machine_id pour le chiffrement → même clé quel que soit le user.
 chown -R ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/data" 2>/dev/null || true
 chown ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/.env" 2>/dev/null || true
 
 echo -e "  ${DIM}Lancement du wizard...${RESET}\n"
-cd "${INSTALL_DIR}" && sudo -u ${NEO_USER} "${VENV_DIR}/bin/neo" setup < /dev/tty
+cd "${INSTALL_DIR}" && "${VENV_DIR}/bin/neo" setup < /dev/tty
 WIZARD_EXIT=$?
 
-# Re-chown au cas où le wizard a créé de nouveaux fichiers
+# CRITIQUE : chown tout data/ (vault, config, etc.) pour le user neo
+# Le daemon systemd tourne sous User=neo et doit pouvoir lire le vault
 chown -R ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/data" 2>/dev/null || true
 chown ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/.env" 2>/dev/null || true
 

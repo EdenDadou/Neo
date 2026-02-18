@@ -7,9 +7,11 @@ REST endpoints for interacting with Neo Core.
 
 import asyncio
 import hmac
+import json
 import logging
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi.responses import StreamingResponse
 from typing import Optional
 
 from neo_core.vox.api.schemas import (
@@ -60,6 +62,104 @@ async def chat(request: ChatRequest):
         session_id=session.session_id if session else "",
         turn_number=session.message_count if session else 0,
         timestamp=datetime.now().isoformat(),
+    )
+
+
+@router.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """
+    Chat avec streaming SSE — envoie un accusé de réception immédiat
+    puis la réponse finale quand Brain termine.
+
+    Events SSE :
+      event: ack     → {"text": "Je réfléchis..."}
+      event: response → {"text": "...", "session_id": "...", "turn_number": N}
+      event: error    → {"text": "..."}
+    """
+    if not neo_core._initialized:
+        raise HTTPException(503, "Neo Core not initialized")
+
+    if request.session_id and neo_core.vox._current_session:
+        if request.session_id != neo_core.vox._current_session.session_id:
+            neo_core.vox.resume_session(request.session_id)
+
+    message = request.message
+
+    async def event_generator():
+        # Queue pour recevoir ack et résultat depuis les callbacks Vox
+        result_queue: asyncio.Queue = asyncio.Queue()
+
+        # Sauvegarder les callbacks existants
+        old_thinking_cb = neo_core.vox._on_thinking_callback
+        old_brain_done_cb = neo_core.vox._on_brain_done_callback
+
+        def on_ack(ack_text: str):
+            """Callback ack — Vox envoie l'accusé de réception."""
+            result_queue.put_nowait(("ack", ack_text))
+
+        def on_brain_done(brain_response: str):
+            """Callback quand Brain termine en arrière-plan."""
+            result_queue.put_nowait(("response", brain_response))
+
+        # Installer les callbacks pour le streaming
+        neo_core.vox.set_thinking_callback(on_ack)
+        neo_core.vox.set_brain_done_callback(on_brain_done)
+
+        try:
+            async with neo_core._lock:
+                # Lancer process_message — en mode async, retourne immédiatement l'ack
+                try:
+                    ack_or_response = await asyncio.wait_for(
+                        neo_core.vox.process_message(message),
+                        timeout=120.0,
+                    )
+                except asyncio.TimeoutError:
+                    yield f"event: error\ndata: {json.dumps({'text': 'Timeout — Brain n\\'a pas répondu'})}\n\n"
+                    return
+
+            # Drainer tous les events de la queue (ack envoyé pendant process_message)
+            while not result_queue.empty():
+                try:
+                    event_type, text = result_queue.get_nowait()
+                    yield f"event: {event_type}\ndata: {json.dumps({'text': text})}\n\n"
+                except asyncio.QueueEmpty:
+                    break
+
+            # Si brain_done_callback est actif, process_message a retourné l'ack
+            # et Brain tourne en arrière-plan → attendre la réponse
+            if neo_core.vox._brain_busy:
+                # Envoyer l'ack retourné par process_message
+                yield f"event: ack\ndata: {json.dumps({'text': ack_or_response})}\n\n"
+
+                # Attendre le résultat Brain via la queue
+                try:
+                    event_type, brain_response = await asyncio.wait_for(
+                        result_queue.get(), timeout=120.0,
+                    )
+                except asyncio.TimeoutError:
+                    yield f"event: error\ndata: {json.dumps({'text': 'Timeout — Brain n\\'a pas répondu'})}\n\n"
+                    return
+
+                session = neo_core.vox._current_session
+                yield f"event: response\ndata: {json.dumps({'text': brain_response, 'session_id': session.session_id if session else '', 'turn_number': session.message_count if session else 0})}\n\n"
+            else:
+                # Mode synchrone — process_message a retourné la réponse complète
+                session = neo_core.vox._current_session
+                yield f"event: response\ndata: {json.dumps({'text': ack_or_response, 'session_id': session.session_id if session else '', 'turn_number': session.message_count if session else 0})}\n\n"
+
+        finally:
+            # Restaurer les callbacks
+            neo_core.vox._on_thinking_callback = old_thinking_cb
+            neo_core.vox._on_brain_done_callback = old_brain_done_cb
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
