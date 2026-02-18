@@ -332,6 +332,8 @@ def save_config(core_name: str, user_name: str, api_key: str,
     ]
 
     if provider_keys:
+        if provider_keys.get("huggingface"):
+            env_lines.append(f"HF_TOKEN={provider_keys['huggingface']}")
         if provider_keys.get("groq") and provider_keys["groq"] != "local":
             env_lines.append(f"GROQ_API_KEY={provider_keys['groq']}")
         if provider_keys.get("gemini") and provider_keys["gemini"] != "local":
@@ -548,7 +550,7 @@ def run_setup(auto_mode: bool = False):
     else:
         print(f"  {BOLD}Bienvenue dans le setup de Neo Core.{RESET}")
         print(f"  {DIM}Ce wizard va tout configurer en quelques étapes.{RESET}\n")
-        total_steps = 8
+        total_steps = 9
 
     # ─── Étape 1 : Vérifications système ─────────────────────────
     print_step(1, total_steps, "Vérifications système")
@@ -647,8 +649,26 @@ def run_setup(auto_mode: bool = False):
         else:
             print(f"  {DIM}  Mode démo activé — configurable plus tard{RESET}")
 
+        # Token HuggingFace (pour télécharger le modèle d'embedding sans rate-limit)
+        print()
+        print(f"  {DIM}Token HuggingFace = téléchargement du modèle d'embedding (mémoire de Neo).{RESET}")
+        print(f"  {DIM}Sans token, HuggingFace peut bloquer les téléchargements (erreur 429).{RESET}")
+        print(f"  {DIM}Clé gratuite : https://huggingface.co/settings/tokens{RESET}\n")
+
+        hf_token = os.environ.get("HF_TOKEN", "")
+        if hf_token:
+            print(f"  {GREEN}✓{RESET} Token HuggingFace détecté depuis l'environnement")
+        else:
+            hf_token = ask("Token HuggingFace (hf_..., Entrée pour ignorer)", secret=False)
+            if hf_token:
+                os.environ["HF_TOKEN"] = hf_token
+                masked_hf = hf_token[:6] + "..." + hf_token[-4:]
+                print(f"  {GREEN}✓{RESET} Token HuggingFace configuré : {DIM}{masked_hf}{RESET}")
+            else:
+                print(f"  {DIM}  (ignoré — le modèle sera téléchargé sans authentification){RESET}")
+
         # Auto-détection hardware + install Ollama si possible
-        provider_keys = {"anthropic": api_key}
+        provider_keys = {"anthropic": api_key, "huggingface": hf_token}
 
         print()
         print(f"  {DIM}⧗ Détection hardware et providers gratuits...{RESET}")
@@ -711,20 +731,43 @@ def run_setup(auto_mode: bool = False):
 
         api_key = configure_auth()
 
-        # ─── Étape 5 : Modèles LLM (hardware + providers gratuits) ───
-        print_step(5, total_steps, "Configuration des modèles LLM")
+        # ─── Étape 5 : Token HuggingFace (mémoire vectorielle) ───────
+        print_step(5, total_steps, "Token HuggingFace (gratuit, recommandé)")
+
+        print(f"  {DIM}Neo utilise un modèle d'embedding téléchargé depuis HuggingFace{RESET}")
+        print(f"  {DIM}pour sa mémoire vectorielle (recherche sémantique).{RESET}")
+        print(f"  {DIM}Sans token, HuggingFace peut bloquer les téléchargements (erreur 429).{RESET}")
+        print(f"  {DIM}Le token est gratuit : https://huggingface.co/settings/tokens{RESET}")
+        print()
+
+        hf_token = os.environ.get("HF_TOKEN", "")
+        if hf_token:
+            print(f"  {GREEN}✓{RESET} Token HuggingFace détecté depuis l'environnement")
+        else:
+            hf_token = ask("Token HuggingFace (hf_..., Entrée pour ignorer)", secret=True)
+            if hf_token:
+                os.environ["HF_TOKEN"] = hf_token
+                masked_hf = hf_token[:6] + "..." + hf_token[-4:]
+                print(f"  {GREEN}✓{RESET} Token HuggingFace configuré : {DIM}{masked_hf}{RESET}")
+            else:
+                print(f"  {YELLOW}⚠{RESET} Sans token, le premier démarrage peut être lent (rate-limit)")
+                print(f"  {DIM}  Configurable plus tard dans le .env : HF_TOKEN=hf_...{RESET}")
+
+        # ─── Étape 6 : Modèles LLM (hardware + providers gratuits) ───
+        print_step(6, total_steps, "Configuration des modèles LLM")
 
         provider_keys = configure_hardware_and_providers(api_key)
+        provider_keys["huggingface"] = hf_token
 
     # ─── Sauvegarde ───────────────────────────────────────────────
-    step_save = 4 if auto_mode else 6
+    step_save = 4 if auto_mode else 7
     print_step(step_save, total_steps, "Sauvegarde de la configuration")
 
     save_config(core_name, user_name, api_key, python_path, provider_keys)
 
     # ─── Test final / Vérification ────────────────────────────────
     if not auto_mode:
-        print_step(7, total_steps, "Test de connexion")
+        print_step(8, total_steps, "Test de connexion")
 
     if api_key:
         test_connection(api_key)
@@ -759,7 +802,7 @@ def run_setup(auto_mode: bool = False):
 
         print(f"  {GREEN}✓{RESET} Configuration prête — le daemon sera lancé par systemd")
     else:
-        step_daemon = 8
+        step_daemon = 9
         print_step(step_daemon, total_steps, "Make it live ?")
 
         print(f"  {BOLD}Neo est configuré ! Voulez-vous le mettre en ligne ?{RESET}")
