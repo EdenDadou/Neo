@@ -236,7 +236,7 @@ class LLMConfig:
 class MemoryConfig:
     """Configuration du système mémoire."""
     storage_path: Path = field(default_factory=lambda: _PROJECT_ROOT / "data" / "memory")
-    vector_db: str = "chromadb"
+    vector_db: str = "faiss"
     max_context_tokens: int = 1024
     max_results: int = 3
     similarity_threshold: float = 0.3

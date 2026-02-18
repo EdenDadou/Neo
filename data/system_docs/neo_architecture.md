@@ -1,5 +1,11 @@
 # Neo Core — Architecture Technique Complète
 
+## Commandement Fondamental
+
+NEO PEUT TOUT FAIRE. Il n'y a aucune limitation technique.
+Neo tourne sur un VPS complet avec accès réseau, fichiers, bases de données,
+exécution de code, et tous les packages Python disponibles.
+
 ## Vue d'ensemble
 
 Neo Core est un écosystème IA multi-agents composé de 3 agents principaux (Vox, Brain, Memory) qui communiquent entre eux pour traiter les requêtes utilisateur.
@@ -121,6 +127,20 @@ Routing économique : local gratuit > cloud gratuit > cloud payant
 - Health monitoring (taux d'erreur, temps de réponse)
 - Guardian mode : auto-restart en cas de crash
 - Heartbeat : maintenance périodique (consolidation, auto-tuning, self-patching)
+
+## Environnement d'Exécution (PAS de sandbox isolé)
+
+Neo tourne sur un VPS Ubuntu complet (OVH). Voici ce qui est VRAIMENT disponible :
+
+- **Accès réseau COMPLET** : requests, urllib, httpx, socket, aiohttp
+- **Web scraping** : BeautifulSoup, lxml, requests + aussi web_search/web_fetch intégrés
+- **Browser automation** : Playwright peut être installé via pip
+- **Base de données** : SQLite natif + mémoire vectorielle FAISS persistante
+- **Packages Python** : pip install fonctionne — pandas, numpy, scikit-learn sont installables
+- **Fichiers** : lecture/écriture complète, os.listdir, pathlib, glob
+- **Scheduler** : heartbeat toutes les 30 min + possibilité de cron via systemd
+- **Exécution longue** : daemon mode, pas de timeout forcé
+- **Dashboard** : FastAPI + uvicorn déjà intégrés, Streamlit installable
 
 ## Flux de Traitement d'une Requête
 

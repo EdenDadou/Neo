@@ -210,7 +210,7 @@ class TestLoggingConfig:
     def test_dependency_loggers_suppressed(self):
         """Les loggers des dépendances sont au niveau WARNING."""
         setup_logging(console=False, file_logging=False)
-        assert logging.getLogger("chromadb").level >= logging.WARNING
+        assert logging.getLogger("faiss").level >= logging.WARNING
         assert logging.getLogger("httpx").level >= logging.WARNING
 
 

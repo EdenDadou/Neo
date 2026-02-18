@@ -87,19 +87,19 @@ async def health():
     else:
         checks["vox"] = "not_initialized"
 
-    # 3. ChromaDB
+    # 3. FAISS (vector search)
     try:
         if neo_core.vox and neo_core.vox.memory and neo_core.vox.memory._store:
             store = neo_core.vox.memory._store
-            if store._collection:
-                count = store._collection.count()
-                checks["chromadb"] = f"ok ({count} vectors)"
+            if store.has_vector_search:
+                n_vectors = store._faiss_index.ntotal if store._faiss_index else 0
+                checks["faiss"] = f"ok ({n_vectors} vectors)"
             else:
-                checks["chromadb"] = "no_collection"
+                checks["faiss"] = "no_index"
         else:
-            checks["chromadb"] = "unavailable"
+            checks["faiss"] = "unavailable"
     except Exception as e:
-        checks["chromadb"] = f"error: {e}"
+        checks["faiss"] = f"error: {e}"
 
     # 4. KeyVault
     try:

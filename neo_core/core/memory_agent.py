@@ -112,7 +112,9 @@ class MemoryAgent:
             self._init_llm()
 
         # Charger la documentation système en mémoire (auto-connaissance)
-        self._load_system_docs()
+        # Skip en mode mock (tests) pour éviter le coût d'embedding
+        if not self._mock_mode:
+            self._load_system_docs()
 
     def _init_llm(self) -> None:
         """Initialise le LLM dédié de Memory (Haiku — économique)."""

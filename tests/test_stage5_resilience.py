@@ -561,7 +561,7 @@ class TestWorkerToolUse:
 
         # Vérifier que c'est stocké en mémoire
         records = memory.search("researcher", n_results=5)
-        worker_records = [r for r in records if "worker_execution" in r.tags]
+        worker_records = [r for r in records if any("worker:" in t for t in r.tags)]
         assert len(worker_records) > 0
 
 

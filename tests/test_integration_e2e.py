@@ -294,11 +294,11 @@ class TestAPIIntegration:
         assert "core" in data["checks"]
         assert data["status"] in ("healthy", "degraded")
 
-    def test_health_shows_chromadb_count(self, client):
+    def test_health_shows_faiss_status(self, client):
         data = client.get("/health").json()
-        chromadb_status = data["checks"].get("chromadb", "")
-        # Should report ok with vector count
-        assert "ok" in chromadb_status or "unavailable" in chromadb_status
+        faiss_status = data["checks"].get("faiss", "")
+        # Should report ok with vector capability
+        assert "ok" in faiss_status or "unavailable" in faiss_status
 
 
 # ─── WorkerLifecycleManager Thread Safety ──────────────────────

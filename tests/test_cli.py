@@ -222,7 +222,7 @@ class TestHealthCheck:
         from neo_core.api import routes
         source = inspect.getsource(routes.health)
         assert "checks" in source
-        assert "chromadb" in source
+        assert "faiss" in source
         assert "vault" in source
         assert "healthy" in source or "degraded" in source
 

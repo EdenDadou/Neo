@@ -2,10 +2,11 @@
 Memory Store — Stockage Persistant
 ====================================
 Double système de stockage :
-- ChromaDB : stockage vectoriel pour la recherche sémantique
+- FAISS : index vectoriel pour la recherche sémantique (remplace ChromaDB v0.9.3)
 - SQLite : métadonnées structurées (timestamps, tags, sources, importance)
 
-Les embeddings sont générés par ChromaDB (modèle par défaut all-MiniLM-L6-v2).
+Les embeddings sont générés par sentence-transformers (all-MiniLM-L6-v2, dim=384).
+L'index FAISS utilise IndexFlatIP (produit scalaire = cosine sur vecteurs normalisés).
 """
 
 from __future__ import annotations
@@ -19,9 +20,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 from neo_core.config import MemoryConfig
 
 logger = logging.getLogger(__name__)
+
+# Dimension du modèle all-MiniLM-L6-v2
+EMBEDDING_DIM = 384
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+# Singleton process-level pour le modèle d'embedding (évite de recharger ~2s à chaque init)
+_EMBEDDING_MODEL_CACHE = None
 
 
 @dataclass
@@ -38,21 +48,26 @@ class MemoryRecord:
 
 class MemoryStore:
     """
-    Stockage persistant double couche : ChromaDB + SQLite.
+    Stockage persistant double couche : FAISS + SQLite.
 
-    ChromaDB gère les embeddings et la recherche sémantique.
+    FAISS gère les embeddings et la recherche sémantique.
     SQLite gère les métadonnées structurées et les requêtes exactes.
+
+    Persistence : l'index FAISS est sauvegardé sur disque après chaque
+    modification (write/delete). L'index est rechargé au démarrage.
     """
 
     def __init__(self, config: MemoryConfig):
         self.config = config
-        self._chroma_client = None
-        self._collection = None
+        self._faiss_index = None
+        self._embedding_model = None
+        self._id_map: list[str] = []  # position FAISS → memory ID
         self._db_conn: Optional[sqlite3.Connection] = None
         self._initialized = False
         # Cache d'embeddings pour éviter les doubles recherches sémantiques
         self._semantic_cache: dict[str, list] = {}  # query → results
         self._semantic_cache_hits: int = 0
+        self._needs_rebuild: bool = False
 
     def initialize(self) -> None:
         """Initialise les deux systèmes de stockage."""
@@ -60,7 +75,7 @@ class MemoryStore:
         self.config.storage_path.mkdir(parents=True, exist_ok=True)
 
         self._init_sqlite()
-        self._init_chromadb()
+        self._init_faiss()
         self._initialized = True
 
     def _init_sqlite(self) -> None:
@@ -117,41 +132,138 @@ class MemoryStore:
         except Exception as e:
             logger.debug("Migrations skipped: %s", e)
 
-    def _init_chromadb(self) -> None:
-        """Initialise ChromaDB pour le stockage vectoriel."""
+    def _init_faiss(self) -> None:
+        """
+        Initialise FAISS pour le stockage vectoriel.
+
+        Charge le modèle d'embedding (all-MiniLM-L6-v2) et l'index FAISS.
+        Si un index persisté existe, le recharge. Sinon, crée un index vide
+        et le peuple à partir des données SQLite existantes.
+        """
         try:
-            # Désactiver la télémétrie chromadb AVANT tout import/init
-            # Corrige: "Failed to send telemetry event: capture() takes 1 positional argument but 3 were given"
-            import os as _os
-            _os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+            import faiss
 
-            import chromadb
-            from chromadb.config import Settings as _ChromaSettings
+            index_path = self.config.storage_path / "faiss_index.bin"
+            id_map_path = self.config.storage_path / "faiss_id_map.json"
 
-            chroma_path = self.config.storage_path / "chroma"
-            self._chroma_client = chromadb.PersistentClient(
-                path=str(chroma_path),
-                settings=_ChromaSettings(anonymized_telemetry=False),
-            )
-            self._collection = self._chroma_client.get_or_create_collection(
-                name="neo_memory",
-                metadata={"hnsw:space": "cosine"},
-            )
+            # Charger le modèle d'embedding (lazy — une seule fois par process)
+            self._load_embedding_model()
+
+            # Recharger l'index persisté s'il existe
+            if index_path.exists() and id_map_path.exists():
+                self._faiss_index = faiss.read_index(str(index_path))
+                self._id_map = json.loads(id_map_path.read_text(encoding="utf-8"))
+                logger.info(
+                    "FAISS index loaded: %d vectors (dim=%d)",
+                    self._faiss_index.ntotal, EMBEDDING_DIM,
+                )
+            else:
+                # Index cosine = IndexFlatIP sur vecteurs L2-normalisés
+                self._faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
+                self._id_map = []
+                self._needs_rebuild = True  # Rebuild lazy au premier search
+
         except ImportError:
-            # Fallback sans ChromaDB — utilise uniquement SQLite
-            logger.info("ChromaDB non installé — mémoire vectorielle désactivée")
-            self._chroma_client = None
-            self._collection = None
-        except PermissionError as e:
-            # chromadb/pydantic tries to read .env in cwd — may fail with wrong perms
-            logger.warning("ChromaDB init failed (permission denied: %s) — mémoire vectorielle désactivée", e)
-            self._chroma_client = None
-            self._collection = None
+            logger.info("FAISS non installé — mémoire vectorielle désactivée")
+            self._faiss_index = None
         except Exception as e:
-            # Any other error — degrade gracefully instead of crashing
-            logger.warning("ChromaDB init failed (%s) — mémoire vectorielle désactivée", e)
-            self._chroma_client = None
-            self._collection = None
+            logger.warning("FAISS init failed (%s) — mémoire vectorielle désactivée", e)
+            self._faiss_index = None
+
+    def _load_embedding_model(self) -> None:
+        """
+        Charge le modèle d'embedding sentence-transformers.
+
+        Singleton process-level : chargé une seule fois, réutilisé par toutes
+        les instances de MemoryStore. Temps de chargement : ~200ms au premier appel.
+        """
+        global _EMBEDDING_MODEL_CACHE
+
+        if self._embedding_model is not None:
+            return
+
+        if _EMBEDDING_MODEL_CACHE is not None:
+            self._embedding_model = _EMBEDDING_MODEL_CACHE
+            return
+
+        try:
+            from sentence_transformers import SentenceTransformer
+            _EMBEDDING_MODEL_CACHE = SentenceTransformer(EMBEDDING_MODEL)
+            self._embedding_model = _EMBEDDING_MODEL_CACHE
+            logger.info("Embedding model loaded: %s", EMBEDDING_MODEL)
+        except ImportError:
+            logger.warning("sentence-transformers non installé — embeddings désactivés")
+            self._embedding_model = None
+
+    def _embed(self, texts: list[str]) -> np.ndarray:
+        """
+        Génère des embeddings normalisés pour une liste de textes.
+
+        Retourne un array numpy (n_texts, 384) normalisé L2.
+        La normalisation permet d'utiliser le produit scalaire (IP)
+        comme distance cosine dans FAISS.
+        """
+        if not self._embedding_model:
+            return np.zeros((len(texts), EMBEDDING_DIM), dtype=np.float32)
+
+        embeddings = self._embedding_model.encode(
+            texts,
+            normalize_embeddings=True,  # Cosine similarity via IP
+            show_progress_bar=False,
+        )
+        return np.asarray(embeddings, dtype=np.float32)
+
+    def _rebuild_index_from_sqlite(self) -> None:
+        """
+        Rebuilde l'index FAISS à partir des données SQLite existantes.
+
+        Utilisé lors de la migration ChromaDB → FAISS ou si l'index
+        est corrompu/manquant.
+        """
+        if not self._faiss_index or not self._embedding_model:
+            return
+
+        rows = self._db_conn.execute(
+            "SELECT id, content FROM memories ORDER BY timestamp ASC"
+        ).fetchall()
+
+        if not rows:
+            return
+
+        ids = [row["id"] for row in rows]
+        contents = [row["content"] for row in rows]
+
+        # Embedder par batch de 256
+        batch_size = 256
+        all_embeddings = []
+        for i in range(0, len(contents), batch_size):
+            batch = contents[i:i + batch_size]
+            emb = self._embed(batch)
+            all_embeddings.append(emb)
+
+        embeddings = np.vstack(all_embeddings)
+        self._faiss_index.add(embeddings)
+        self._id_map = ids
+
+        self._save_faiss_index()
+        logger.info("FAISS index rebuilt from SQLite: %d vectors", len(ids))
+
+    def _save_faiss_index(self) -> None:
+        """Persiste l'index FAISS et le mapping ID sur disque."""
+        if not self._faiss_index:
+            return
+
+        try:
+            import faiss
+            index_path = self.config.storage_path / "faiss_index.bin"
+            id_map_path = self.config.storage_path / "faiss_id_map.json"
+
+            faiss.write_index(self._faiss_index, str(index_path))
+            id_map_path.write_text(
+                json.dumps(self._id_map), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.debug("Failed to save FAISS index: %s", e)
 
     @property
     def is_initialized(self) -> bool:
@@ -160,7 +272,7 @@ class MemoryStore:
     @property
     def has_vector_search(self) -> bool:
         """Indique si la recherche vectorielle est disponible."""
-        return self._collection is not None
+        return self._faiss_index is not None and self._embedding_model is not None
 
     def __enter__(self):
         """Context manager entry."""
@@ -198,21 +310,15 @@ class MemoryStore:
                 return record_id  # Graceful degradation: return ID but don't crash
             raise
 
-        # ChromaDB (si disponible)
-        if self._collection is not None:
+        # FAISS (si disponible)
+        if self._faiss_index is not None and self._embedding_model is not None:
             try:
-                self._collection.add(
-                    ids=[record_id],
-                    documents=[content],
-                    metadatas=[{
-                        "source": source,
-                        "tags": json.dumps(tags),
-                        "importance": importance,
-                        "timestamp": timestamp,
-                    }],
-                )
+                embedding = self._embed([content])
+                self._faiss_index.add(embedding)
+                self._id_map.append(record_id)
+                self._save_faiss_index()
             except OSError as e:
-                logger.critical("DISK FULL — ChromaDB write failed: %s", e)
+                logger.critical("DISK FULL — FAISS write failed: %s", e)
 
         return record_id
 
@@ -223,11 +329,19 @@ class MemoryStore:
     def search_semantic(self, query: str, n_results: int = 5,
                         min_importance: float = 0.0) -> list[MemoryRecord]:
         """
-        Recherche sémantique via ChromaDB.
+        Recherche sémantique via FAISS.
         Retourne les souvenirs les plus pertinents pour la requête.
         Utilise un cache par requête pour éviter les doubles embeddings.
         """
-        if not self._collection or self._collection.count() == 0:
+        if not self._faiss_index or not self._embedding_model:
+            return []
+
+        # Lazy rebuild: construire l'index au premier search (pas au boot)
+        if self._needs_rebuild:
+            self._needs_rebuild = False
+            self._rebuild_index_from_sqlite()
+
+        if self._faiss_index.ntotal == 0:
             return []
 
         # Cache hit — même query + même n_results
@@ -239,37 +353,43 @@ class MemoryStore:
                 return [r for r in cached if r.importance >= min_importance]
             return list(cached)
 
-        n_results = min(n_results, self._collection.count())
-        results = self._collection.query(
-            query_texts=[query],
-            n_results=n_results,
-        )
+        n_results = min(n_results, self._faiss_index.ntotal)
+        query_embedding = self._embed([query])
 
+        # Recherche FAISS — retourne les n_results plus proches
+        scores, indices = self._faiss_index.search(query_embedding, n_results)
+
+        # Mapper les indices FAISS vers les IDs mémoire
+        record_ids = []
+        for idx in indices[0]:
+            if 0 <= idx < len(self._id_map):
+                record_ids.append(self._id_map[idx])
+
+        if not record_ids:
+            return []
+
+        # Batch query SQLite
+        placeholders = ",".join("?" * len(record_ids))
+        rows = self._db_conn.execute(
+            f"SELECT * FROM memories WHERE id IN ({placeholders})",
+            record_ids,
+        ).fetchall()
+        id_to_row = {row["id"]: row for row in rows}
+
+        # Reconstituer dans l'ordre FAISS (pertinence décroissante)
         records = []
-        if results and results["ids"] and results["ids"][0]:
-            record_ids = results["ids"][0]
-
-            # Batch query : un seul SELECT IN au lieu de N requêtes individuelles
-            placeholders = ",".join("?" * len(record_ids))
-            rows = self._db_conn.execute(
-                f"SELECT * FROM memories WHERE id IN ({placeholders})",
-                record_ids,
-            ).fetchall()
-            id_to_row = {row["id"]: row for row in rows}
-
-            # Reconstituer dans l'ordre ChromaDB (pertinence décroissante)
-            for record_id in record_ids:
-                row = id_to_row.get(record_id)
-                if row:
-                    records.append(MemoryRecord(
-                        id=row["id"],
-                        content=row["content"],
-                        source=row["source"],
-                        tags=json.loads(row["tags"]),
-                        importance=row["importance"],
-                        timestamp=row["timestamp"],
-                        metadata=json.loads(row["metadata"]),
-                    ))
+        for record_id in record_ids:
+            row = id_to_row.get(record_id)
+            if row:
+                records.append(MemoryRecord(
+                    id=row["id"],
+                    content=row["content"],
+                    source=row["source"],
+                    tags=json.loads(row["tags"]),
+                    importance=row["importance"],
+                    timestamp=row["timestamp"],
+                    metadata=json.loads(row["metadata"]),
+                ))
 
         # Stocker dans le cache AVANT filtrage par importance
         self._semantic_cache[cache_key] = records
@@ -355,27 +475,43 @@ class MemoryStore:
         )
         self._db_conn.commit()
 
-        if self._collection is not None:
-            # Met à jour aussi dans ChromaDB
-            try:
-                existing = self._collection.get(ids=[record_id])
-                if existing and existing["metadatas"]:
-                    meta = existing["metadatas"][0]
-                    meta["importance"] = importance
-                    self._collection.update(ids=[record_id], metadatas=[meta])
-            except Exception as e:
-                logger.debug("ChromaDB update importance failed: %s", e)
-
     def delete(self, record_id: str) -> None:
-        """Supprime un souvenir."""
+        """
+        Supprime un souvenir de SQLite.
+
+        Note : FAISS IndexFlatIP ne supporte pas la suppression individuelle.
+        L'entrée reste dans l'index mais sera ignorée car absente de SQLite
+        lors de la reconstitution des résultats. L'index est rebuildd
+        périodiquement par le heartbeat pour nettoyer les entrées orphelines.
+        """
         self._db_conn.execute("DELETE FROM memories WHERE id = ?", (record_id,))
         self._db_conn.commit()
 
-        if self._collection is not None:
-            try:
-                self._collection.delete(ids=[record_id])
-            except Exception as e:
-                logger.debug("ChromaDB delete failed: %s", e)
+        # Marquer comme supprimé dans le id_map (sera nettoyé au rebuild)
+        if record_id in self._id_map:
+            idx = self._id_map.index(record_id)
+            self._id_map[idx] = "__deleted__"
+
+    def rebuild_index(self) -> None:
+        """
+        Rebuilde l'index FAISS en éliminant les entrées supprimées.
+
+        Appelé périodiquement par le heartbeat ou manuellement.
+        """
+        if not self._faiss_index or not self._embedding_model:
+            return
+
+        import faiss
+
+        deleted_count = self._id_map.count("__deleted__")
+        if deleted_count == 0:
+            return
+
+        # Recréer l'index propre
+        self._faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
+        self._id_map = []
+        self._rebuild_index_from_sqlite()
+        logger.info("FAISS index rebuilt: removed %d deleted entries", deleted_count)
 
     def count(self) -> int:
         """Retourne le nombre total de souvenirs."""
@@ -389,14 +525,27 @@ class MemoryStore:
             "SELECT source, COUNT(*) as cnt FROM memories GROUP BY source"
         ).fetchall()
 
+        faiss_stats = {}
+        if self._faiss_index:
+            faiss_stats = {
+                "faiss_vectors": self._faiss_index.ntotal,
+                "faiss_deleted": self._id_map.count("__deleted__") if self._id_map else 0,
+                "embedding_model": EMBEDDING_MODEL,
+                "embedding_dim": EMBEDDING_DIM,
+            }
+
         return {
             "total_entries": total,
             "has_vector_search": self.has_vector_search,
             "sources": {row["source"]: row["cnt"] for row in sources},
+            "semantic_cache_hits": self._semantic_cache_hits,
+            **faiss_stats,
         }
 
     def close(self) -> None:
         """Ferme les connexions."""
+        # Sauvegarder l'index FAISS avant de fermer
+        self._save_faiss_index()
         if self._db_conn:
             self._db_conn.close()
 

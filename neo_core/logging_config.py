@@ -117,7 +117,8 @@ def setup_logging(
         logging.getLogger(module_name).setLevel(module_level)
 
     # Réduire le bruit des dépendances
-    logging.getLogger("chromadb").setLevel(logging.WARNING)
+    logging.getLogger("faiss").setLevel(logging.WARNING)
+    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("langchain").setLevel(logging.WARNING)
