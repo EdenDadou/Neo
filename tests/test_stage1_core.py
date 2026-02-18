@@ -33,7 +33,8 @@ def config(tmp_path, monkeypatch):
 def memory(config):
     mem = MemoryAgent(config=config)
     mem.initialize()
-    return mem
+    yield mem
+    mem.close()
 
 
 @pytest.fixture

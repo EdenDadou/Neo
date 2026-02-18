@@ -258,7 +258,8 @@ class Worker:
         Exécute la tâche assignée.
 
         En mode mock : retourne un résultat déterministe.
-        En mode réel : boucle tool_use avec le LLM.
+        En mode réel : boucle tool_use avec le LLM, avec timeout
+        (ResilienceConfig.worker_timeout, défaut 180s).
 
         Note : Le state est géré ici, mais la garantie de cleanup
         est assurée par le context manager async (voir __aenter__/__aexit__).
@@ -267,11 +268,16 @@ class Worker:
         self._started_at = time.time()
         start_time = self._started_at
 
+        # Timeout depuis la config résilience (défaut 180s)
+        worker_timeout = self.config.resilience.worker_timeout
+
         try:
             if self._mock_mode:
                 result = self._mock_execute()
             else:
-                result = await self._real_execute()
+                # Protéger l'exécution réelle par un timeout
+                async with asyncio.timeout(worker_timeout):
+                    result = await self._real_execute()
 
             result.execution_time = time.time() - start_time
             self._state = WorkerState.COMPLETED
@@ -281,6 +287,22 @@ class Worker:
             # Reporter dans Memory (apprentissage AVANT cleanup)
             self._report_to_memory(result)
 
+            return result
+
+        except asyncio.TimeoutError:
+            execution_time = time.time() - start_time
+            result = WorkerResult(
+                success=False,
+                output=f"Worker ({self.worker_type.value}) timeout après {worker_timeout:.0f}s",
+                worker_type=self.worker_type.value,
+                task=self.task,
+                execution_time=execution_time,
+                errors=[f"TimeoutError: exécution dépassée ({worker_timeout:.0f}s)"],
+            )
+            self._state = WorkerState.FAILED
+            self._finished_at = time.time()
+            self._result = result
+            self._report_to_memory(result)
             return result
 
         except Exception as e:

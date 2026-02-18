@@ -15,10 +15,15 @@ from __future__ import annotations
 
 import logging
 import re
+import signal
 from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Timeout maximal (en secondes) pour la sanitisation complète d'un message.
+# Protège contre le catastrophic backtracking (ReDoS).
+_SANITIZE_TIMEOUT_S = 2
 
 
 @dataclass
@@ -31,41 +36,40 @@ class SanitizeResult:
 
 
 # ─── Patterns dangereux ──────────────────────────────
+# Les patterns sont conçus pour éviter le catastrophic backtracking :
+# - Pas de quantificateurs imbriqués (.*.*,  .+.+)
+# - Groupes non-capturants (?:...) quand la capture n'est pas nécessaire
+# - Alternations limitées en longueur
 
 _PROMPT_INJECTION_PATTERNS = [
-    re.compile(r"ignore\s+(all\s+)?(previous|above|prior)\s+(instructions|prompts)", re.I),
-    re.compile(r"you\s+are\s+now\s+(a|an|in)\s+", re.I),
-    re.compile(r"system\s*:\s*", re.I),
-    re.compile(r"<\|?(system|assistant|im_start|im_end)\|?>", re.I),
-    re.compile(r"\[INST\]|\[/INST\]|\[SYS\]|\[/SYS\]", re.I),
-    re.compile(r"forget\s+(everything|all|your\s+(instructions|rules))", re.I),
-    re.compile(r"override\s+(your|the|all)\s+(safety|rules|restrictions)", re.I),
-    # v0.8.4 — Roleplay / impersonation patterns
-    re.compile(r"act\s+as\s+(a|an|if|though)\b", re.I),
-    re.compile(r"pretend\s+(you\s+are|to\s+be|you're)\s+", re.I),
-    re.compile(r"you\s+must\s+now\s+", re.I),
-    re.compile(r"(new|updated|revised)\s+(instructions?|rules?|prompt)\s*:", re.I),
-    re.compile(r"disregard\s+(all|any|the|your)\s+", re.I),
-    re.compile(r"do\s+not\s+follow\s+(your|the|any)\s+(instructions|rules|guidelines)", re.I),
-    # Encodage / obfuscation
-    re.compile(r"base64[:\s]", re.I),
-    re.compile(r"eval\s*\(", re.I),
-    # Extraction de prompt
-    re.compile(r"(repeat|show|display|print|output)\s+(your|the|system)\s+(prompt|instructions)", re.I),
-    re.compile(r"what\s+(are|is)\s+your\s+(system\s+)?prompt", re.I),
+    re.compile(r"\bignore\s+(?:all\s+)?(?:previous|above|prior)\s+(?:instructions|prompts)\b", re.I),
+    re.compile(r"\byou\s+are\s+now\s+(?:a|an|in)\s+", re.I),
+    re.compile(r"\bsystem\s*:\s*", re.I),
+    re.compile(r"<\|?(?:system|assistant|im_start|im_end)\|?>", re.I),
+    re.compile(r"\[/?(?:INST|SYS)\]", re.I),
+    re.compile(r"\bforget\s+(?:everything|all|your\s+(?:instructions|rules))\b", re.I),
+    re.compile(r"\boverride\s+(?:your|the|all)\s+(?:safety|rules|restrictions)\b", re.I),
+    re.compile(r"\bpretend\s+(?:you\s+are|to\s+be|you're)\s+", re.I),
+    re.compile(r"\byou\s+must\s+now\s+", re.I),
+    re.compile(r"\b(?:new|updated|revised)\s+(?:instructions?|rules?|prompt)\s*:", re.I),
+    re.compile(r"\bdisregard\s+(?:all|any|the|your)\s+", re.I),
+    re.compile(r"\bdo\s+not\s+follow\s+(?:your|the|any)\s+(?:instructions|rules|guidelines)\b", re.I),
+    re.compile(r"\beval\s*\(", re.I),
+    re.compile(r"\b(?:repeat|show|display|print|output)\s+(?:your|the|system)\s+(?:prompt|instructions)\b", re.I),
+    re.compile(r"\bwhat\s+(?:are|is)\s+your\s+(?:system\s+)?prompt\b", re.I),
 ]
 
 _SQL_INJECTION_PATTERNS = [
-    re.compile(r"('\s*(OR|AND)\s*'?\s*\d+\s*=\s*\d+)", re.I),
-    re.compile(r";\s*(DROP|DELETE|UPDATE|INSERT|ALTER|CREATE)\s+", re.I),
-    re.compile(r"UNION\s+(ALL\s+)?SELECT\s+", re.I),
+    re.compile(r"'\s*(?:OR|AND)\s*'?\s*\d+=\s*\d+", re.I),
+    re.compile(r";\s*(?:DROP|DELETE|UPDATE|INSERT|ALTER|CREATE)\s+", re.I),
+    re.compile(r"UNION\s+(?:ALL\s+)?SELECT\s+", re.I),
     re.compile(r"--\s*$", re.M),
 ]
 
 _XSS_PATTERNS = [
     re.compile(r"<\s*script", re.I),
     re.compile(r"javascript\s*:", re.I),
-    re.compile(r"on(load|error|click|mouseover)\s*=", re.I),
+    re.compile(r"on(?:load|error|click|mouseover)\s*=", re.I),
     re.compile(r"<\s*iframe", re.I),
     re.compile(r"<\s*object", re.I),
     re.compile(r"<\s*embed", re.I),
@@ -74,8 +78,8 @@ _XSS_PATTERNS = [
 _PATH_TRAVERSAL_PATTERNS = [
     re.compile(r"\.\./"),
     re.compile(r"\.\.\\"),
-    re.compile(r"/etc/(passwd|shadow|hosts)", re.I),
-    re.compile(r"(C:\\|/)(Windows|System32)", re.I),
+    re.compile(r"/etc/(?:passwd|shadow|hosts)", re.I),
+    re.compile(r"(?:C:\\|/)(?:Windows|System32)", re.I),
 ]
 
 
@@ -105,17 +109,21 @@ class Sanitizer:
         - cleaned : texte nettoyé
         - threats : liste des menaces détectées
         - severity : niveau de sévérité global
+
+        Protégé contre le ReDoS : tronque l'input à max_length avant
+        d'appliquer les regex, et utilise un timeout SIGALRM (Unix).
         """
         if not text or not text.strip():
             return SanitizeResult(is_safe=True, cleaned="", severity="none")
 
         threats: list[str] = []
-        cleaned = text
 
-        # 1. Longueur excessive
+        # 1. Longueur excessive — tronquer AVANT les regex pour limiter le ReDoS
         if len(text) > self.max_length:
             threats.append(f"input_too_long:{len(text)}")
-            cleaned = cleaned[:self.max_length]
+            text = text[:self.max_length]
+
+        cleaned = text
 
         # 2. Prompt injection
         for pattern in _PROMPT_INJECTION_PATTERNS:

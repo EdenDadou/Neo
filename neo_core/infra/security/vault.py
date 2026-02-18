@@ -23,6 +23,7 @@ import logging
 import os
 import platform
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -63,7 +64,24 @@ def _get_machine_id() -> str:
         except Exception as e:
             logger.debug("macOS IOPlatformUUID read failed: %s", e)
 
-    # Fallback : hostname + user
+    # Fallback : fichier machine-id stable (créé une seule fois)
+    # Évite les problèmes si le hostname change
+    fallback_id_path = Path.home() / ".neo_machine_id"
+    try:
+        if fallback_id_path.exists():
+            mid = fallback_id_path.read_text().strip()
+            if mid:
+                return mid
+        # Première exécution : générer un ID stable et le persister
+        import uuid
+        mid = str(uuid.uuid4())
+        fallback_id_path.write_text(mid)
+        os.chmod(fallback_id_path, 0o600)
+        return mid
+    except (OSError, PermissionError) as e:
+        logger.debug("Cannot create stable machine-id fallback: %s", e)
+
+    # Dernier recours : hostname + user (instable mais fonctionnel)
     return f"{platform.node()}-{os.getenv('USER', 'neo')}"
 
 
@@ -90,11 +108,27 @@ class KeyVault:
         self._master_password = master_password
         self._fernet: Optional[Fernet] = None
         self._conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        """Context manager : initialise le vault automatiquement."""
+        self.initialize()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager : ferme proprement à la sortie."""
+        self.close()
+        return False
 
     def initialize(self) -> None:
-        """Initialise le vault : crée/charge le salt, dérive la clé, ouvre le DB (idempotent)."""
-        if self._conn is not None:
-            return  # Déjà initialisé — évite les fuites de connexion
+        """Initialise le vault : crée/charge le salt, dérive la clé, ouvre le DB (idempotent, thread-safe)."""
+        with self._lock:
+            if self._conn is not None:
+                return  # Déjà initialisé — évite les fuites de connexion
+            self._initialize_internal()
+
+    def _initialize_internal(self) -> None:
+        """Logique d'initialisation interne (appelée sous lock)."""
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         # Salt persistant (généré une seule fois)
@@ -205,7 +239,8 @@ class KeyVault:
             stored_hash = self._master_hash_path.read_bytes()
             computed_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
             return hmac.compare_digest(stored_hash, computed_hash)
-        except Exception:
+        except (OSError, ValueError, TypeError) as e:
+            logger.debug("Master password verification failed: %s", e)
             return False
 
     @property
@@ -218,29 +253,30 @@ class KeyVault:
         return self._fernet is not None and self._conn is not None
 
     def store(self, name: str, value: str) -> None:
-        """Chiffre et stocke un secret."""
+        """Chiffre et stocke un secret (thread-safe)."""
         if not self.is_initialized:
             raise RuntimeError("KeyVault not initialized")
 
         encrypted = self._fernet.encrypt(value.encode("utf-8"))
-        try:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO secrets (name, value, updated_at) "
-                "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                (name, encrypted),
-            )
-            self._conn.commit()
-        except (sqlite3.OperationalError, OSError) as e:
-            err = str(e).lower()
-            if "disk" in err or "no space" in err or "i/o" in err:
-                logger.critical("DISK FULL — vault write failed for '%s': %s", name, e)
-                raise RuntimeError(f"Disk full — cannot store secret '{name}'") from e
-            raise
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO secrets (name, value, updated_at) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    (name, encrypted),
+                )
+                self._conn.commit()
+            except (sqlite3.OperationalError, OSError) as e:
+                err = str(e).lower()
+                if "disk" in err or "no space" in err or "i/o" in err:
+                    logger.critical("DISK FULL — vault write failed for '%s': %s", name, e)
+                    raise RuntimeError(f"Disk full — cannot store secret '{name}'") from e
+                raise
         logger.debug("Secret '%s' stored", name)
 
     def retrieve(self, name: str) -> Optional[str]:
         """
-        Déchiffre et retourne un secret, ou None si inexistant.
+        Déchiffre et retourne un secret, ou None si inexistant (thread-safe).
 
         Si la clé machine a changé (VM clonée, changement hardware),
         le déchiffrement échoue. Le secret corrompu est supprimé et None
@@ -249,9 +285,10 @@ class KeyVault:
         if not self.is_initialized:
             raise RuntimeError("KeyVault not initialized")
 
-        row = self._conn.execute(
-            "SELECT value FROM secrets WHERE name = ?", (name,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM secrets WHERE name = ?", (name,)
+            ).fetchone()
 
         if not row:
             return None
@@ -264,21 +301,22 @@ class KeyVault:
                 "Secret invalidated. Reconfigure with `neo setup`.",
                 name,
             )
-            # Supprimer le secret indéchiffrable pour éviter les erreurs en boucle
-            try:
-                self._conn.execute("DELETE FROM secrets WHERE name = ?", (name,))
-                self._conn.commit()
-            except Exception:
-                pass
+            with self._lock:
+                try:
+                    self._conn.execute("DELETE FROM secrets WHERE name = ?", (name,))
+                    self._conn.commit()
+                except (sqlite3.OperationalError, OSError) as e:
+                    logger.debug("Failed to cleanup invalidated secret '%s': %s", name, e)
             return None
 
     def delete(self, name: str) -> bool:
-        """Supprime un secret. Retourne True si le secret existait."""
+        """Supprime un secret (thread-safe). Retourne True si le secret existait."""
         if not self.is_initialized:
             raise RuntimeError("KeyVault not initialized")
 
-        cursor = self._conn.execute("DELETE FROM secrets WHERE name = ?", (name,))
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM secrets WHERE name = ?", (name,))
+            self._conn.commit()
         return cursor.rowcount > 0
 
     def list_secrets(self) -> list[str]:
@@ -300,7 +338,12 @@ class KeyVault:
         return row is not None
 
     def close(self) -> None:
-        """Ferme la connexion."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        """Ferme la connexion (idempotent, thread-safe)."""
+        with self._lock:
+            if self._conn:
+                try:
+                    self._conn.close()
+                except (sqlite3.OperationalError, OSError) as e:
+                    logger.debug("Vault close error (non-critical): %s", e)
+                self._conn = None
+                self._fernet = None

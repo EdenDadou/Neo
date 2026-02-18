@@ -60,7 +60,8 @@ def full_stack(config):
     vox.connect(brain=brain, memory=memory)
     vox.start_new_session("TestUser")
 
-    return {"vox": vox, "brain": brain, "memory": memory, "config": config}
+    yield {"vox": vox, "brain": brain, "memory": memory, "config": config}
+    memory.close()
 
 
 # ─── E2E Pipeline ──────────────────────────────────────────────

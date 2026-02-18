@@ -59,20 +59,20 @@ def enable_mock_mode():
 
 
 @pytest.fixture
-def config():
+def config(tmp_path):
     """Config mock (pas de clé API)."""
     return NeoConfig(
         llm=LLMConfig(api_key=None),
-        memory=MemoryConfig(storage_path=Path("/tmp/neo_test_stage5")),
+        memory=MemoryConfig(storage_path=tmp_path / "neo_test_stage5"),
     )
 
 
 @pytest.fixture
-def config_with_resilience():
+def config_with_resilience(tmp_path):
     """Config avec settings de résilience personnalisés."""
     return NeoConfig(
         llm=LLMConfig(api_key=None),
-        memory=MemoryConfig(storage_path=Path("/tmp/neo_test_stage5_res")),
+        memory=MemoryConfig(storage_path=tmp_path / "neo_test_stage5_res"),
         resilience=ResilienceConfig(
             max_retries=2,
             base_delay=0.01,  # Rapide pour les tests
@@ -559,10 +559,10 @@ class TestWorkerToolUse:
         result = await worker.execute()
         assert result.success
 
-        # Vérifier que c'est stocké en mémoire
-        records = memory.search("researcher", n_results=5)
-        worker_records = [r for r in records if any("worker:" in t for t in r.tags)]
-        assert len(worker_records) > 0
+        # Vérifier que c'est stocké en mémoire (via SQLite — fiable sans dépendance FAISS)
+        records = memory._store.search_by_source("worker_execution")
+        assert len(records) > 0
+        assert any("worker_execution" in r.tags for r in records)
 
 
 # ═══════════════════════════════════════════════════════════

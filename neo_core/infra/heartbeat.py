@@ -92,6 +92,8 @@ class HeartbeatManager:
         self._auto_tuner = None  # Initialisé au premier pulse si disponible
         self._self_patcher = None  # Level 3 — lazy init
         self._tool_generator = None  # Level 4 — lazy init
+        self._consecutive_failures: int = 0  # Compteur d'échecs consécutifs
+        self._last_error: Optional[str] = None  # Dernier message d'erreur
 
     # ─── Lifecycle ────────────────────────────────────
 
@@ -154,11 +156,18 @@ class HeartbeatManager:
 
                 await self._pulse()
                 self._pulse_count += 1
+                self._consecutive_failures = 0  # Reset sur succès
+                self._last_error = None
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("[Heartbeat] Erreur pulse: %s", e)
+                self._consecutive_failures += 1
+                self._last_error = f"{type(e).__name__}: {e}"
+                logger.error(
+                    "[Heartbeat] Erreur pulse #%d (échec consécutif %d): %s",
+                    self._pulse_count, self._consecutive_failures, e,
+                )
                 # Ne pas crasher le heartbeat, juste log et continue
 
     async def _pulse(self) -> None:
@@ -630,13 +639,18 @@ class HeartbeatManager:
 
     def get_status(self) -> dict:
         """Retourne le statut du heartbeat."""
-        return {
+        status = {
             "running": self._running,
+            "healthy": self._consecutive_failures == 0,
             "pulse_count": self._pulse_count,
             "interval": self.config.interval_seconds,
             "recent_events": len(self._events),
             "last_event": self._events[-1].message if self._events else "aucun",
+            "consecutive_failures": self._consecutive_failures,
         }
+        if self._last_error:
+            status["last_error"] = self._last_error
+        return status
 
     def get_progress_report(self) -> str:
         """

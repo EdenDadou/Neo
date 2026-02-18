@@ -93,7 +93,14 @@ async def route_chat(
             except Exception as e:
                 error_msg = f"{model.model_id}: {type(e).__name__}: {str(e)[:200]}"
                 errors.append(error_msg)
-                logger.warning("[Router] Échec %s — fallback...", error_msg)
+                err_str = str(e).lower()
+                # 401 = auth failure → skip remaining retries for same provider
+                if "401" in err_str or "unauthorized" in err_str:
+                    logger.warning("[Router] Auth failure %s — skipping provider", error_msg)
+                elif "429" in err_str or "rate limit" in err_str:
+                    logger.warning("[Router] Rate limited %s — fallback...", error_msg)
+                else:
+                    logger.warning("[Router] Échec %s — fallback...", error_msg)
                 continue
 
     except Exception as e:

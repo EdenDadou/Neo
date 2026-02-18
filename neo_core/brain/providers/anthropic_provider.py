@@ -26,6 +26,7 @@ class AnthropicProvider(LLMProvider):
 
     def __init__(self, api_key: str | None = None):
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
+        self._client: Optional["httpx.AsyncClient"] = None
 
     @property
     def name(self) -> str:
@@ -36,7 +37,13 @@ class AnthropicProvider(LLMProvider):
         return ProviderType.CLOUD_PAID
 
     def is_configured(self) -> bool:
-        return bool(self._api_key)
+        # Rejeter les clés vides, placeholders, et whitespace-only
+        if not self._api_key or not self._api_key.strip():
+            return False
+        placeholder = self._api_key.strip().lower()
+        if placeholder in ("", "your_api_key_here", "sk-ant-...", "none", "null"):
+            return False
+        return True
 
     def list_models(self) -> list[ModelInfo]:
         return [
@@ -104,13 +111,14 @@ class AnthropicProvider(LLMProvider):
         if tools:
             payload["tools"] = tools
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers=headers,
-                json=payload,
-                timeout=60,
-            )
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=60)
+
+        response = await self._client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=payload,
+        )
 
         if response.status_code != 200:
             error_data = {}

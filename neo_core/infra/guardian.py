@@ -114,14 +114,16 @@ class StateSnapshot:
         return cls(**{k: v for k, v in data.items() if k in allowed})
 
     def save(self, state_dir: Path) -> None:
-        """Sauvegarde le snapshot sur disque."""
+        """Sauvegarde le snapshot sur disque (écriture atomique via tmp + rename)."""
         state_dir.mkdir(parents=True, exist_ok=True)
         state_file = state_dir / "state.json"
+        tmp_file = state_dir / "state.json.tmp"
         try:
-            with open(state_file, "w", encoding="utf-8") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+            tmp_file.replace(state_file)  # Atomique sur même filesystem
             logger.debug("[Guardian] State snapshot sauvegardé: %s", state_file)
-        except Exception as e:
+        except OSError as e:
             logger.error("[Guardian] Erreur sauvegarde state: %s", e)
 
     @classmethod
@@ -145,8 +147,8 @@ class StateSnapshot:
         if state_file.exists():
             try:
                 state_file.unlink()
-            except Exception:
-                pass
+            except OSError as e:
+                logger.debug("[Guardian] Could not remove state file: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -416,8 +418,8 @@ class Guardian:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] {message}\n")
-        except Exception:
-            pass
+        except OSError as e:
+            logger.debug("[Guardian] Could not write to guardian.log: %s", e)
 
     def stop(self) -> None:
         """Arrête le Guardian et le process enfant."""
