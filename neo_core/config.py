@@ -391,9 +391,17 @@ class NeoConfig:
         - Groq (GROQ_API_KEY)
         - Gemini (GEMINI_API_KEY)
         - Ollama (serveur local)
+
+        Vérifie dynamiquement : si self.llm.api_key est None mais que le
+        vault/env contient la clé (chargement tardif), met à jour self.llm.api_key.
         """
         # Si une clé Anthropic existe, pas mock
         if self.llm.api_key:
+            return False
+        # Vérifier dynamiquement le vault/env (chargement tardif possible)
+        fresh_key = _get_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
+        if fresh_key:
+            self.llm.api_key = fresh_key.strip().strip("'\"")
             return False
         # Vérifier les autres providers (vault → env)
         if self.groq_api_key:
@@ -412,6 +420,7 @@ class NeoConfig:
             # Forcer le rechargement du vault
             _vault_loaded = False
             _vault_cache.clear()
+            _load_vault_secrets()  # Recharger immédiatement le vault
             # Re-read env vars
             self.debug = os.getenv("NEO_DEBUG", "false").lower() == "true"
             self.log_level = os.getenv("NEO_LOG_LEVEL", "INFO")
