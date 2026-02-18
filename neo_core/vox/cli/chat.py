@@ -843,6 +843,66 @@ async def api_conversation_loop(config: NeoConfig, api_url: str):
                     console.print(f"[red]  Erreur: {e}[/red]")
                 continue
 
+            if cmd in ("/tasks", "tasks"):
+                try:
+                    resp = await client.get(f"{api_url}/tasks", headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        summary = data.get("summary", {})
+                        lines = ["[bold]Registre des tâches[/bold]\n"]
+                        if data.get("tasks"):
+                            for t_str in data["tasks"][:20]:
+                                lines.append(f"  {t_str}")
+                        else:
+                            lines.append("  [dim]Aucune tâche enregistrée.[/dim]")
+                        if summary:
+                            lines.append(f"\n[bold]Résumé[/bold]")
+                            lines.append(
+                                f"  Total : {summary.get('total_tasks', 0)} tâches, "
+                                f"{summary.get('total_epics', 0)} epics"
+                            )
+                            if summary.get("tasks_by_status"):
+                                parts = [f"{k}: {v}" for k, v in summary["tasks_by_status"].items()]
+                                lines.append(f"  Statuts : {', '.join(parts)}")
+                        console.print(Panel("\n".join(lines), title="[bold cyan]Task Registry[/bold cyan]", border_style="cyan"))
+                    else:
+                        console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
+                except Exception as e:
+                    console.print(f"[red]  Erreur: {e}[/red]")
+                continue
+
+            if cmd in ("/epics", "epics"):
+                try:
+                    resp = await client.get(f"{api_url}/epics", headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        epics = data.get("epics", [])
+                        if not epics:
+                            console.print(Panel("[dim]Aucun epic actif.[/dim]", title="[bold cyan]Epics[/bold cyan]", border_style="cyan"))
+                        else:
+                            status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
+                            table = Table(title="Epics Actifs", title_style="bold cyan", border_style="cyan", show_header=True, header_style="bold white", padding=(0, 1))
+                            table.add_column("Status", justify="center", width=3)
+                            table.add_column("ID", style="dim", width=10)
+                            table.add_column("Description", min_width=30)
+                            table.add_column("Progrès", justify="center", width=12)
+                            table.add_column("Stratégie", style="italic dim", max_width=25)
+                            for epic in epics:
+                                icon = status_icons.get(epic.get("status", ""), "?")
+                                table.add_row(
+                                    icon,
+                                    epic.get("id", "")[:10],
+                                    epic.get("description", ""),
+                                    epic.get("progress", "0/0"),
+                                    epic.get("strategy", "")[:25],
+                                )
+                            console.print(table)
+                    else:
+                        console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
+                except Exception as e:
+                    console.print(f"[red]  Erreur: {e}[/red]")
+                continue
+
             # Envoyer le message au daemon via POST /chat
             try:
                 resp = await client.post(

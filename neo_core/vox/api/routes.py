@@ -235,6 +235,44 @@ async def get_persona():
     return {"persona": persona, "user_profile": profile}
 
 
+@router.get("/tasks")
+async def get_tasks():
+    """Get task registry report."""
+    if not neo_core._initialized:
+        raise HTTPException(503, "Neo Core not initialized")
+    vox = neo_core.vox
+    if not vox or not vox.memory or not vox.memory.is_initialized:
+        raise HTTPException(503, "Memory not initialized")
+    return vox.memory.get_tasks_report()
+
+
+@router.get("/epics")
+async def get_epics():
+    """Get active epics."""
+    if not neo_core._initialized:
+        raise HTTPException(503, "Neo Core not initialized")
+    vox = neo_core.vox
+    if not vox or not vox.memory or not vox.memory.is_initialized:
+        raise HTTPException(503, "Memory not initialized")
+    registry = vox.memory.task_registry
+    if not registry:
+        return {"epics": []}
+    epics = registry.get_all_epics(limit=15)
+    result = []
+    for epic in epics:
+        tasks = registry.get_epic_tasks(epic.id)
+        done = sum(1 for t in tasks if t.status == "done")
+        total = len(tasks)
+        result.append({
+            "id": epic.id,
+            "description": epic.description,
+            "status": epic.status,
+            "strategy": getattr(epic, "strategy", ""),
+            "progress": f"{done}/{total}",
+        })
+    return {"epics": result}
+
+
 @router.websocket("/ws/chat")
 async def websocket_chat(ws: WebSocket, token: str = Query(default="")):
     """
