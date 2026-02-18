@@ -573,6 +573,12 @@ class HeartbeatManager:
 
     # ─── Émission d'événements ────────────────────────
 
+    # Événements notifiés sur Telegram (les plus importants)
+    _TELEGRAM_NOTIFY_EVENTS = {
+        "task_completed", "task_failed", "epic_done",
+        "task_stale", "self_patching", "tool_generation",
+    }
+
     def _emit(self, event: HeartbeatEvent) -> None:
         """Émet un événement et appelle le callback si défini."""
         self._events.append(event)
@@ -583,6 +589,14 @@ class HeartbeatManager:
         if self._on_event:
             try:
                 self._on_event(event)
+            except Exception:
+                pass
+
+        # Notifier sur Telegram les événements importants
+        if event.event_type in self._TELEGRAM_NOTIFY_EVENTS:
+            try:
+                from neo_core.core.registry import core_registry
+                core_registry.send_telegram(f"🧠 {event.message}")
             except Exception:
                 pass
 

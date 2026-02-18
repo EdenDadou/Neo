@@ -51,6 +51,10 @@ class TelegramBot:
 
     Partage la même instance Vox que le CLI pour avoir
     exactement la même conversation, mémoire et contexte.
+
+    Supporte l'envoi proactif : Neo peut écrire aux utilisateurs
+    de son propre chef via send_proactive() — utilisé par le
+    heartbeat, le brain, et les workers.
     """
 
     def __init__(self, config: TelegramConfig, vox=None):
@@ -62,6 +66,10 @@ class TelegramBot:
         self._rate_db: Optional[sqlite3.Connection] = None
         self._rate_lock = threading.Lock()
         self._init_rate_db()
+        # Outbox pour messages proactifs (Neo → utilisateur)
+        self._outbox: asyncio.Queue = asyncio.Queue()
+        # Chat IDs connus (remplis quand un user écrit au bot)
+        self._known_chat_ids: dict[int, int] = {}  # user_id → chat_id
 
     def _init_rate_db(self) -> None:
         """Initialise la DB SQLite pour le rate limiting persistant."""
@@ -88,6 +96,70 @@ class TelegramBot:
     def set_vox(self, vox) -> None:
         """Connecte le bot à l'instance Vox partagée."""
         self._vox = vox
+
+    # ─── Envoi proactif ─────────────────────────────────────────
+
+    def send_proactive(self, message: str, user_id: int | None = None) -> None:
+        """
+        Envoie un message proactif à un ou tous les utilisateurs autorisés.
+
+        Peut être appelé depuis n'importe quel composant Neo (Brain, Heartbeat,
+        workers, etc.). Le message est mis en file d'attente et envoyé par
+        le worker outbox qui tourne en background.
+
+        Args:
+            message: Le texte à envoyer.
+            user_id: Un user_id spécifique (ou None pour tous les users autorisés).
+        """
+        if not message.strip():
+            return
+        self._outbox.put_nowait({"message": message, "user_id": user_id})
+        logger.debug("Proactive message queued: %s...", message[:50])
+
+    async def _outbox_worker(self) -> None:
+        """
+        Worker qui consomme la file d'attente et envoie les messages.
+
+        Tourne en background tant que le bot est actif.
+        """
+        while self._running:
+            try:
+                item = await asyncio.wait_for(self._outbox.get(), timeout=5.0)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                await asyncio.sleep(1)
+                continue
+
+            message = item.get("message", "")
+            target_user = item.get("user_id")
+
+            if not self._app or not message:
+                continue
+
+            # Déterminer les chat_ids cibles
+            target_chat_ids = []
+            if target_user and target_user in self._known_chat_ids:
+                target_chat_ids = [self._known_chat_ids[target_user]]
+            elif target_user is None:
+                # Envoyer à tous les users autorisés qui ont déjà parlé au bot
+                target_chat_ids = list(self._known_chat_ids.values())
+
+            for chat_id in target_chat_ids:
+                try:
+                    # Découper si > 4096 chars (limite Telegram)
+                    if len(message) > 4096:
+                        for i in range(0, len(message), 4096):
+                            await self._app.bot.send_message(
+                                chat_id=chat_id, text=message[i:i + 4096],
+                            )
+                    else:
+                        await self._app.bot.send_message(
+                            chat_id=chat_id, text=message,
+                        )
+                    logger.info("Proactive message sent to chat_id=%d: %s...", chat_id, message[:50])
+                except Exception as e:
+                    logger.error("Failed to send proactive message to %d: %s", chat_id, e)
 
     def _is_authorized(self, user_id: int) -> bool:
         """Vérifie si le user_id Telegram est dans la whitelist."""
@@ -156,6 +228,9 @@ class TelegramBot:
         user_id = message.from_user.id
         user_name = message.from_user.first_name or "Unknown"
         text = message.text.strip()
+
+        # Mémoriser le chat_id pour l'envoi proactif
+        self._known_chat_ids[user_id] = message.chat_id
 
         # 1. Auth : whitelist user_id
         if not self._is_authorized(user_id):
@@ -337,13 +412,23 @@ class TelegramBot:
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
 
-        logger.info("Telegram bot started — waiting for messages")
+        # Lancer le worker d'envoi proactif en background
+        self._outbox_task = asyncio.create_task(self._outbox_worker())
+
+        logger.info("Telegram bot started — waiting for messages (proactive outbox active)")
 
     async def stop(self) -> None:
         """Arrête le bot proprement."""
         if self._app and self._running:
             logger.info("Stopping Telegram bot")
             self._running = False
+            # Arrêter le worker d'envoi proactif
+            if hasattr(self, "_outbox_task"):
+                self._outbox_task.cancel()
+                try:
+                    await self._outbox_task
+                except asyncio.CancelledError:
+                    pass
             await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()

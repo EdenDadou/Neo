@@ -45,6 +45,7 @@ class CoreRegistry:
                 inst._brain = None
                 inst._vox = None
                 inst._config = None
+                inst._telegram_bot = None
                 inst._bootstrap_lock = threading.Lock()
                 inst._initialized = True
                 cls._instance = inst
@@ -123,6 +124,25 @@ class CoreRegistry:
             self._bootstrap()
         return self._config
 
+    def set_telegram_bot(self, bot) -> None:
+        """Enregistre le bot Telegram pour l'envoi proactif."""
+        self._telegram_bot = bot
+        logger.info("TelegramBot registered in CoreRegistry")
+
+    def get_telegram_bot(self):
+        """Retourne le bot Telegram (ou None si pas configuré)."""
+        return self._telegram_bot
+
+    def send_telegram(self, message: str, user_id: int | None = None) -> None:
+        """
+        Raccourci pour envoyer un message proactif via Telegram.
+
+        Peut être appelé depuis n'importe quel composant Neo.
+        Ne fait rien si Telegram n'est pas configuré.
+        """
+        if self._telegram_bot:
+            self._telegram_bot.send_proactive(message, user_id)
+
     def reset(self) -> None:
         """
         Reset complet (pour les tests uniquement).
@@ -134,6 +154,7 @@ class CoreRegistry:
             self._brain = None
             self._vox = None
             self._config = None
+            self._telegram_bot = None
             logger.info("CoreRegistry reset")
 
     @classmethod

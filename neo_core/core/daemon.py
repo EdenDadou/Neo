@@ -270,6 +270,9 @@ async def _run_daemon(host: str = "0.0.0.0", port: int = 8000) -> None:
                 return
 
             telegram_bot = TelegramBot(config=tg_config, vox=vox)
+            # Enregistrer dans le CoreRegistry pour l'envoi proactif
+            from neo_core.core.registry import core_registry
+            core_registry.set_telegram_bot(telegram_bot)
             await telegram_bot.start_polling()
 
             # Attendre le shutdown
