@@ -1028,44 +1028,114 @@ class Brain:
             f"Dernière erreur: {last_error}"
         )
 
+    async def _decompose_epic_with_llm(self, request: str, memory_context: str) -> list[str]:
+        """
+        Utilise Claude Sonnet pour décomposer une requête epic en
+        sous-tâches concrètes et actionnables.
+
+        Fallback sur heuristiques si le LLM échoue.
+        """
+        if self._mock_mode:
+            return self._decompose_task(request)
+
+        decompose_prompt = (
+            f"L'utilisateur veut créer un projet (Epic) sur ce sujet :\n"
+            f"\"{request}\"\n\n"
+            f"Contexte mémoire :\n{memory_context[:500]}\n\n"
+            f"Décompose ce projet en 3 à 6 sous-tâches CONCRÈTES et ACTIONNABLES.\n"
+            f"Chaque sous-tâche doit être une action précise qu'un agent peut exécuter.\n"
+            f"NE reformule PAS la demande de l'utilisateur. Donne les VRAIES étapes du projet.\n\n"
+            f"Exemple pour \"recherche sur le tennis\" :\n"
+            f"- Rechercher les tournois ATP en cours et les résultats récents\n"
+            f"- Analyser le classement mondial actuel et les mouvements récents\n"
+            f"- Identifier les joueurs en forme et les tendances du moment\n"
+            f"- Synthétiser un rapport complet sur l'état du tennis professionnel\n\n"
+            f"Réponds avec UNIQUEMENT les sous-tâches, une par ligne, commençant par '- '."
+        )
+
+        try:
+            response = await self._raw_llm_call(decompose_prompt)
+            lines = [
+                line.strip().lstrip("- ").strip()
+                for line in response.strip().split("\n")
+                if line.strip() and line.strip().startswith("-")
+            ]
+            if len(lines) >= 2:
+                return lines
+        except Exception as e:
+            logger.debug("Décomposition LLM échouée pour l'epic: %s", e)
+
+        return self._decompose_task(request)
+
+    def _extract_epic_subject(self, request: str) -> str:
+        """
+        Extrait le SUJET réel d'une requête epic, en retirant les mots
+        d'intention comme 'crée un epic', 'fais un projet', etc.
+
+        Exemples :
+        - "crée un epic pour faire de la recherche sur le tennis"
+          → "recherche sur le tennis"
+        - "lance un projet roadmap pour la refonte du site"
+          → "refonte du site"
+        """
+        # Retirer les préfixes d'intention epic
+        subject = re.sub(
+            r"^(?:crée|créer|lance|lancer|fais|faire|monte|prépare)\s+"
+            r"(?:un|une|le|la|mon|ma|moi\s+un|moi\s+une)\s+"
+            r"(?:epic|epics|projet|project|roadmap|feuille de route|plan)\s+"
+            r"(?:pour|sur|de|du|des|d['']\s*)?\s*",
+            "", request, flags=re.IGNORECASE,
+        ).strip()
+
+        # Si le nettoyage a tout supprimé, garder la requête originale
+        if len(subject) < 5:
+            subject = request
+
+        return subject[:200]
+
     async def _execute_as_epic(self, request: str, decision: BrainDecision,
                                memory_context: str) -> str:
         """
         Crée un Epic dans le TaskRegistry et exécute chaque sous-tâche
         séquentiellement via des Workers individuels.
 
-        Chaque sous-tâche est enregistrée, exécutée et trackée.
-        L'Epic est marqué done/failed selon les résultats.
+        v0.9.8 : Utilise le LLM pour décomposer intelligemment le projet
+        au lieu de templates génériques. Extrait le vrai sujet de la requête.
         """
-        # 1. Créer l'Epic dans le registre
+        # 0. Extraire le vrai sujet et décomposer intelligemment
+        epic_subject = self._extract_epic_subject(request)
+        smart_subtasks = await self._decompose_epic_with_llm(request, memory_context)
+
+        # 1. Créer l'Epic dans le registre avec le vrai sujet
         epic = None
         if self.memory and self.memory.is_initialized:
             try:
                 subtask_tuples = [
                     (st, decision.worker_type or "generic")
-                    for st in decision.subtasks
+                    for st in smart_subtasks
                 ]
                 epic = self.memory.create_epic(
-                    description=request[:200],
+                    description=epic_subject,
                     subtask_descriptions=subtask_tuples,
                     strategy=decision.reasoning,
                 )
                 logger.info(
-                    "Epic créé: %s avec %d sous-tâches",
-                    epic.id[:8] if epic else "?", len(decision.subtasks),
+                    "Epic créé: %s (%s) avec %d sous-tâches",
+                    epic.id[:8] if epic else "?", epic_subject[:50],
+                    len(smart_subtasks),
                 )
             except Exception as e:
                 logger.debug("Impossible de créer l'Epic: %s", e)
 
         # 2. Exécuter chaque sous-tâche comme un delegate_worker
         results = []
-        for i, subtask in enumerate(decision.subtasks):
+        for i, subtask in enumerate(smart_subtasks):
             sub_decision = BrainDecision(
                 action="delegate_worker",
                 subtasks=[subtask],
                 confidence=decision.confidence,
                 worker_type=decision.worker_type,
-                reasoning=f"Sous-tâche {i + 1}/{len(decision.subtasks)} de l'Epic",
+                reasoning=f"Sous-tâche {i + 1}/{len(smart_subtasks)} de l'Epic: {epic_subject[:50]}",
             )
             try:
                 result = await self._execute_with_worker(
@@ -1089,7 +1159,7 @@ class Brain:
                 logger.debug("Impossible de mettre à jour l'Epic: %s", e)
 
         status = "terminé" if all_ok else "partiellement terminé"
-        return f"[Epic {status}]\n{summary}"
+        return f"[Epic {status} — {epic_subject[:80]}]\n{summary}"
 
     def _improve_strategy(
         self,
