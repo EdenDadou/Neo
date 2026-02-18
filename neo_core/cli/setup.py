@@ -29,6 +29,33 @@ CONFIG_FILE = CONFIG_DIR / "neo_config.json"
 ENV_FILE = PROJECT_ROOT / ".env"
 
 
+def _load_existing_env() -> dict:
+    """Charge les clés existantes depuis le .env (si présent)."""
+    existing = {}
+    if ENV_FILE.exists():
+        try:
+            for line in ENV_FILE.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip()
+                    if value:
+                        existing[key] = value
+        except OSError:
+            pass
+    return existing
+
+
+def _mask_key(key: str) -> str:
+    """Masque une clé en gardant début et fin visibles."""
+    if len(key) <= 12:
+        return key[:4] + "..." + key[-2:]
+    return key[:12] + "..." + key[-4:]
+
+
 def clear_screen():
     os.system("clear" if os.name != "nt" else "cls")
 
@@ -182,8 +209,18 @@ def install_dependencies(python_path: str) -> bool:
     return success
 
 
-def configure_auth() -> str:
+def configure_auth(existing_env: dict | None = None) -> str:
     """Configure l'authentification Anthropic. Retourne la clé/token."""
+    existing_env = existing_env or {}
+
+    # Si une clé existe déjà, proposer de la garder
+    existing_key = existing_env.get("ANTHROPIC_API_KEY", "")
+    if existing_key:
+        print(f"  {GREEN}✓{RESET} Clé Anthropic déjà configurée : {DIM}{_mask_key(existing_key)}{RESET}")
+        if not ask_confirm("Changer cette clé ?", default=False):
+            return existing_key
+        print()
+
     print(f"  {DIM}La clé Anthropic permet à Brain de fonctionner avec Claude.{RESET}")
     print(f"  {DIM}Sans clé, le système tourne en mode mock (réponses simulées).{RESET}")
     print()
@@ -214,7 +251,7 @@ def configure_auth() -> str:
         api_key = ask("Clé Anthropic (laisser vide pour mode mock)", secret=True)
 
     if api_key:
-        masked = api_key[:12] + "..." + api_key[-4:]
+        masked = _mask_key(api_key)
         if api_key.startswith("sk-ant-oat"):
             try:
                 from neo_core.oauth import setup_oauth_from_token
@@ -355,12 +392,13 @@ def save_config(core_name: str, user_name: str, api_key: str,
     print(f"  {GREEN}✓{RESET} Variables d'environnement: {ENV_FILE}")
 
 
-def configure_hardware_and_providers(api_key: str) -> dict:
+def configure_hardware_and_providers(api_key: str, existing_env: dict | None = None) -> dict:
     """
     Étape 5 du wizard : détection hardware + configuration des providers.
 
     Retourne un dict avec les clés API et modèles configurés.
     """
+    existing_env = existing_env or {}
     provider_keys = {"anthropic": api_key}
 
     # ── 5a. Détection hardware ──
@@ -425,34 +463,45 @@ def configure_hardware_and_providers(api_key: str) -> dict:
     # ── 5c. Groq (cloud gratuit) ──
     print()
     print(f"  {BOLD}Modèles cloud gratuits :{RESET}")
-    print()
-    print(f"  {DIM}Groq — Llama 3.3 70B, ultra-rapide, 14 400 req/jour{RESET}")
-    print(f"  {DIM}Clé gratuite : https://console.groq.com/keys{RESET}")
 
-    if ask_confirm("Configurer Groq (gratuit) ?"):
-        groq_key = ask("Clé Groq (gsk_...)", secret=True)
-        if groq_key and groq_key.startswith("gsk_") and len(groq_key) > 10:
-            provider_keys["groq"] = groq_key
-            print(f"  {GREEN}✓{RESET} Groq configuré")
-        elif groq_key:
-            print(f"  {YELLOW}⚠{RESET} Clé Groq invalide (doit commencer par gsk_) — ignoré")
-        else:
-            print(f"  {DIM}  (ignoré){RESET}")
+    existing_groq = existing_env.get("GROQ_API_KEY", "")
+    if existing_groq:
+        print(f"\n  {GREEN}✓{RESET} Groq déjà configuré : {DIM}{_mask_key(existing_groq)}{RESET}")
+        provider_keys["groq"] = existing_groq
+    else:
+        print()
+        print(f"  {DIM}Groq — Llama 3.3 70B, ultra-rapide, 14 400 req/jour{RESET}")
+        print(f"  {DIM}Clé gratuite : https://console.groq.com/keys{RESET}")
+
+        if ask_confirm("Configurer Groq (gratuit) ?"):
+            groq_key = ask("Clé Groq (gsk_...)", secret=True)
+            if groq_key and groq_key.startswith("gsk_") and len(groq_key) > 10:
+                provider_keys["groq"] = groq_key
+                print(f"  {GREEN}✓{RESET} Groq configuré")
+            elif groq_key:
+                print(f"  {YELLOW}⚠{RESET} Clé Groq invalide (doit commencer par gsk_) — ignoré")
+            else:
+                print(f"  {DIM}  (ignoré){RESET}")
 
     # ── 5d. Gemini (cloud gratuit) ──
-    print()
-    print(f"  {DIM}Gemini — 1M tokens contexte, 250 req/jour{RESET}")
-    print(f"  {DIM}Clé gratuite : https://aistudio.google.com/apikey{RESET}")
+    existing_gemini = existing_env.get("GEMINI_API_KEY", "")
+    if existing_gemini:
+        print(f"\n  {GREEN}✓{RESET} Gemini déjà configuré : {DIM}{_mask_key(existing_gemini)}{RESET}")
+        provider_keys["gemini"] = existing_gemini
+    else:
+        print()
+        print(f"  {DIM}Gemini — 1M tokens contexte, 250 req/jour{RESET}")
+        print(f"  {DIM}Clé gratuite : https://aistudio.google.com/apikey{RESET}")
 
-    if ask_confirm("Configurer Gemini (gratuit) ?"):
-        gemini_key = ask("Clé Gemini (AIza...)", secret=True)
-        if gemini_key and gemini_key.startswith("AIza") and len(gemini_key) > 10:
-            provider_keys["gemini"] = gemini_key
-            print(f"  {GREEN}✓{RESET} Gemini configuré")
-        elif gemini_key:
-            print(f"  {YELLOW}⚠{RESET} Clé Gemini invalide (doit commencer par AIza) — ignoré")
-        else:
-            print(f"  {DIM}  (ignoré){RESET}")
+        if ask_confirm("Configurer Gemini (gratuit) ?"):
+            gemini_key = ask("Clé Gemini (AIza...)", secret=True)
+            if gemini_key and gemini_key.startswith("AIza") and len(gemini_key) > 10:
+                provider_keys["gemini"] = gemini_key
+                print(f"  {GREEN}✓{RESET} Gemini configuré")
+            elif gemini_key:
+                print(f"  {YELLOW}⚠{RESET} Clé Gemini invalide (doit commencer par AIza) — ignoré")
+            else:
+                print(f"  {DIM}  (ignoré){RESET}")
 
     # ── 5e. Test des modèles configurés ──
     print()
@@ -543,6 +592,9 @@ def run_setup(auto_mode: bool = False):
 
     print_banner()
 
+    # Charger les clés existantes depuis le .env (pour ne pas les redemander)
+    existing_env = _load_existing_env()
+
     if auto_mode:
         print(f"  {BOLD}Mode automatique activé.{RESET}")
         print(f"  {DIM}Neo sera configuré avec les paramètres optimaux.{RESET}\n")
@@ -622,48 +674,49 @@ def run_setup(auto_mode: bool = False):
 
         # Clé API (optionnelle, mais on la propose)
         print()
-        print(f"  {DIM}Clé Anthropic (Claude) = cerveau principal de Neo.{RESET}")
-        print(f"  {DIM}Sans clé, Neo fonctionne en mode démo (réponses simulées).{RESET}")
-        print(f"  {DIM}Vous pouvez aussi configurer des providers gratuits plus tard.{RESET}\n")
-
-        api_key = ""
-
-        # Tenter l'import automatique depuis Claude Code
-        try:
-            from neo_core.oauth import import_claude_code_credentials
-            claude_creds = import_claude_code_credentials()
-            if claude_creds:
-                api_key = claude_creds["access_token"]
-                print(f"  {GREEN}✓{RESET} Credentials Claude Code détectées et importées automatiquement !")
-        except Exception:
-            pass
-
-        if not api_key:
-            # En mode auto (sudo -u neo), getpass hang car /dev/tty
-            # n'est pas accessible au user neo → utiliser input() direct
-            api_key = ask("Clé Anthropic (Entrée pour ignorer)", secret=False)
+        api_key = existing_env.get("ANTHROPIC_API_KEY", "")
 
         if api_key:
-            masked = api_key[:12] + "..." + api_key[-4:]
-            print(f"  {GREEN}✓{RESET} Clé configurée : {DIM}{masked}{RESET}")
+            print(f"  {GREEN}✓{RESET} Clé Anthropic déjà configurée : {DIM}{_mask_key(api_key)}{RESET}")
         else:
-            print(f"  {DIM}  Mode démo activé — configurable plus tard{RESET}")
+            print(f"  {DIM}Clé Anthropic (Claude) = cerveau principal de Neo.{RESET}")
+            print(f"  {DIM}Sans clé, Neo fonctionne en mode démo (réponses simulées).{RESET}")
+            print(f"  {DIM}Vous pouvez aussi configurer des providers gratuits plus tard.{RESET}\n")
+
+            # Tenter l'import automatique depuis Claude Code
+            try:
+                from neo_core.oauth import import_claude_code_credentials
+                claude_creds = import_claude_code_credentials()
+                if claude_creds:
+                    api_key = claude_creds["access_token"]
+                    print(f"  {GREEN}✓{RESET} Credentials Claude Code détectées et importées automatiquement !")
+            except Exception:
+                pass
+
+            if not api_key:
+                # En mode auto (sudo -u neo), getpass hang car /dev/tty
+                # n'est pas accessible au user neo → utiliser input() direct
+                api_key = ask("Clé Anthropic (Entrée pour ignorer)", secret=False)
+
+            if api_key:
+                print(f"  {GREEN}✓{RESET} Clé configurée : {DIM}{_mask_key(api_key)}{RESET}")
+            else:
+                print(f"  {DIM}  Mode démo activé — configurable plus tard{RESET}")
 
         # Token HuggingFace (pour télécharger le modèle d'embedding sans rate-limit)
         print()
-        print(f"  {DIM}Token HuggingFace = téléchargement du modèle d'embedding (mémoire de Neo).{RESET}")
-        print(f"  {DIM}Sans token, HuggingFace peut bloquer les téléchargements (erreur 429).{RESET}")
-        print(f"  {DIM}Clé gratuite : https://huggingface.co/settings/tokens{RESET}\n")
-
-        hf_token = os.environ.get("HF_TOKEN", "")
+        hf_token = existing_env.get("HF_TOKEN", "") or os.environ.get("HF_TOKEN", "")
         if hf_token:
-            print(f"  {GREEN}✓{RESET} Token HuggingFace détecté depuis l'environnement")
+            print(f"  {GREEN}✓{RESET} Token HuggingFace déjà configuré : {DIM}{_mask_key(hf_token)}{RESET}")
         else:
+            print(f"  {DIM}Token HuggingFace = téléchargement du modèle d'embedding (mémoire de Neo).{RESET}")
+            print(f"  {DIM}Sans token, HuggingFace peut bloquer les téléchargements (erreur 429).{RESET}")
+            print(f"  {DIM}Clé gratuite : https://huggingface.co/settings/tokens{RESET}\n")
+
             hf_token = ask("Token HuggingFace (hf_..., Entrée pour ignorer)", secret=False)
             if hf_token:
                 os.environ["HF_TOKEN"] = hf_token
-                masked_hf = hf_token[:6] + "..." + hf_token[-4:]
-                print(f"  {GREEN}✓{RESET} Token HuggingFace configuré : {DIM}{masked_hf}{RESET}")
+                print(f"  {GREEN}✓{RESET} Token HuggingFace configuré : {DIM}{_mask_key(hf_token)}{RESET}")
             else:
                 print(f"  {DIM}  (ignoré — le modèle sera téléchargé sans authentification){RESET}")
 
@@ -701,14 +754,14 @@ def run_setup(auto_mode: bool = False):
             print(f"  {DIM}  Hardware: détection échouée ({e}){RESET}")
 
         # Chercher les clés d'env existantes (peut-être déjà configurées)
-        groq_key = os.environ.get("GROQ_API_KEY", "")
-        gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        groq_key = existing_env.get("GROQ_API_KEY", "") or os.environ.get("GROQ_API_KEY", "")
+        gemini_key = existing_env.get("GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
         if groq_key:
             provider_keys["groq"] = groq_key
-            print(f"  {GREEN}✓{RESET} Groq détecté depuis l'environnement")
+            print(f"  {GREEN}✓{RESET} Groq déjà configuré : {DIM}{_mask_key(groq_key)}{RESET}")
         if gemini_key:
             provider_keys["gemini"] = gemini_key
-            print(f"  {GREEN}✓{RESET} Gemini détecté depuis l'environnement")
+            print(f"  {GREEN}✓{RESET} Gemini déjà configuré : {DIM}{_mask_key(gemini_key)}{RESET}")
 
     else:
         # Mode interactif complet (wizard 9 étapes)
@@ -717,8 +770,11 @@ def run_setup(auto_mode: bool = False):
         print(f"  {DIM}Donnez un nom à votre système IA.{RESET}")
         print(f"  {DIM}Ce nom sera utilisé par les agents pour se référencer.{RESET}\n")
 
-        core_name = ask("Nom du Core", default="Neo")
-        user_name = ask("Votre nom / pseudonyme")
+        existing_core = existing_env.get("NEO_CORE_NAME", "")
+        existing_user = existing_env.get("NEO_USER_NAME", "")
+
+        core_name = ask("Nom du Core", default=existing_core or "Neo")
+        user_name = ask("Votre nom / pseudonyme", default=existing_user)
 
         if not user_name:
             print(f"  {RED}Le nom d'utilisateur est requis.{RESET}")
@@ -729,26 +785,28 @@ def run_setup(auto_mode: bool = False):
         # ─── Étape 4 : Connexion Anthropic (optionnel) ───────────────
         print_step(4, total_steps, "Connexion Anthropic (payant, optionnel)")
 
-        api_key = configure_auth()
+        api_key = configure_auth(existing_env)
 
         # ─── Étape 5 : Token HuggingFace (mémoire vectorielle) ───────
         print_step(5, total_steps, "Token HuggingFace (gratuit, recommandé)")
 
-        print(f"  {DIM}Neo utilise un modèle d'embedding téléchargé depuis HuggingFace{RESET}")
-        print(f"  {DIM}pour sa mémoire vectorielle (recherche sémantique).{RESET}")
-        print(f"  {DIM}Sans token, HuggingFace peut bloquer les téléchargements (erreur 429).{RESET}")
-        print(f"  {DIM}Le token est gratuit : https://huggingface.co/settings/tokens{RESET}")
-        print()
-
-        hf_token = os.environ.get("HF_TOKEN", "")
+        hf_token = existing_env.get("HF_TOKEN", "") or os.environ.get("HF_TOKEN", "")
         if hf_token:
-            print(f"  {GREEN}✓{RESET} Token HuggingFace détecté depuis l'environnement")
-        else:
+            print(f"  {GREEN}✓{RESET} Token HuggingFace déjà configuré : {DIM}{_mask_key(hf_token)}{RESET}")
+            if ask_confirm("Changer ce token ?", default=False):
+                hf_token = ""  # Force re-ask below
+
+        if not hf_token:
+            print(f"  {DIM}Neo utilise un modèle d'embedding téléchargé depuis HuggingFace{RESET}")
+            print(f"  {DIM}pour sa mémoire vectorielle (recherche sémantique).{RESET}")
+            print(f"  {DIM}Sans token, HuggingFace peut bloquer les téléchargements (erreur 429).{RESET}")
+            print(f"  {DIM}Le token est gratuit : https://huggingface.co/settings/tokens{RESET}")
+            print()
+
             hf_token = ask("Token HuggingFace (hf_..., Entrée pour ignorer)", secret=True)
             if hf_token:
                 os.environ["HF_TOKEN"] = hf_token
-                masked_hf = hf_token[:6] + "..." + hf_token[-4:]
-                print(f"  {GREEN}✓{RESET} Token HuggingFace configuré : {DIM}{masked_hf}{RESET}")
+                print(f"  {GREEN}✓{RESET} Token HuggingFace configuré : {DIM}{_mask_key(hf_token)}{RESET}")
             else:
                 print(f"  {YELLOW}⚠{RESET} Sans token, le premier démarrage peut être lent (rate-limit)")
                 print(f"  {DIM}  Configurable plus tard dans le .env : HF_TOKEN=hf_...{RESET}")
@@ -756,7 +814,7 @@ def run_setup(auto_mode: bool = False):
         # ─── Étape 6 : Modèles LLM (hardware + providers gratuits) ───
         print_step(6, total_steps, "Configuration des modèles LLM")
 
-        provider_keys = configure_hardware_and_providers(api_key)
+        provider_keys = configure_hardware_and_providers(api_key, existing_env)
         provider_keys["huggingface"] = hf_token
 
     # ─── Sauvegarde ───────────────────────────────────────────────
