@@ -43,6 +43,7 @@ def print_usage():
     {CYAN}logs{RESET}              Afficher les logs du daemon
 
   {BOLD}Système :{RESET}
+    {CYAN}update{RESET}            Mettre à jour Neo (git pull + deps + restart)
     {CYAN}guardian{RESET}          Lancer Neo avec le Guardian (auto-restart)
     {CYAN}history{RESET}           Lister les sessions de conversation
     {CYAN}providers{RESET}         Afficher les providers LLM configurés
@@ -284,8 +285,101 @@ def main():
                 rc.print(f"    [red]✗[/red] {name}: {error}")
             rc.print()
 
+    elif command == "update":
+        import subprocess
+        from pathlib import Path
+
+        project_root = Path(__file__).resolve().parent.parent.parent
+
+        print(f"\n  {CYAN}{BOLD}Neo Core — Mise à jour{RESET}\n")
+
+        # 1. Git pull
+        print(f"  {DIM}⧗ Récupération de la dernière version...{RESET}", end="", flush=True)
+        try:
+            # Ajouter safe.directory au cas où
+            subprocess.run(
+                ["git", "config", "--global", "--add", "safe.directory", str(project_root)],
+                cwd=str(project_root), capture_output=True, timeout=10,
+            )
+            result = subprocess.run(
+                ["git", "pull", "origin", "main"],
+                cwd=str(project_root), capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0:
+                output = result.stdout.strip()
+                if "Already up to date" in output or "Already up-to-date" in output:
+                    print(f"\r  {GREEN}✓{RESET} Déjà à jour                    ")
+                else:
+                    print(f"\r  {GREEN}✓{RESET} Code mis à jour                 ")
+                    # Afficher les fichiers changés
+                    for line in output.splitlines():
+                        if line.strip():
+                            print(f"    {DIM}{line.strip()}{RESET}")
+            else:
+                print(f"\r  {RED}✗{RESET} git pull échoué : {result.stderr[:100]}")
+                sys.exit(1)
+        except Exception as e:
+            print(f"\r  {RED}✗{RESET} Erreur git : {e}")
+            sys.exit(1)
+
+        # 2. Pip install (met à jour les deps si pyproject.toml a changé)
+        print(f"  {DIM}⧗ Mise à jour des dépendances...{RESET}", end="", flush=True)
+        try:
+            pip_result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", ".", "-q", "--no-cache-dir"],
+                cwd=str(project_root), capture_output=True, text=True, timeout=300,
+            )
+            if pip_result.returncode == 0:
+                print(f"\r  {GREEN}✓{RESET} Dépendances à jour              ")
+            else:
+                print(f"\r  {RED}✗{RESET} pip install échoué              ")
+                print(f"    {DIM}{pip_result.stderr[:200]}{RESET}")
+        except Exception as e:
+            print(f"\r  {RED}✗{RESET} Erreur pip : {e}")
+
+        # 3. Redémarrer le daemon/service
+        print(f"  {DIM}⧗ Redémarrage de Neo...{RESET}", end="", flush=True)
+        try:
+            # Essayer systemd d'abord
+            svc = subprocess.run(
+                ["systemctl", "is-active", "neo-guardian"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if svc.stdout.strip() == "active":
+                subprocess.run(
+                    ["sudo", "systemctl", "daemon-reload"],
+                    capture_output=True, timeout=10,
+                )
+                subprocess.run(
+                    ["sudo", "systemctl", "restart", "neo-guardian"],
+                    capture_output=True, timeout=30,
+                )
+                print(f"\r  {GREEN}✓{RESET} Service neo-guardian redémarré   ")
+            else:
+                # Fallback : daemon interne
+                from neo_core.core.daemon import restart as daemon_restart
+                res = daemon_restart()
+                if res["success"]:
+                    print(f"\r  {GREEN}✓{RESET} Daemon redémarré                ")
+                else:
+                    print(f"\r  {DIM}○{RESET} Aucun daemon actif — lancez : neo start")
+        except Exception:
+            print(f"\r  {DIM}○{RESET} Pas de service actif — lancez : neo start")
+
+        # 4. Afficher la version
+        try:
+            from importlib.metadata import version as pkg_version
+            v = pkg_version("neo-core")
+            print(f"\n  {GREEN}{BOLD}Neo Core v{v} — à jour !{RESET}\n")
+        except Exception:
+            print(f"\n  {GREEN}{BOLD}Mise à jour terminée !{RESET}\n")
+
     elif command == "version":
-        print("Neo Core v0.8.5")
+        try:
+            from importlib.metadata import version as pkg_version
+            print(f"Neo Core v{pkg_version('neo-core')}")
+        except Exception:
+            print("Neo Core (version inconnue)")
 
     else:
         print(f"\n  Commande inconnue : '{sys.argv[1]}'")
