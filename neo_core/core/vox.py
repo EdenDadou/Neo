@@ -604,7 +604,7 @@ class Vox:
                 logger.error("Failed to save conversation turn: %s", e)
 
     def _store_in_memory(self, human_message: str, response: str) -> None:
-        """Stocke l'échange en mémoire persistante."""
+        """Stocke l'échange en mémoire persistante et met à jour la working memory."""
         if self.memory and self.memory.is_initialized:
             self.update_agent_status("Memory", active=True, task="stockage", progress=0.5)
             self.memory.on_conversation_turn(human_message, response)

@@ -530,6 +530,14 @@ class Brain:
         except Exception as e:
             logger.debug("Impossible de récupérer les conseils d'apprentissage: %s", e)
 
+        # Ajouter le contexte de la mémoire de travail (Working Memory)
+        try:
+            working_ctx = self.memory.get_working_context()
+            if working_ctx:
+                context += f"\n\n=== Mémoire de travail ===\n{working_ctx}"
+        except Exception as e:
+            logger.debug("Impossible de récupérer la mémoire de travail: %s", e)
+
         return context
 
     # ─── Analyse et décision ────────────────────────────────

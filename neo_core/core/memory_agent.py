@@ -29,6 +29,7 @@ from neo_core.memory.context import ContextEngine, ContextBlock
 from neo_core.memory.consolidator import MemoryConsolidator
 from neo_core.memory.learning import LearningEngine, LearningAdvice
 from neo_core.memory.task_registry import TaskRegistry, Task, Epic
+from neo_core.memory.working_memory import WorkingMemory
 from neo_core.core.persona import PersonaEngine
 from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
 
@@ -84,6 +85,7 @@ class MemoryAgent:
     _learning: Optional[LearningEngine] = field(default=None, init=False)
     _task_registry: Optional[TaskRegistry] = field(default=None, init=False)
     _persona_engine: Optional[PersonaEngine] = field(default=None, init=False)
+    _working_memory: Optional[WorkingMemory] = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
     _turn_count: int = field(default=0, init=False)
     _consolidation_interval: int = 50  # Consolide tous les N tours
@@ -103,6 +105,9 @@ class MemoryAgent:
 
         # Stage 9 — PersonaEngine (identité + profil utilisateur)
         self._init_persona_engine()
+
+        # Working Memory — scratchpad contextuel temps réel
+        self._init_working_memory()
 
         self._initialized = True
         self._mock_mode = self.config.is_mock_mode()
@@ -142,6 +147,15 @@ class MemoryAgent:
             logger.info("[Memory] PersonaEngine initialisé")
         except Exception as e:
             logger.error("[Memory] PersonaEngine non disponible (%s)", e)
+
+    def _init_working_memory(self) -> None:
+        """Initialise la mémoire de travail (scratchpad contextuel)."""
+        try:
+            self._working_memory = WorkingMemory(self.config.data_dir)
+            self._working_memory.initialize()
+            logger.info("[Memory] WorkingMemory initialisé")
+        except Exception as e:
+            logger.error("[Memory] WorkingMemory non disponible (%s)", e)
 
     def _load_system_docs(self) -> None:
         """
@@ -313,6 +327,13 @@ class MemoryAgent:
             return
 
         self._context_engine.store_conversation_turn(user_message, ai_response)
+
+        # Working Memory — mise à jour du scratchpad contextuel
+        if self._working_memory:
+            try:
+                self._working_memory.update(user_message, ai_response)
+            except Exception as e:
+                logger.debug("Working memory update failed: %s", e)
 
         # Enrichir les tâches actives avec le contexte de la conversation
         self._enrich_active_tasks(user_message, ai_response)
@@ -637,6 +658,26 @@ class MemoryAgent:
         if not self._persona_engine or not self._persona_engine.is_initialized:
             return {}
         return self._persona_engine.analyze_conversation(user_message, neo_response)
+
+    # ─── Working Memory (Mémoire de travail) ───────────────
+
+    @property
+    def working_memory(self) -> Optional[WorkingMemory]:
+        """Accès à la mémoire de travail."""
+        return self._working_memory
+
+    def get_working_context(self) -> str:
+        """
+        Retourne le contexte de la mémoire de travail pour injection
+        dans le system prompt de Brain.
+        """
+        if not self._working_memory:
+            return ""
+        try:
+            return self._working_memory.get_context_injection()
+        except Exception as e:
+            logger.debug("Working memory context injection failed: %s", e)
+            return ""
 
     def should_self_reflect(self) -> bool:
         """Indique si Neo devrait effectuer une auto-réflexion."""
