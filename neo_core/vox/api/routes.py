@@ -114,7 +114,8 @@ async def chat_stream(request: ChatRequest):
                         timeout=120.0,
                     )
                 except asyncio.TimeoutError:
-                    yield f"event: error\ndata: {json.dumps({'text': 'Timeout — Brain n\\'a pas répondu'})}\n\n"
+                    timeout_msg = json.dumps({"text": "Timeout — Brain n'a pas répondu"})
+                    yield f"event: error\ndata: {timeout_msg}\n\n"
                     return
 
             # Drainer tous les events de la queue (ack envoyé pendant process_message)
@@ -137,7 +138,8 @@ async def chat_stream(request: ChatRequest):
                         result_queue.get(), timeout=120.0,
                     )
                 except asyncio.TimeoutError:
-                    yield f"event: error\ndata: {json.dumps({'text': 'Timeout — Brain n\\'a pas répondu'})}\n\n"
+                    timeout_msg = json.dumps({"text": "Timeout — Brain n'a pas répondu"})
+                    yield f"event: error\ndata: {timeout_msg}\n\n"
                     return
 
                 session = neo_core.vox._current_session
