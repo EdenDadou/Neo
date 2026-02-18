@@ -5,7 +5,7 @@ Double système de stockage :
 - FAISS : index vectoriel pour la recherche sémantique (remplace ChromaDB v0.9.3)
 - SQLite : métadonnées structurées (timestamps, tags, sources, importance)
 
-Les embeddings sont générés par sentence-transformers (all-MiniLM-L6-v2, dim=384).
+Les embeddings sont générés par FastEmbed/ONNX (all-MiniLM-L6-v2, dim=384).
 L'index FAISS utilise IndexFlatIP (produit scalaire = cosine sur vecteurs normalisés).
 """
 
@@ -181,14 +181,13 @@ class MemoryStore:
 
     def _load_embedding_model(self) -> None:
         """
-        Charge le modèle d'embedding sentence-transformers.
+        Charge le modèle d'embedding via FastEmbed (ONNX).
 
         Singleton process-level : chargé une seule fois, réutilisé par toutes
         les instances de MemoryStore. Temps de chargement : ~200ms au premier appel.
 
-        Fallback : si sentence-transformers échoue (HuggingFace 429, pas de réseau),
-        utilise un HashingVectorizer local (pas de téléchargement nécessaire).
-        Moins précis mais toujours fonctionnel.
+        Fallback : si FastEmbed échoue, utilise un HashingVectorizer local
+        (pas de téléchargement nécessaire). Moins précis mais fonctionnel.
         """
         global _EMBEDDING_MODEL_CACHE
 
@@ -210,47 +209,23 @@ class MemoryStore:
         """Implémentation interne du chargement du modèle (appelée sous lock)."""
         global _EMBEDDING_MODEL_CACHE
 
-        # Tenter sentence-transformers (meilleure qualité)
-        # Stratégie : cache local UNIQUEMENT — jamais de réseau au démarrage.
-        # Le téléchargement du modèle se fait dans `neo setup`, pas au boot.
-        # Ça évite 60s de retries 429 qui bloquent le daemon et le chat.
+        # Tenter FastEmbed (ONNX — pas de PyTorch, pas d'API HuggingFace Hub)
+        # Le modèle est téléchargé/caché par FastEmbed lui-même.
+        # Si pas en cache, FastEmbed le télécharge automatiquement (~80 Mo ONNX).
         try:
-            from sentence_transformers import SentenceTransformer
+            from fastembed import TextEmbedding
 
-            # Forcer mode 100% offline — aucun appel réseau
-            _old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
-            _old_tf_offline = os.environ.get("TRANSFORMERS_OFFLINE")
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            os.environ["TRANSFORMERS_OFFLINE"] = "1"
-            try:
-                _EMBEDDING_MODEL_CACHE = SentenceTransformer(
-                    EMBEDDING_MODEL,
-                    local_files_only=True,  # Critique : empêche TOUT appel HTTP
-                )
-                self._embedding_model = _EMBEDDING_MODEL_CACHE
-                self._using_fallback_embeddings = False
-                logger.info("Embedding model loaded from cache: %s", EMBEDDING_MODEL)
-                return
-            except Exception:
-                logger.warning(
-                    "Modèle %s pas en cache — fallback local. "
-                    "Pour télécharger : neo setup",
-                    EMBEDDING_MODEL,
-                )
-            finally:
-                if _old_hf_offline is None:
-                    os.environ.pop("HF_HUB_OFFLINE", None)
-                else:
-                    os.environ["HF_HUB_OFFLINE"] = _old_hf_offline
-                if _old_tf_offline is None:
-                    os.environ.pop("TRANSFORMERS_OFFLINE", None)
-                else:
-                    os.environ["TRANSFORMERS_OFFLINE"] = _old_tf_offline
+            model_name = f"sentence-transformers/{EMBEDDING_MODEL}"
+            _EMBEDDING_MODEL_CACHE = TextEmbedding(model_name=model_name)
+            self._embedding_model = _EMBEDDING_MODEL_CACHE
+            self._using_fallback_embeddings = False
+            logger.info("Embedding model loaded via FastEmbed: %s", model_name)
+            return
 
         except ImportError:
-            logger.warning("sentence-transformers non installé")
+            logger.warning("fastembed non installé — pip install fastembed")
         except Exception as e:
-            logger.warning("sentence-transformers échoué (%s) — fallback local", e)
+            logger.warning("FastEmbed échoué (%s) — fallback local", e)
 
         # Fallback : HashingVectorizer amélioré (sklearn) — zéro téléchargement
         # Utilise char+word n-grams pour capturer la sémantique locale
@@ -299,7 +274,7 @@ class MemoryStore:
         comme distance cosine dans FAISS.
 
         Supporte deux backends :
-        - sentence-transformers (qualité sémantique)
+        - FastEmbed/ONNX (qualité sémantique)
         - HashingVectorizer fallback (bag-of-words, pas de téléchargement)
         """
         if not self._embedding_model:
@@ -315,12 +290,10 @@ class MemoryStore:
             embeddings = embeddings / norms
             return embeddings
 
-        embeddings = self._embedding_model.encode(
-            texts,
-            normalize_embeddings=True,  # Cosine similarity via IP
-            show_progress_bar=False,
-        )
-        return np.asarray(embeddings, dtype=np.float32)
+        # FastEmbed : embed() retourne un générateur → np.array()
+        # Les embeddings sont déjà normalisés L2 par FastEmbed
+        embeddings = np.array(list(self._embedding_model.embed(texts)), dtype=np.float32)
+        return embeddings
 
     def _rebuild_index_from_sqlite(self) -> None:
         """

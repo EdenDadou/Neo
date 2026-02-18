@@ -406,7 +406,7 @@ else
     log_warn "Installation partielle — certains modules pourraient manquer"
 fi
 
-# Vérifier FAISS + sentence-transformers (installés via pyproject.toml)
+# Vérifier FAISS (installé via pyproject.toml)
 if python3 -c "import faiss" 2>/dev/null; then
     log_info "faiss-cpu déjà installé"
 else
@@ -418,14 +418,15 @@ else
     fi
 fi
 
-if python3 -c "from sentence_transformers import SentenceTransformer" 2>/dev/null; then
-    log_info "sentence-transformers déjà installé"
+# Vérifier FastEmbed (remplace sentence-transformers — ONNX, pas de PyTorch, pas de 429)
+if python3 -c "from fastembed import TextEmbedding" 2>/dev/null; then
+    log_info "fastembed déjà installé"
 else
-    echo -e "  ${DIM}⧗ Installation de sentence-transformers (embeddings)...${RESET}"
-    if pip install sentence-transformers --no-cache-dir >> "$LOG_FILE" 2>&1; then
-        log_info "sentence-transformers installé"
+    echo -e "  ${DIM}⧗ Installation de fastembed (embeddings ONNX)...${RESET}"
+    if pip install fastembed --no-cache-dir >> "$LOG_FILE" 2>&1; then
+        log_info "fastembed installé"
     else
-        log_warn "sentence-transformers échoué — embeddings limités"
+        log_warn "fastembed échoué — embeddings limités"
     fi
 fi
 
@@ -436,120 +437,32 @@ run_optional "Installation de Ollama (LLM local)" pip install ollama
 run_optional "Installation du bot Telegram" pip install python-telegram-bot
 
 # Pré-télécharger le modèle d'embedding (mémoire de Neo)
-# Le faire ici garantit que le cache existe AVANT le wizard setup.
-# Avec le cache présent, setup.py/store.py chargent en mode offline → zéro 429.
-#
-# Stratégie : git clone direct (PAS l'API HuggingFace Hub qui rate-limit 429).
-# Le git clone télécharge les fichiers du modèle sans passer par l'API REST.
+# FastEmbed utilise ONNX Runtime et gère son propre cache (~80 Mo).
+# Pas de dépendance à l'API HuggingFace Hub → pas de rate-limit 429.
 echo -e "  ${DIM}⧗ Pré-téléchargement du modèle d'embedding...${RESET}"
 EMBEDDING_OK=false
 NEO_HOME=$(eval echo ~${NEO_USER})
-EMBEDDING_MODEL="sentence-transformers/all-MiniLM-L6-v2"
-MODEL_CACHE_DIR="${NEO_HOME}/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2"
 
-# Vérifier si déjà en cache
 if HOME="$NEO_HOME" python3 -c "
-import os, sys
-os.environ['HF_HUB_OFFLINE'] = '1'
-os.environ['TRANSFORMERS_OFFLINE'] = '1'
+import sys
 try:
-    from sentence_transformers import SentenceTransformer
-    m = SentenceTransformer('all-MiniLM-L6-v2')
-    r = m.encode(['test'])
-    if r is not None and len(r) > 0:
+    from fastembed import TextEmbedding
+    m = TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2')
+    r = list(m.embed(['test']))
+    if r and len(r) > 0 and len(r[0]) == 384:
         sys.exit(0)
-except: pass
+except Exception as e:
+    print(f'FAIL: {e}', file=sys.stderr)
 sys.exit(1)
 " >> "$LOG_FILE" 2>&1; then
     EMBEDDING_OK=true
-    log_info "Modèle d'embedding all-MiniLM-L6-v2 déjà en cache"
 fi
 
-if [[ "$EMBEDDING_OK" = false ]]; then
-    # Méthode 1 : huggingface-cli download (plus fiable que SentenceTransformer())
-    if command -v huggingface-cli &>/dev/null || "${VENV_DIR}/bin/huggingface-cli" --version &>/dev/null 2>&1; then
-        echo -e "  ${DIM}  Téléchargement via huggingface-cli...${RESET}"
-        HF_CLI="huggingface-cli"
-        command -v huggingface-cli &>/dev/null || HF_CLI="${VENV_DIR}/bin/huggingface-cli"
-
-        if HOME="$NEO_HOME" $HF_CLI download "${EMBEDDING_MODEL}" --quiet >> "$LOG_FILE" 2>&1; then
-            EMBEDDING_OK=true
-        fi
-    fi
-fi
-
-if [[ "$EMBEDDING_OK" = false ]]; then
-    # Méthode 2 : git clone direct (contourne l'API HuggingFace → pas de 429)
-    echo -e "  ${DIM}  Téléchargement via git clone (contourne les rate-limits)...${RESET}"
-
-    # Installer git-lfs si nécessaire (pour les fichiers binaires du modèle)
-    if ! command -v git-lfs &>/dev/null; then
-        apt-get install -y git-lfs >> "$LOG_FILE" 2>&1 || true
-        git lfs install >> "$LOG_FILE" 2>&1 || true
-    fi
-
-    TEMP_MODEL_DIR=$(mktemp -d)
-    if git clone --depth 1 "https://huggingface.co/${EMBEDDING_MODEL}" "$TEMP_MODEL_DIR" >> "$LOG_FILE" 2>&1; then
-        # Placer dans le cache HuggingFace au format attendu par sentence-transformers
-        mkdir -p "${MODEL_CACHE_DIR}/snapshots/local"
-        cp -r "${TEMP_MODEL_DIR}"/* "${MODEL_CACHE_DIR}/snapshots/local/" 2>/dev/null || true
-        # Créer le fichier refs/main pour que HF Hub trouve le snapshot
-        mkdir -p "${MODEL_CACHE_DIR}/refs"
-        echo "local" > "${MODEL_CACHE_DIR}/refs/main"
-
-        # Vérifier que ça charge
-        if HOME="$NEO_HOME" python3 -c "
-import os, sys
-os.environ['HF_HUB_OFFLINE'] = '1'
-os.environ['TRANSFORMERS_OFFLINE'] = '1'
-try:
-    from sentence_transformers import SentenceTransformer
-    m = SentenceTransformer('all-MiniLM-L6-v2')
-    r = m.encode(['test'])
-    if r is not None and len(r) > 0:
-        sys.exit(0)
-except: pass
-sys.exit(1)
-" >> "$LOG_FILE" 2>&1; then
-            EMBEDDING_OK=true
-        fi
-    fi
-    rm -rf "$TEMP_MODEL_DIR" 2>/dev/null || true
-fi
-
-if [[ "$EMBEDDING_OK" = false ]]; then
-    # Méthode 3 : fallback SentenceTransformer (API HuggingFace Hub — risque 429)
-    echo -e "  ${DIM}  Fallback: téléchargement via Python API...${RESET}"
-    for ATTEMPT in 1 2 3; do
-        if HOME="$NEO_HOME" python3 -c "
-import os, sys
-os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
-try:
-    from sentence_transformers import SentenceTransformer
-    m = SentenceTransformer('all-MiniLM-L6-v2')
-    r = m.encode(['test'])
-    if r is not None and len(r) > 0:
-        sys.exit(0)
-except: pass
-sys.exit(1)
-" >> "$LOG_FILE" 2>&1; then
-            EMBEDDING_OK=true
-            break
-        else
-            if [[ $ATTEMPT -lt 3 ]]; then
-                WAIT=$((5 * ATTEMPT))
-                echo -e "  ${YELLOW}⚠${RESET} Tentative ${ATTEMPT}/3 échouée — retry dans ${WAIT}s..."
-                sleep $WAIT
-            fi
-        fi
-    done
-fi
-
-# S'assurer que le cache HF appartient à neo
+# S'assurer que le cache FastEmbed appartient à neo
 chown -R ${NEO_USER}:${NEO_USER} "${NEO_HOME}/.cache" 2>/dev/null || true
 
 if [[ "$EMBEDDING_OK" = true ]]; then
-    log_info "Modèle d'embedding all-MiniLM-L6-v2 en cache"
+    log_info "Modèle d'embedding all-MiniLM-L6-v2 en cache (ONNX)"
 else
     log_warn "Modèle d'embedding non téléchargé — mémoire en mode dégradé (bag-of-words)"
     echo -e "  ${DIM}  La recherche mémoire fonctionnera par mots-clés au lieu de sémantique.${RESET}"
