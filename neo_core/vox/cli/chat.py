@@ -758,11 +758,13 @@ async def api_conversation_loop(config: NeoConfig, api_url: str):
     """
     Boucle de conversation via l'API du daemon.
 
-    Au lieu de créer un Vox local, envoie les messages au daemon
-    via HTTP POST /chat. Résultat : même conversation que Telegram,
-    même Vox, même mémoire, même contexte.
+    Mode asynchrone : envoie les messages au daemon via SSE (/chat/stream).
+    L'ack arrive immédiatement, le prompt revient, et la réponse Brain
+    s'affiche en arrière-plan quand elle est prête.
+    L'utilisateur peut continuer à discuter pendant que Brain réfléchit.
     """
     import httpx
+    import json as _json
 
     api_key = _get_api_key(config)
     headers = {}
@@ -785,8 +787,101 @@ async def api_conversation_loop(config: NeoConfig, api_url: str):
         "[dim]  Tapez /help pour les commandes disponibles.[/dim]\n"
     )
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    # ── Queue pour les résultats Brain en arrière-plan ──
+    brain_results: asyncio.Queue = asyncio.Queue()
+    brain_pending = 0  # nombre de requêtes Brain en cours
+
+    async def _stream_chat(client: httpx.AsyncClient, message: str):
+        """
+        Envoie un message via SSE /chat/stream.
+        Affiche l'ack dès réception, puis pousse la réponse Brain dans la queue.
+        """
+        nonlocal brain_pending
+        brain_pending += 1
+        try:
+            async with client.stream(
+                "POST",
+                f"{api_url}/chat/stream",
+                json={"message": message},
+                headers=headers,
+                timeout=130.0,
+            ) as resp:
+                if resp.status_code == 401:
+                    console.print(
+                        "\n[red]  ⚠ Accès refusé — clé API invalide. "
+                        "Vérifiez NEO_API_KEY ou ANTHROPIC_API_KEY.[/red]\n"
+                    )
+                    return
+                if resp.status_code == 503:
+                    console.print("\n[yellow]  ⚠ Neo Core pas encore initialisé — réessayez.[/yellow]\n")
+                    return
+                if resp.status_code != 200:
+                    console.print(f"\n[red]  Erreur API ({resp.status_code})[/red]\n")
+                    return
+
+                # Parser les events SSE
+                buffer = ""
+                current_event = "message"
+                async for chunk in resp.aiter_text():
+                    buffer += chunk
+                    while "\n\n" in buffer:
+                        block, buffer = buffer.split("\n\n", 1)
+                        event_type = "message"
+                        data_str = ""
+                        for line in block.split("\n"):
+                            if line.startswith("event: "):
+                                event_type = line[7:].strip()
+                            elif line.startswith("data: "):
+                                data_str = line[6:]
+
+                        if not data_str:
+                            continue
+
+                        try:
+                            payload = _json.loads(data_str)
+                        except _json.JSONDecodeError:
+                            continue
+
+                        text = payload.get("text", "")
+
+                        if event_type == "ack":
+                            # Afficher l'ack immédiatement
+                            console.print(
+                                f"\n  [dim cyan]Vox >[/dim cyan] [dim]{text}[/dim]"
+                            )
+                            console.print(
+                                "  [bold cyan]⟳ Brain réfléchit...[/bold cyan]"
+                            )
+                        elif event_type == "response":
+                            # Pousser la réponse dans la queue
+                            brain_results.put_nowait(text)
+                        elif event_type == "error":
+                            console.print(f"\n  [bold red]Erreur >[/bold red] {text}\n")
+
+        except httpx.ConnectError:
+            console.print(
+                "\n[red]  ⚠ Connexion au daemon perdue. "
+                "Vérifiez avec: neo status[/red]\n"
+            )
+        except Exception as e:
+            console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
+        finally:
+            brain_pending -= 1
+
+    def _drain_brain_results_api():
+        """Affiche tous les résultats Brain en attente."""
+        while not brain_results.empty():
+            try:
+                result = brain_results.get_nowait()
+                console.print(f"\n  [bold cyan]Vox >[/bold cyan] {result}\n")
+            except asyncio.QueueEmpty:
+                break
+
+    async with httpx.AsyncClient(timeout=130.0) as client:
         while True:
+            # ── Afficher les résultats Brain en attente avant le prompt ──
+            _drain_brain_results_api()
+
             try:
                 user_input = await asyncio.to_thread(
                     console.input,
@@ -795,6 +890,9 @@ async def api_conversation_loop(config: NeoConfig, api_url: str):
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]  Au revoir ![/dim]")
                 sys.exit(0)
+
+            # Drainer aussi après input (Brain a pu terminer pendant qu'on tapait)
+            _drain_brain_results_api()
 
             user_input = user_input.strip()
             if not user_input:
@@ -821,6 +919,8 @@ async def api_conversation_loop(config: NeoConfig, api_url: str):
                             f"  Uptime  : {data.get('uptime_seconds', 0):.0f}s",
                             f"  Guardian: {'oui' if data.get('guardian_mode') else 'non'}",
                         ]
+                        if brain_pending > 0:
+                            lines.append(f"  Brain   : [bold cyan]⟳ {brain_pending} requête(s) en cours[/bold cyan]")
                         agents = data.get("agents", {})
                         for name, info in agents.items():
                             lines.append(f"  {name:10}: {info}")
@@ -903,33 +1003,9 @@ async def api_conversation_loop(config: NeoConfig, api_url: str):
                     console.print(f"[red]  Erreur: {e}[/red]")
                 continue
 
-            # Envoyer le message au daemon via POST /chat
-            try:
-                resp = await client.post(
-                    f"{api_url}/chat",
-                    json={"message": user_input},
-                    headers=headers,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    response_text = data.get("response", "")
-                    console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response_text}\n")
-                elif resp.status_code == 401:
-                    console.print(
-                        "[red]  ⚠ Accès refusé — clé API invalide. "
-                        "Vérifiez NEO_API_KEY ou ANTHROPIC_API_KEY.[/red]"
-                    )
-                elif resp.status_code == 503:
-                    console.print("[yellow]  ⚠ Neo Core pas encore initialisé — réessayez.[/yellow]")
-                else:
-                    console.print(f"[red]  Erreur API ({resp.status_code}): {resp.text[:200]}[/red]")
-            except httpx.ConnectError:
-                console.print(
-                    "[red]  ⚠ Connexion au daemon perdue. "
-                    "Vérifiez avec: neo status[/red]"
-                )
-            except Exception as e:
-                console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
+            # ── Envoyer le message en arrière-plan via SSE ──
+            # Le prompt revient immédiatement, la réponse Brain arrive dans la queue
+            asyncio.create_task(_stream_chat(client, user_input))
 
 
 def run_chat():
