@@ -255,12 +255,29 @@ async def status():
         },
     }
 
+    # Heartbeat info
+    heartbeat_info = {}
+    try:
+        from neo_core.infra.registry import core_registry
+        hb = core_registry.get_heartbeat_manager()
+        if hb:
+            hb_status = hb.get_status()
+            heartbeat_info = {
+                "running": hb_status.get("running", False),
+                "pulse_count": hb_status.get("pulse_count", 0),
+                "interval": hb_status.get("interval", 0),
+                "last_event": hb_status.get("last_event", ""),
+            }
+    except Exception:
+        pass
+
     return StatusResponse(
         status="ready",
         core_name=neo_core.config.core_name,
         uptime_seconds=neo_core.uptime,
         agents=agents,
         guardian_mode=False,
+        heartbeat=heartbeat_info,
     )
 
 

@@ -30,6 +30,7 @@ class StatusResponse(BaseModel):
     uptime_seconds: float
     agents: dict
     guardian_mode: bool
+    heartbeat: dict = {}
 
 
 class SessionInfo(BaseModel):

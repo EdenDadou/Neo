@@ -46,6 +46,7 @@ class CoreRegistry:
                 inst._vox = None
                 inst._config = None
                 inst._telegram_bot = None
+                inst._heartbeat_manager = None
                 inst._bootstrap_lock = threading.Lock()
                 inst._initialized = True
                 cls._instance = inst
@@ -123,6 +124,15 @@ class CoreRegistry:
         with self._bootstrap_lock:
             self._bootstrap()
         return self._config
+
+    def set_heartbeat_manager(self, manager) -> None:
+        """Enregistre le HeartbeatManager pour accès global (API, etc.)."""
+        self._heartbeat_manager = manager
+        logger.info("HeartbeatManager registered in CoreRegistry")
+
+    def get_heartbeat_manager(self):
+        """Retourne le HeartbeatManager (ou None si pas démarré)."""
+        return self._heartbeat_manager
 
     def set_telegram_bot(self, bot) -> None:
         """Enregistre le bot Telegram pour l'envoi proactif."""

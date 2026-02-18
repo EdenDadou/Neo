@@ -236,6 +236,7 @@ async def _run_daemon(host: str = "127.0.0.1", port: int = 8000) -> None:
                 config=hb_config,
             )
             heartbeat.start()
+            core_registry.set_heartbeat_manager(heartbeat)
             logger.info("Heartbeat démarré — interval=%ds", hb_config.interval_seconds)
 
             # Attendre le shutdown
