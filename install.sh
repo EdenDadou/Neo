@@ -425,27 +425,23 @@ mkdir -p "${INSTALL_DIR}/data/patches"
 mkdir -p "${INSTALL_DIR}/data/tool_metadata"
 mkdir -p "${INSTALL_DIR}/data/system_docs"
 
-# Donner la propriété à l'utilisateur neo
+# Donner la propriété à neo:neo
 chown -R ${NEO_USER}:${NEO_USER} "$INSTALL_DIR"
 
-# Le répertoire principal doit être lisible/traversable par tous
-# pour que 'ubuntu' puisse cd dans /opt/neo-core et lancer le wrapper
-chmod 755 "$INSTALL_DIR"
-
-# data/ est privé à neo (contient .env, mémoire, etc.)
-chmod 700 "${INSTALL_DIR}/data"
-
-# Le .venv doit être exécutable par neo
-chmod 755 "${INSTALL_DIR}/.venv" 2>/dev/null || true
-
-# Ajouter ubuntu au groupe neo pour accès lecture
+# Ajouter ubuntu au groupe neo pour qu'il ait les mêmes droits
 REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 if [[ "$REAL_USER" != "root" ]] && [[ "$REAL_USER" != "$NEO_USER" ]]; then
     usermod -aG ${NEO_USER} ${REAL_USER} 2>/dev/null || true
     log_info "Utilisateur '${REAL_USER}' ajouté au groupe '${NEO_USER}'"
 fi
 
-log_info "Permissions configurées (propriétaire: $NEO_USER, accès: 755)"
+# Permissions groupe = même que propriétaire (neo et ubuntu ont les mêmes droits)
+chmod -R g=u "$INSTALL_DIR"
+
+# Tous les nouveaux fichiers héritent du groupe neo (setgid)
+find "$INSTALL_DIR" -type d -exec chmod g+s {} \;
+
+log_info "Permissions configurées (propriétaire: $NEO_USER, groupe partagé avec ${REAL_USER})"
 
 # ═══════════════════════════════════════════════════════════
 #  Étape 6 : Service systemd
