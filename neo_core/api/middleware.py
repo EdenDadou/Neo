@@ -170,6 +170,6 @@ class SanitizerMiddleware(BaseHTTPMiddleware):
                             },
                         )
                 except Exception as e:
-                    logger.debug("Sanitizer body parse failed (allowing request): %s", e)
+                    logger.warning("Sanitizer body parse failed (allowing request): %s", e)
 
         return await call_next(request)

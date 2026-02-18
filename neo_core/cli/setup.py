@@ -7,10 +7,13 @@ Usage : neo setup
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ─── Couleurs ANSI (pas de dépendance externe) ────────────────────────
 
@@ -57,7 +60,8 @@ def _mask_key(key: str) -> str:
 
 
 def clear_screen():
-    os.system("clear" if os.name != "nt" else "cls")
+    import subprocess
+    subprocess.run(["clear" if os.name != "nt" else "cls"], check=False)
 
 
 def print_banner():
@@ -244,8 +248,8 @@ def configure_auth(existing_env: dict | None = None) -> str:
             if ask_confirm("Utiliser ces credentials ?"):
                 api_key = token
                 print(f"  {GREEN}✓{RESET} Credentials Claude Code importées (avec refresh automatique)")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Claude Code credentials import failed: %s", e)
 
     if not api_key:
         api_key = ask("Clé Anthropic (laisser vide pour mode mock)", secret=True)
@@ -260,7 +264,8 @@ def configure_auth(existing_env: dict | None = None) -> str:
                     print(f"  {GREEN}✓{RESET} {result['message']} : {DIM}{masked}{RESET}")
                 else:
                     print(f"  {YELLOW}⚠{RESET} {result['message']}")
-            except Exception:
+            except Exception as e:
+                logger.debug("OAuth setup failed, storing token raw: %s", e)
                 print(f"  {GREEN}✓{RESET} Token OAuth stocké : {DIM}{masked}{RESET}")
         elif api_key.startswith("sk-ant-api") or api_key.startswith("sk-"):
             print(f"  {GREEN}✓{RESET} Clé API classique : {DIM}{masked}{RESET}")
@@ -690,8 +695,8 @@ def run_setup(auto_mode: bool = False):
                 if claude_creds:
                     api_key = claude_creds["access_token"]
                     print(f"  {GREEN}✓{RESET} Credentials Claude Code détectées et importées automatiquement !")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Auto Claude Code credentials import failed: %s", e)
 
             if not api_key:
                 # En mode auto (sudo -u neo), getpass hang car /dev/tty

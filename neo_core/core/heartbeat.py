@@ -283,7 +283,7 @@ class HeartbeatManager:
 
     async def _execute_task(self, task) -> None:
         """
-        Exécute une tâche via Brain.
+        Exécute une tâche via Brain avec timeout de 5 minutes.
         Met à jour le statut dans le registry.
         """
         from neo_core.core.brain import BrainDecision
@@ -303,10 +303,14 @@ class HeartbeatManager:
 
             memory_context = self.brain.get_memory_context(task.description)
 
-            result = await self.brain._execute_with_worker(
-                request=task.description,
-                decision=decision,
-                memory_context=memory_context,
+            # Timeout de 5 minutes pour éviter qu'un worker bloque le heartbeat
+            result = await asyncio.wait_for(
+                self.brain._execute_with_worker(
+                    request=task.description,
+                    decision=decision,
+                    memory_context=memory_context,
+                ),
+                timeout=300.0,
             )
 
             # Déterminer si c'est un succès
@@ -324,6 +328,16 @@ class HeartbeatManager:
                     message=f"Tâche échouée: {task.description[:60]}",
                     data={"task_id": task.id, "success": False, "error": result[:200]},
                 ))
+
+        except asyncio.TimeoutError:
+            logger.error("[Heartbeat] Tâche %s timeout (>5min)", task.id[:8])
+            try:
+                self.memory.update_task_status(
+                    task.id, "failed",
+                    result="Timeout: tâche dépassée (>5 minutes)",
+                )
+            except Exception as e:
+                logger.warning("Failed to update task status after timeout: %s", e)
 
         except Exception as e:
             logger.error("[Heartbeat] Erreur exécution tâche %s: %s", task.id[:8], e)
@@ -358,8 +372,8 @@ class HeartbeatManager:
                         ),
                         data={"task_id": task.id, "age_minutes": (now - created).total_seconds() / 60},
                     ))
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.debug("Failed to parse task timestamp for stale detection: %s", e)
 
     # ─── Consolidation Memory ─────────────────────────
 
