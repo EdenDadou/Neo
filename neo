@@ -50,7 +50,7 @@ fi
 
 # ─── Vérifier si le package neo-core est installé ────────────
 neo_installed() {
-    $PYTHON -c "import neo_core.cli" 2>/dev/null
+    $PYTHON -c "import neo_core.vox.cli" 2>/dev/null
 }
 
 # ─── Bootstrap : installer si nécessaire ─────────────────────
@@ -92,4 +92,4 @@ if ! neo_installed; then
 fi
 
 # Lancer la commande
-exec $PYTHON -m neo_core.cli "$@"
+exec $PYTHON -m neo_core.vox.cli "$@"

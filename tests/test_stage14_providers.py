@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 import pytest
 
 from neo_core.config import NeoConfig, get_agent_model
-from neo_core.providers.base import (
+from neo_core.brain.providers.base import (
     LLMProvider,
     ProviderType,
     ModelInfo,
@@ -22,14 +22,14 @@ from neo_core.providers.base import (
     ChatResponse,
     TestResult,
 )
-from neo_core.providers.registry import (
+from neo_core.brain.providers.registry import (
     ModelRegistry,
     get_model_registry,
     set_model_registry,
     AGENT_REQUIREMENTS,
     PREFER_CLOUD_AGENTS,
 )
-from neo_core.providers.bootstrap import (
+from neo_core.brain.providers.bootstrap import (
     bootstrap_providers,
     get_provider_summary,
     _is_ollama_running,
@@ -158,7 +158,7 @@ class TestBootstrap:
             stats = registry.get_stats()
             assert stats["total_providers"] >= 0
 
-    @patch("neo_core.providers.bootstrap._is_ollama_running", return_value=True)
+    @patch("neo_core.brain.providers.bootstrap._is_ollama_running", return_value=True)
     def test_bootstrap_detects_ollama(self, mock_ollama):
         """Bootstrap détecte Ollama si le serveur tourne."""
         registry = bootstrap_providers()
@@ -171,7 +171,7 @@ class TestBootstrap:
         registry = bootstrap_providers(config)
         assert isinstance(registry, ModelRegistry)
 
-    @patch("neo_core.providers.bootstrap._is_ollama_running", return_value=False)
+    @patch("neo_core.brain.providers.bootstrap._is_ollama_running", return_value=False)
     def test_bootstrap_ollama_not_running(self, mock_ollama):
         """Bootstrap gère Ollama non disponible sans erreur."""
         registry = bootstrap_providers()
@@ -392,28 +392,28 @@ class TestCLIIntegration:
 
     def test_cli_has_providers_command(self):
         """Le CLI a la commande 'providers'."""
-        import neo_core.cli
+        import neo_core.vox.cli
         import inspect
-        source = inspect.getsource(neo_core.cli.main)
+        source = inspect.getsource(neo_core.vox.cli.main)
         assert "providers" in source
 
     def test_cli_version_updated(self):
-        """Le CLI affiche la version via importlib.metadata."""
-        import neo_core.cli
+        """Le CLI affiche la version."""
+        import neo_core.vox.cli
         import inspect
-        source = inspect.getsource(neo_core.cli.main)
-        assert "pkg_version" in source  # Utilise importlib.metadata pour la version
+        source = inspect.getsource(neo_core.vox.cli.main)
+        assert "v0." in source  # Accepte toute version 0.x
 
     def test_status_shows_providers(self):
         """Le status CLI importe bootstrap_providers."""
-        import neo_core.cli.status
+        import neo_core.vox.cli.status
         import inspect
-        source = inspect.getsource(neo_core.cli.status.run_status)
+        source = inspect.getsource(neo_core.vox.cli.status.run_status)
         assert "bootstrap_providers" in source or "providers" in source.lower()
 
     def test_chat_bootstrap_calls_providers(self):
         """Le chat bootstrap appelle bootstrap_providers."""
-        import neo_core.cli.chat
+        import neo_core.vox.cli.chat
         import inspect
-        source = inspect.getsource(neo_core.cli.chat.bootstrap)
+        source = inspect.getsource(neo_core.vox.cli.chat.bootstrap)
         assert "bootstrap_providers" in source

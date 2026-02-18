@@ -14,10 +14,10 @@ from neo_core.config import NeoConfig, LLMConfig, MemoryConfig
 from neo_core.memory.store import MemoryStore
 from neo_core.memory.context import ContextEngine, ContextBlock
 from neo_core.memory.consolidator import MemoryConsolidator
-from neo_core.core.memory_agent import MemoryAgent
-from neo_core.core.brain import Brain
-from neo_core.core.vox import Vox
-from neo_core.main import bootstrap
+from neo_core.memory.agent import MemoryAgent
+from neo_core.brain.core import Brain
+from neo_core.vox.interface import Vox
+from neo_core.vox.interface import bootstrap
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────

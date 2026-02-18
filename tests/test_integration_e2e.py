@@ -46,9 +46,9 @@ def full_stack(config):
     Monte la stack complète : Memory → Brain → Vox.
     Pas de mock, vrais objets en mode mock LLM.
     """
-    from neo_core.core.memory_agent import MemoryAgent
-    from neo_core.core.brain import Brain
-    from neo_core.core.vox import Vox
+    from neo_core.memory.agent import MemoryAgent
+    from neo_core.brain.core import Brain
+    from neo_core.vox.interface import Vox
 
     memory = MemoryAgent(config=config)
     memory.initialize()
@@ -230,7 +230,7 @@ class TestVaultIntegrity:
 
     def test_store_retrieve_roundtrip(self, data_dir):
         """Store → Retrieve fonctionne avec de vrais secrets."""
-        from neo_core.security.vault import KeyVault
+        from neo_core.infra.security.vault import KeyVault
 
         vault = KeyVault(data_dir=data_dir)
         vault.initialize()
@@ -242,7 +242,7 @@ class TestVaultIntegrity:
 
     def test_vault_backup_created(self, data_dir):
         """Le vault crée un backup après initialisation."""
-        from neo_core.security.vault import KeyVault
+        from neo_core.infra.security.vault import KeyVault
 
         vault = KeyVault(data_dir=data_dir)
         vault.initialize()
@@ -253,7 +253,7 @@ class TestVaultIntegrity:
 
     def test_corrupted_db_recovery(self, data_dir):
         """Un vault corrompu est recréé proprement."""
-        from neo_core.security.vault import KeyVault
+        from neo_core.infra.security.vault import KeyVault
 
         # Créer un fichier DB corrompu
         db_path = data_dir / ".vault.db"
@@ -274,8 +274,8 @@ class TestAPIIntegration:
 
     @pytest.fixture
     def client(self, full_stack):
-        from neo_core.api.server import create_app, neo_core as nc
-        from neo_core.core.registry import CoreRegistry
+        from neo_core.vox.api.server import create_app, neo_core as nc
+        from neo_core.infra.registry import CoreRegistry
 
         # Reset and setup
         nc.reset()
@@ -307,7 +307,7 @@ class TestWorkerManagerThreadSafety:
     """Vérifie que le WorkerManager est thread-safe."""
 
     def test_concurrent_register_unregister(self):
-        from neo_core.core.brain import WorkerLifecycleManager
+        from neo_core.brain.core import WorkerLifecycleManager
 
         manager = WorkerLifecycleManager()
         errors = []

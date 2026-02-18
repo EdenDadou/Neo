@@ -15,7 +15,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from neo_core.core.resilience import (
+from neo_core.infra.resilience import (
     RetryConfig,
     compute_backoff_delay,
 )

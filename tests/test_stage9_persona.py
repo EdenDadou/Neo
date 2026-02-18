@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 # Imports
 # ──────────────────────────────────────────────
 
-from neo_core.core.persona import (
+from neo_core.memory.persona import (
     Commandment,
     CommandmentError,
     CommandmentViolation,
@@ -678,7 +678,7 @@ class TestMemoryAgentIntegration:
     def _create_memory_agent(self):
         """Crée un MemoryAgent en mode mock."""
         from neo_core.config import NeoConfig
-        from neo_core.core.memory_agent import MemoryAgent
+        from neo_core.memory.agent import MemoryAgent
 
         config = NeoConfig()
         config._force_mock = True
@@ -762,7 +762,7 @@ class TestHeartbeatPersonaIntegration:
     @pytest.mark.asyncio
     async def test_heartbeat_has_reflection_method(self):
         """HeartbeatManager a la méthode _perform_personality_reflection."""
-        from neo_core.core.heartbeat import HeartbeatManager, HeartbeatConfig
+        from neo_core.infra.heartbeat import HeartbeatManager, HeartbeatConfig
 
         hb = HeartbeatManager(
             brain=Mock(),
@@ -775,7 +775,7 @@ class TestHeartbeatPersonaIntegration:
     @pytest.mark.asyncio
     async def test_heartbeat_reflection_no_memory(self):
         """La réflexion ne plante pas sans memory."""
-        from neo_core.core.heartbeat import HeartbeatManager, HeartbeatConfig
+        from neo_core.infra.heartbeat import HeartbeatManager, HeartbeatConfig
 
         hb = HeartbeatManager(
             brain=Mock(),

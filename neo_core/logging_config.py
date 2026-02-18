@@ -37,19 +37,20 @@ FILE_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 # Niveaux par défaut par module
 MODULE_LEVELS = {
-    "neo_core.core.vox": logging.INFO,
-    "neo_core.core.brain": logging.INFO,
-    "neo_core.core.memory_agent": logging.INFO,
-    "neo_core.core.heartbeat": logging.INFO,
-    "neo_core.core.guardian": logging.INFO,
-    "neo_core.core.persona": logging.INFO,
-    "neo_core.core.resilience": logging.WARNING,
-    "neo_core.teams.worker": logging.INFO,
-    "neo_core.teams.factory": logging.INFO,
+    "neo_core.vox.interface": logging.INFO,
+    "neo_core.brain.core": logging.INFO,
+    "neo_core.brain.llm": logging.INFO,
+    "neo_core.brain.execution": logging.INFO,
+    "neo_core.memory.agent": logging.INFO,
+    "neo_core.memory.persona": logging.INFO,
     "neo_core.memory.store": logging.INFO,
     "neo_core.memory.learning": logging.INFO,
     "neo_core.memory.consolidator": logging.INFO,
-    "neo_core.providers": logging.INFO,
+    "neo_core.infra.heartbeat": logging.INFO,
+    "neo_core.infra.guardian": logging.INFO,
+    "neo_core.infra.resilience": logging.WARNING,
+    "neo_core.brain.teams.worker": logging.INFO,
+    "neo_core.brain.teams.factory": logging.INFO,
 }
 
 

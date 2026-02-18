@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from neo_core.core.self_patcher import (
+from neo_core.brain.self_patcher import (
     DEFAULT_DETECTION_THRESHOLD,
     PATCHABLE_ERROR_TYPES,
     PatchEvaluation,

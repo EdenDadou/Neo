@@ -25,8 +25,8 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from neo_core.tools.plugin_loader import PluginLoader, LoadedPlugin
-from neo_core.tools.base_tools import ToolRegistry, TOOL_SCHEMAS
+from neo_core.brain.tools.plugin_loader import PluginLoader, LoadedPlugin
+from neo_core.brain.tools.base_tools import ToolRegistry, TOOL_SCHEMAS
 
 # Sauvegarde des états originaux pour nettoyage après les tests
 _ORIGINAL_TOOL_SCHEMAS = dict(TOOL_SCHEMAS)

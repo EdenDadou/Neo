@@ -10,12 +10,12 @@ import pytest
 import asyncio
 
 from neo_core.config import NeoConfig, LLMConfig, MemoryConfig
-from neo_core.core.brain import Brain, BrainDecision
-from neo_core.core.memory_agent import MemoryAgent
-from neo_core.core.vox import Vox
-from neo_core.teams.worker import Worker, WorkerType, WorkerResult, WORKER_SYSTEM_PROMPTS
-from neo_core.teams.factory import WorkerFactory, TaskAnalysis
-from neo_core.tools.base_tools import (
+from neo_core.brain.core import Brain, BrainDecision
+from neo_core.memory.agent import MemoryAgent
+from neo_core.vox.interface import Vox
+from neo_core.brain.teams.worker import Worker, WorkerType, WorkerResult, WORKER_SYSTEM_PROMPTS
+from neo_core.brain.teams.factory import WorkerFactory, TaskAnalysis
+from neo_core.brain.tools.base_tools import (
     ToolRegistry,
     web_search_tool,
     file_read_tool,
@@ -600,7 +600,7 @@ class TestWorkerLifecycle:
 
     def test_worker_has_lifecycle_fields(self, config):
         """Un Worker a un ID, un state, et des timestamps."""
-        from neo_core.teams.worker import WorkerState
+        from neo_core.brain.teams.worker import WorkerState
         worker = Worker(
             config=config,
             worker_type=WorkerType.RESEARCHER,
@@ -615,7 +615,7 @@ class TestWorkerLifecycle:
     @pytest.mark.asyncio
     async def test_worker_state_transitions(self, config):
         """Le state passe CREATED → RUNNING → COMPLETED après execute."""
-        from neo_core.teams.worker import WorkerState
+        from neo_core.brain.teams.worker import WorkerState
         worker = Worker(
             config=config,
             worker_type=WorkerType.GENERIC,
@@ -632,7 +632,7 @@ class TestWorkerLifecycle:
     @pytest.mark.asyncio
     async def test_worker_cleanup_releases_resources(self, config):
         """cleanup() libère les outils, prompt, memory, et passe en CLOSED."""
-        from neo_core.teams.worker import WorkerState
+        from neo_core.brain.teams.worker import WorkerState
         worker = Worker(
             config=config,
             worker_type=WorkerType.RESEARCHER,
@@ -654,7 +654,7 @@ class TestWorkerLifecycle:
     @pytest.mark.asyncio
     async def test_worker_context_manager_guarantees_cleanup(self, config):
         """async with Worker garantit cleanup même sans appel explicite."""
-        from neo_core.teams.worker import WorkerState
+        from neo_core.brain.teams.worker import WorkerState
 
         worker = Worker(
             config=config,
@@ -673,7 +673,7 @@ class TestWorkerLifecycle:
     @pytest.mark.asyncio
     async def test_context_manager_cleanup_on_exception(self, config):
         """async with Worker garantit cleanup même si une exception survient."""
-        from neo_core.teams.worker import WorkerState
+        from neo_core.brain.teams.worker import WorkerState
 
         worker = Worker(
             config=config,
@@ -703,7 +703,7 @@ class TestWorkerLifecycle:
 
     def test_lifecycle_manager_register_unregister(self, config):
         """Le manager track les Workers actifs et l'historique."""
-        from neo_core.core.brain import WorkerLifecycleManager
+        from neo_core.brain.core import WorkerLifecycleManager
         manager = WorkerLifecycleManager()
 
         w1 = Worker(config=config, worker_type=WorkerType.RESEARCHER, task="task1")
@@ -727,7 +727,7 @@ class TestWorkerLifecycle:
 
     def test_lifecycle_manager_cleanup_all(self, config):
         """cleanup_all() force la destruction de tous les Workers actifs."""
-        from neo_core.core.brain import WorkerLifecycleManager
+        from neo_core.brain.core import WorkerLifecycleManager
         manager = WorkerLifecycleManager()
 
         for i in range(5):
@@ -743,7 +743,7 @@ class TestWorkerLifecycle:
 
     def test_lifecycle_manager_leak_detection(self, config):
         """Le manager détecte les fuites (Workers créés mais jamais nettoyés)."""
-        from neo_core.core.brain import WorkerLifecycleManager
+        from neo_core.brain.core import WorkerLifecycleManager
         manager = WorkerLifecycleManager()
 
         w = Worker(config=config, worker_type=WorkerType.GENERIC, task="leaky")

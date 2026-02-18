@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from neo_core.memory.learning import ErrorPattern
-from neo_core.tools.tool_generator import (
+from neo_core.brain.tools.tool_generator import (
     FORBIDDEN_IMPORTS,
     GeneratedToolMeta,
     ToolGenerator,

@@ -14,11 +14,11 @@ import pytest
 import asyncio
 
 from neo_core.config import NeoConfig, LLMConfig, MemoryConfig
-from neo_core.core.brain import Brain
-from neo_core.core.memory_agent import MemoryAgent
-from neo_core.core.heartbeat import HeartbeatManager, HeartbeatConfig, HeartbeatEvent
+from neo_core.brain.core import Brain
+from neo_core.memory.agent import MemoryAgent
+from neo_core.infra.heartbeat import HeartbeatManager, HeartbeatConfig, HeartbeatEvent
 from neo_core.memory.task_registry import TaskRegistry
-from neo_core.tools.base_tools import set_mock_mode
+from neo_core.brain.tools.base_tools import set_mock_mode
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────

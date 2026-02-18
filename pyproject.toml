@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neo-core"
-version = "0.9.6"
+version = "0.9.7"
 description = "Neo Core — Écosystème IA Multi-Agents Autonome"
 requires-python = ">=3.10"
 dependencies = [
@@ -39,7 +39,7 @@ dev = [
 ]
 
 [project.scripts]
-neo = "neo_core.cli:main"
+neo = "neo_core.vox.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["neo_core*"]

@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from neo_core.core.guardian import (
+from neo_core.infra.guardian import (
     EXIT_CODE_NORMAL,
     EXIT_CODE_RESTART,
     GracefulShutdown,
@@ -291,7 +291,7 @@ class TestGuardian:
     def test_find_neo_command(self, guardian):
         """La commande Neo est correcte."""
         cmd = guardian._find_neo_command()
-        assert cmd == [sys.executable, "-m", "neo_core.cli", "chat"]
+        assert cmd == [sys.executable, "-m", "neo_core.vox.cli", "chat"]
 
     def test_should_restart_within_limit(self, guardian):
         """Restart autorisé quand sous la limite."""
@@ -477,7 +477,7 @@ class TestIntegration:
 
     def test_chat_imports_guardian(self):
         """chat.py importe correctement les composants Guardian."""
-        from neo_core.cli.chat import GracefulShutdown, StateSnapshot, EXIT_CODE_RESTART
+        from neo_core.vox.cli.chat import GracefulShutdown, StateSnapshot, EXIT_CODE_RESTART
         assert GracefulShutdown is not None
         assert StateSnapshot is not None
         assert EXIT_CODE_RESTART == 42

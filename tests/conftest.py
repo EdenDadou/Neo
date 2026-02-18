@@ -34,7 +34,7 @@ def config(tmp_path):
 @pytest.fixture
 def memory_agent(config):
     """MemoryAgent initialisé avec stockage temporaire."""
-    from neo_core.core.memory_agent import MemoryAgent
+    from neo_core.memory.agent import MemoryAgent
     agent = MemoryAgent(config=config)
     agent.initialize()
     return agent
@@ -43,7 +43,7 @@ def memory_agent(config):
 @pytest.fixture
 def brain(config, memory_agent):
     """Brain connecté à la mémoire."""
-    from neo_core.core.brain import Brain
+    from neo_core.brain.core import Brain
     b = Brain(config=config)
     b.connect_memory(memory_agent)
     return b
@@ -52,7 +52,7 @@ def brain(config, memory_agent):
 @pytest.fixture
 def vox(config, brain, memory_agent):
     """Vox connecté à Brain et Memory."""
-    from neo_core.core.vox import Vox
+    from neo_core.vox.interface import Vox
     v = Vox(config=config)
     v.connect(brain=brain, memory=memory_agent)
     return v

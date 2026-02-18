@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from neo_core.api.schemas import (
+from neo_core.vox.api.schemas import (
     ChatRequest,
     ChatResponse,
     StatusResponse,
@@ -22,7 +22,7 @@ from neo_core.api.schemas import (
     HistoryTurn,
     ErrorResponse,
 )
-from neo_core.api.server import create_app, NeoCore, neo_core
+from neo_core.vox.api.server import create_app, NeoCore, neo_core
 
 
 # ─── Fixtures ────────────────────────────────────────
@@ -299,11 +299,13 @@ class TestWebSocket:
 
     def test_websocket_connect(self, client):
         """WebSocket se connecte."""
+        neo_core.config = None
         with client.websocket_connect("/ws/chat") as ws:
             assert ws is not None
 
     def test_websocket_send_receive(self, client):
         """WebSocket envoie et reçoit un message."""
+        neo_core.config = None
         with patch.object(neo_core.vox, "process_message", new_callable=AsyncMock, return_value="WS response"):
             with client.websocket_connect("/ws/chat") as ws:
                 ws.send_json({"message": "Hello WS"})
@@ -313,6 +315,7 @@ class TestWebSocket:
 
     def test_websocket_empty_message(self, client):
         """WebSocket rejette un message vide."""
+        neo_core.config = None
         with client.websocket_connect("/ws/chat") as ws:
             ws.send_json({"message": ""})
             data = ws.receive_json()
@@ -328,17 +331,17 @@ class TestMiddleware:
 
     def test_api_key_middleware_exists(self):
         """Le middleware APIKey existe."""
-        from neo_core.api.middleware import APIKeyMiddleware
+        from neo_core.vox.api.middleware import APIKeyMiddleware
         assert APIKeyMiddleware is not None
 
     def test_rate_limit_middleware_exists(self):
         """Le middleware RateLimit existe."""
-        from neo_core.api.middleware import RateLimitMiddleware
+        from neo_core.vox.api.middleware import RateLimitMiddleware
         assert RateLimitMiddleware is not None
 
     def test_api_key_rejects_invalid(self):
         """Avec API key configurée, une mauvaise clé est rejetée."""
-        from neo_core.api.middleware import APIKeyMiddleware
+        from neo_core.vox.api.middleware import APIKeyMiddleware
 
         app = create_app()
         app.add_middleware(APIKeyMiddleware, api_key="secret-key-123")
@@ -350,7 +353,7 @@ class TestMiddleware:
 
     def test_api_key_accepts_valid(self):
         """Avec API key configurée, la bonne clé passe."""
-        from neo_core.api.middleware import APIKeyMiddleware
+        from neo_core.vox.api.middleware import APIKeyMiddleware
 
         # Reset before creating new app
         neo_core.reset()
@@ -370,9 +373,9 @@ class TestCLIIntegration:
 
     def test_cli_has_api_command(self):
         """Le CLI a la commande 'api'."""
-        import neo_core.cli
+        import neo_core.vox.cli
         import inspect
-        source = inspect.getsource(neo_core.cli.main)
+        source = inspect.getsource(neo_core.vox.cli.main)
         assert "api" in source
 
     def test_create_app_returns_fastapi(self):

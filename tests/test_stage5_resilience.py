@@ -20,9 +20,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from neo_core.config import NeoConfig, LLMConfig, MemoryConfig, ResilienceConfig
-from neo_core.core.brain import Brain, BrainDecision
-from neo_core.core.memory_agent import MemoryAgent
-from neo_core.core.resilience import (
+from neo_core.brain.core import Brain, BrainDecision
+from neo_core.memory.agent import MemoryAgent
+from neo_core.infra.resilience import (
     RetryConfig,
     RetryableError,
     NonRetryableError,
@@ -33,9 +33,9 @@ from neo_core.core.resilience import (
     HealthMonitor,
     create_resilience_from_config,
 )
-from neo_core.teams.worker import Worker, WorkerType, WorkerResult, WORKER_SYSTEM_PROMPTS
-from neo_core.teams.factory import WorkerFactory, TaskAnalysis
-from neo_core.tools.base_tools import (
+from neo_core.brain.teams.worker import Worker, WorkerType, WorkerResult, WORKER_SYSTEM_PROMPTS
+from neo_core.brain.teams.factory import WorkerFactory, TaskAnalysis
+from neo_core.brain.tools.base_tools import (
     ToolRegistry,
     TOOL_SCHEMAS,
     set_mock_mode,

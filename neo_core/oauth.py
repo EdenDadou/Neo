@@ -53,7 +53,7 @@ CREDENTIALS_FILE = _DATA_DIR / ".oauth_credentials.json"
 def _get_vault():
     """Retourne une instance du KeyVault (best-effort)."""
     try:
-        from neo_core.security.vault import KeyVault
+        from neo_core.infra.security.vault import KeyVault
         vault = KeyVault(data_dir=_DATA_DIR)
         vault.initialize()
         return vault

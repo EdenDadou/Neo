@@ -223,22 +223,22 @@ class TestExceptionHandling:
 
     def test_vox_has_logger(self):
         """Vox utilise le module logging."""
-        from neo_core.core import vox
+        from neo_core.vox import interface as vox
         assert hasattr(vox, 'logger')
 
     def test_brain_has_logger(self):
         """Brain utilise le module logging."""
-        from neo_core.core import brain
+        from neo_core.brain import core as brain
         assert hasattr(brain, 'logger')
 
     def test_memory_agent_has_logger(self):
         """MemoryAgent utilise le module logging."""
-        from neo_core.core import memory_agent
+        from neo_core.memory import agent as memory_agent
         assert hasattr(memory_agent, 'logger')
 
     def test_worker_has_logger(self):
         """Worker utilise le module logging."""
-        from neo_core.teams import worker
+        from neo_core.brain.teams import worker
         assert hasattr(worker, 'logger')
 
     def test_store_has_logger(self):
@@ -262,9 +262,9 @@ class TestVoxValidation:
     def _make_vox(self):
         """Crée un Vox minimal en mode mock."""
         from neo_core.config import NeoConfig
-        from neo_core.core.vox import Vox
-        from neo_core.core.brain import Brain
-        from neo_core.core.memory_agent import MemoryAgent
+        from neo_core.vox.interface import Vox
+        from neo_core.brain.core import Brain
+        from neo_core.memory.agent import MemoryAgent
 
         config = NeoConfig()
         memory = MemoryAgent(config=config)
@@ -309,8 +309,8 @@ class TestBrainValidation:
     def _make_brain(self):
         """Crée un Brain minimal en mode mock."""
         from neo_core.config import NeoConfig
-        from neo_core.core.brain import Brain
-        from neo_core.core.memory_agent import MemoryAgent
+        from neo_core.brain.core import Brain
+        from neo_core.memory.agent import MemoryAgent
 
         config = NeoConfig()
         memory = MemoryAgent(config=config)

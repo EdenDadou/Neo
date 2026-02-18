@@ -226,9 +226,9 @@ class TestVoxIntegration:
     def _make_vox(self):
         """Crée un Vox en mode mock."""
         from neo_core.config import NeoConfig
-        from neo_core.core.vox import Vox
-        from neo_core.core.brain import Brain
-        from neo_core.core.memory_agent import MemoryAgent
+        from neo_core.vox.interface import Vox
+        from neo_core.brain.core import Brain
+        from neo_core.memory.agent import MemoryAgent
 
         config = NeoConfig()
         memory = MemoryAgent(config=config)
@@ -308,27 +308,27 @@ class TestGuardianIntegration:
 
     def test_state_snapshot_has_session_id(self):
         """StateSnapshot a un champ session_id."""
-        from neo_core.core.guardian import StateSnapshot
+        from neo_core.infra.guardian import StateSnapshot
         snapshot = StateSnapshot(session_id="test-123")
         assert snapshot.session_id == "test-123"
 
     def test_state_snapshot_to_dict_includes_session(self):
         """to_dict inclut session_id."""
-        from neo_core.core.guardian import StateSnapshot
+        from neo_core.infra.guardian import StateSnapshot
         snapshot = StateSnapshot(session_id="sess-abc")
         d = snapshot.to_dict()
         assert d["session_id"] == "sess-abc"
 
     def test_state_snapshot_from_dict_restores_session(self):
         """from_dict restaure session_id."""
-        from neo_core.core.guardian import StateSnapshot
+        from neo_core.infra.guardian import StateSnapshot
         data = {"session_id": "sess-xyz", "shutdown_reason": "crash"}
         snapshot = StateSnapshot.from_dict(data)
         assert snapshot.session_id == "sess-xyz"
 
     def test_state_snapshot_save_load_session(self, tmp_path):
         """Save/load round-trip avec session_id."""
-        from neo_core.core.guardian import StateSnapshot
+        from neo_core.infra.guardian import StateSnapshot
         state_dir = tmp_path / "guardian"
         state_dir.mkdir()
 
@@ -349,20 +349,20 @@ class TestCLIIntegration:
 
     def test_chat_imports_history_functions(self):
         """chat.py a les fonctions d'historique."""
-        from neo_core.cli import chat
+        from neo_core.vox.cli import chat
         assert hasattr(chat, 'print_history')
         assert hasattr(chat, 'print_sessions')
 
     def test_cli_has_history_command(self):
         """Le CLI supporte 'neo history'."""
-        import neo_core.cli
+        import neo_core.vox.cli
         import inspect
-        source = inspect.getsource(neo_core.cli.main)
+        source = inspect.getsource(neo_core.vox.cli.main)
         assert "history" in source
 
     def test_help_includes_new_commands(self):
         """print_help() mentionne /history et /sessions."""
-        from neo_core.cli.chat import print_help
+        from neo_core.vox.cli.chat import print_help
         import io
         from unittest.mock import patch
         from rich.console import Console
@@ -371,7 +371,7 @@ class TestCLIIntegration:
         output = io.StringIO()
         test_console = Console(file=output)
 
-        with patch('neo_core.cli.chat.console', test_console):
+        with patch('neo_core.vox.cli.chat.console', test_console):
             print_help()
 
         text = output.getvalue()

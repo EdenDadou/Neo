@@ -13,13 +13,13 @@ import pytest
 import asyncio
 
 from neo_core.config import NeoConfig, LLMConfig, MemoryConfig
-from neo_core.core.brain import Brain, BrainDecision
-from neo_core.core.memory_agent import MemoryAgent
-from neo_core.core.vox import Vox
+from neo_core.brain.core import Brain, BrainDecision
+from neo_core.memory.agent import MemoryAgent
+from neo_core.vox.interface import Vox
 from neo_core.memory.task_registry import TaskRegistry, Task, Epic
 from neo_core.memory.learning import LearningEngine, LearnedSkill, ErrorPattern
 from neo_core.memory.store import MemoryStore
-from neo_core.tools.base_tools import set_mock_mode
+from neo_core.brain.tools.base_tools import set_mock_mode
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────

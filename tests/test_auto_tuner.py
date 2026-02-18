@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from neo_core.core.auto_tuner import AutoTuner, TuningMetrics
+from neo_core.brain.auto_tuner import AutoTuner, TuningMetrics
 from neo_core.memory.learning import LearningEngine, WorkerPerformance, ErrorPattern
 
 

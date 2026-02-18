@@ -17,9 +17,9 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from starlette.responses import JSONResponse
 
-from neo_core.security.vault import KeyVault, _get_machine_id
-from neo_core.security.sanitizer import Sanitizer, SanitizeResult
-from neo_core.api.middleware import (
+from neo_core.infra.security.vault import KeyVault, _get_machine_id
+from neo_core.infra.security.sanitizer import Sanitizer, SanitizeResult
+from neo_core.vox.api.middleware import (
     APIKeyMiddleware,
     RateLimitMiddleware,
     SanitizerMiddleware,
@@ -321,8 +321,8 @@ class TestSecurityInfra:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
     def test_security_package_exists(self):
-        """Le package neo_core/security/ existe."""
-        pkg = self.PROJECT_ROOT / "neo_core" / "security"
+        """Le package neo_core/infra/security/ existe."""
+        pkg = self.PROJECT_ROOT / "neo_core" / "infra" / "security"
         assert pkg.is_dir()
         assert (pkg / "__init__.py").exists()
         assert (pkg / "vault.py").exists()

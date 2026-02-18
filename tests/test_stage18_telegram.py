@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from neo_core.integrations.telegram import (
+from neo_core.vox.integrations.telegram import (
     TelegramBot,
     TelegramConfig,
     load_telegram_config,
@@ -318,12 +318,12 @@ class TestTelegramInfra:
 
     def test_module_import(self):
         """Le module integrations s'importe."""
-        import neo_core.integrations
-        assert hasattr(neo_core.integrations, "__doc__")
+        import neo_core.vox.integrations
+        assert hasattr(neo_core.vox.integrations, "__doc__")
 
     def test_telegram_module_import(self):
         """Le module telegram s'importe."""
-        from neo_core.integrations import telegram
+        from neo_core.vox.integrations import telegram
         assert hasattr(telegram, "TelegramBot")
         assert hasattr(telegram, "TelegramConfig")
         assert hasattr(telegram, "load_telegram_config")
@@ -334,7 +334,7 @@ class TestTelegramInfra:
         from pathlib import Path
         pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
         content = pyproject.read_text()
-        assert 'version = "0.9.6"' in content
+        assert 'version = "0.9.7"' in content
 
     def test_telegram_optional_dep(self):
         """python-telegram-bot est dans les extras."""

@@ -11,7 +11,7 @@ import pytest
 import asyncio
 
 from neo_core.config import NeoConfig, LLMConfig, AgentModelConfig, get_agent_model
-from neo_core.providers.base import (
+from neo_core.brain.providers.base import (
     LLMProvider,
     ProviderType,
     ModelInfo,
@@ -19,8 +19,8 @@ from neo_core.providers.base import (
     TestResult,
     ChatResponse,
 )
-from neo_core.providers.hardware import HardwareDetector, HardwareProfile, GPUInfo
-from neo_core.providers.registry import (
+from neo_core.brain.providers.hardware import HardwareDetector, HardwareProfile, GPUInfo
+from neo_core.brain.providers.registry import (
     ModelRegistry,
     AGENT_REQUIREMENTS,
     PROVIDER_PRIORITY,
@@ -198,7 +198,7 @@ class TestProviders:
 
     def test_anthropic_provider_not_configured_without_key(self):
         """AnthropicProvider n'est pas configuré sans clé."""
-        from neo_core.providers.anthropic_provider import AnthropicProvider
+        from neo_core.brain.providers.anthropic_provider import AnthropicProvider
         provider = AnthropicProvider(api_key="")
         assert provider.name == "anthropic"
         assert provider.provider_type == ProviderType.CLOUD_PAID
@@ -206,7 +206,7 @@ class TestProviders:
 
     def test_anthropic_provider_configured_with_key(self):
         """AnthropicProvider est configuré avec une clé."""
-        from neo_core.providers.anthropic_provider import AnthropicProvider
+        from neo_core.brain.providers.anthropic_provider import AnthropicProvider
         provider = AnthropicProvider(api_key="sk-ant-test-key")
         assert provider.is_configured() is True
         models = provider.list_models()
@@ -217,7 +217,7 @@ class TestProviders:
 
     def test_groq_provider_lists_models(self):
         """GroqProvider liste ses modèles."""
-        from neo_core.providers.groq_provider import GroqProvider
+        from neo_core.brain.providers.groq_provider import GroqProvider
         provider = GroqProvider(api_key="gsk_test")
         assert provider.name == "groq"
         assert provider.provider_type == ProviderType.CLOUD_FREE
@@ -228,7 +228,7 @@ class TestProviders:
 
     def test_gemini_provider_lists_models(self):
         """GeminiProvider liste ses modèles."""
-        from neo_core.providers.gemini_provider import GeminiProvider
+        from neo_core.brain.providers.gemini_provider import GeminiProvider
         provider = GeminiProvider(api_key="AIza_test")
         assert provider.name == "gemini"
         assert provider.provider_type == ProviderType.CLOUD_FREE
@@ -239,7 +239,7 @@ class TestProviders:
 
     def test_ollama_provider_not_configured_without_server(self):
         """OllamaProvider n'est pas configuré si le serveur ne répond pas."""
-        from neo_core.providers.ollama_provider import OllamaProvider
+        from neo_core.brain.providers.ollama_provider import OllamaProvider
         provider = OllamaProvider(base_url="http://localhost:99999")
         assert provider.name == "ollama"
         assert provider.provider_type == ProviderType.LOCAL

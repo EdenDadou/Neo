@@ -182,7 +182,7 @@ def get_agent_model(agent_name: str) -> AgentModelConfig:
     tuning = _load_auto_tuning()
 
     try:
-        from neo_core.providers.registry import get_model_registry
+        from neo_core.brain.providers.registry import get_model_registry
         registry = get_model_registry()
         stats = registry.get_stats()
 

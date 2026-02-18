@@ -239,16 +239,17 @@ else
     log_info "Utilisateur '$NEO_USER' créé"
 fi
 
-# Donner les droits sudo RESTREINTS à Neo (sécurité : commandes spécifiques uniquement)
+# Donner les droits sudo limités à Neo (commandes spécifiques uniquement)
 cat > /etc/sudoers.d/neo << 'SUDOERS'
-# Neo Core — droits sudo restreints (pas de NOPASSWD: ALL)
-neo ALL=(ALL) NOPASSWD: /bin/systemctl start neo-guardian, \
-                        /bin/systemctl stop neo-guardian, \
-                        /bin/systemctl restart neo-guardian, \
-                        /bin/systemctl status neo-guardian, \
-                        /bin/systemctl daemon-reload, \
-                        /usr/bin/journalctl -u neo-guardian *, \
-                        /usr/bin/pip install *
+# Neo Core — permissions sudo restreintes
+# Seules les commandes nécessaires au fonctionnement sont autorisées
+neo ALL=(ALL) NOPASSWD: /usr/bin/systemctl start neo-guardian
+neo ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop neo-guardian
+neo ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart neo-guardian
+neo ALL=(ALL) NOPASSWD: /usr/bin/systemctl status neo-guardian
+neo ALL=(ALL) NOPASSWD: /usr/bin/journalctl -u neo-guardian *
+neo ALL=(ALL) NOPASSWD: /opt/neo-core/.venv/bin/pip install *
+neo ALL=(ALL) NOPASSWD: /opt/neo-core/.venv/bin/pip uninstall *
 SUDOERS
 chmod 440 /etc/sudoers.d/neo
 log_info "Droits sudo restreints accordés à '$NEO_USER' (commandes spécifiques)"
@@ -292,7 +293,8 @@ if [[ -d "$INSTALL_DIR" ]]; then
     fi
     if [[ -f "${INSTALL_DIR}/.env" ]]; then
         cp "${INSTALL_DIR}/.env" /tmp/neo-env-backup 2>/dev/null || true
-        log_info "Configuration .env sauvegardée"
+        chmod 600 /tmp/neo-env-backup 2>/dev/null || true
+        log_info "Configuration .env sauvegardée (permissions restreintes)"
     fi
     # Arrêter le service avant suppression
     systemctl stop neo-guardian 2>/dev/null || true
@@ -314,8 +316,10 @@ if [[ -d /tmp/neo-data-backup ]]; then
 fi
 if [[ -f /tmp/neo-env-backup ]]; then
     cp /tmp/neo-env-backup "${INSTALL_DIR}/.env" 2>/dev/null || true
-    rm -f /tmp/neo-env-backup 2>/dev/null || true
-    log_info "Configuration .env restaurée"
+    chmod 600 "${INSTALL_DIR}/.env" 2>/dev/null || true
+    # Suppression sécurisée du backup (évite de laisser des secrets dans /tmp)
+    shred -u /tmp/neo-env-backup 2>/dev/null || rm -f /tmp/neo-env-backup 2>/dev/null || true
+    log_info "Configuration .env restaurée et backup supprimé"
 fi
 
 # Nettoyer le log précédent s'il est volumineux (> 10MB)
@@ -434,23 +438,27 @@ mkdir -p "${INSTALL_DIR}/data/patches"
 mkdir -p "${INSTALL_DIR}/data/tool_metadata"
 mkdir -p "${INSTALL_DIR}/data/system_docs"
 
-# Donner la propriété à neo:neo
+# Donner la propriété à l'utilisateur neo
 chown -R ${NEO_USER}:${NEO_USER} "$INSTALL_DIR"
 
-# Ajouter ubuntu au groupe neo pour qu'il ait les mêmes droits
+# Le répertoire principal doit être lisible/traversable par tous
+# pour que 'ubuntu' puisse cd dans /opt/neo-core et lancer le wrapper
+chmod 755 "$INSTALL_DIR"
+
+# data/ est privé à neo (contient .env, mémoire, etc.)
+chmod 700 "${INSTALL_DIR}/data"
+
+# Le .venv doit être exécutable par neo
+chmod 755 "${INSTALL_DIR}/.venv" 2>/dev/null || true
+
+# Ajouter ubuntu au groupe neo pour accès lecture
 REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 if [[ "$REAL_USER" != "root" ]] && [[ "$REAL_USER" != "$NEO_USER" ]]; then
     usermod -aG ${NEO_USER} ${REAL_USER} 2>/dev/null || true
     log_info "Utilisateur '${REAL_USER}' ajouté au groupe '${NEO_USER}'"
 fi
 
-# Permissions groupe = même que propriétaire (neo et ubuntu ont les mêmes droits)
-chmod -R g=u "$INSTALL_DIR"
-
-# Tous les nouveaux fichiers héritent du groupe neo (setgid)
-find "$INSTALL_DIR" -type d -exec chmod g+s {} \;
-
-log_info "Permissions configurées (propriétaire: $NEO_USER, groupe partagé avec ${REAL_USER})"
+log_info "Permissions configurées (propriétaire: $NEO_USER, accès: 755)"
 
 # ═══════════════════════════════════════════════════════════
 #  Étape 6 : Service systemd

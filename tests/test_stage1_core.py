@@ -9,17 +9,20 @@ import pytest
 import asyncio
 
 from neo_core.config import NeoConfig, LLMConfig, MemoryConfig
-from neo_core.core.vox import Vox, AgentStatus
-from neo_core.core.brain import Brain, BrainDecision
-from neo_core.core.memory_agent import MemoryAgent
-from neo_core.main import bootstrap
+from neo_core.vox.interface import Vox, AgentStatus
+from neo_core.brain.core import Brain, BrainDecision
+from neo_core.memory.agent import MemoryAgent
+from neo_core.vox.interface import bootstrap
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────
 
 @pytest.fixture
-def config(tmp_path):
+def config(tmp_path, monkeypatch):
     """Config sans clé API → mode mock, avec stockage temporaire."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     return NeoConfig(
         llm=LLMConfig(api_key=None),
         memory=MemoryConfig(storage_path=tmp_path / "test_memory"),
