@@ -58,6 +58,50 @@ def print_usage():
 """)
 
 
+def _restart_daemon_if_running():
+    """Redémarre le daemon/service si actif pour recharger la config du vault."""
+    import subprocess
+    try:
+        # Vérifier si le service systemd est actif
+        svc = subprocess.run(
+            ["systemctl", "is-active", "neo-guardian"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if svc.stdout.strip() == "active":
+            print(f"\n  {DIM}⧗ Redémarrage du service Neo pour appliquer la configuration...{RESET}")
+            subprocess.run(
+                ["sudo", "systemctl", "restart", "neo-guardian"],
+                capture_output=True, timeout=30,
+            )
+            import time
+            time.sleep(2)
+            svc2 = subprocess.run(
+                ["systemctl", "is-active", "neo-guardian"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if svc2.stdout.strip() == "active":
+                print(f"  {GREEN}✓{RESET} Service Neo redémarré — nouvelle config active")
+            else:
+                print(f"  {RED}✗{RESET} Le service n'a pas redémarré")
+                print(f"  {DIM}  Vérifiez : sudo journalctl -u neo-guardian -n 20{RESET}")
+            return
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # systemctl non disponible (dev local) ou timeout
+
+    # Fallback : daemon PID (si pas de systemd)
+    try:
+        from neo_core.infra.daemon import is_running, restart as daemon_restart
+        if is_running():
+            print(f"\n  {DIM}⧗ Redémarrage du daemon Neo...{RESET}")
+            result = daemon_restart()
+            if result["success"]:
+                print(f"  {GREEN}✓{RESET} Daemon redémarré — nouvelle config active")
+            else:
+                print(f"  {RED}✗{RESET} {result['message']}")
+    except Exception:
+        pass  # Pas grave si pas de daemon
+
+
 def main():
     """Point d'entrée CLI — commande `neo`."""
     if len(sys.argv) < 2:
@@ -69,6 +113,8 @@ def main():
     if command == "setup":
         from neo_core.vox.cli.setup import run_setup
         run_setup()
+        # Redémarrer le daemon/service si actif pour recharger la config du vault
+        _restart_daemon_if_running()
 
     elif command == "chat":
         from neo_core.vox.cli.chat import run_chat
