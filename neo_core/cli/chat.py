@@ -13,6 +13,7 @@ import sys
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from neo_core.config import NeoConfig
@@ -148,26 +149,60 @@ def print_tasks(vox):
 
 
 def print_epics(vox):
-    """Affiche le registre des epics."""
+    """Affiche le registre des epics dans un tableau Rich."""
     if not vox.memory or not vox.memory.is_initialized:
         console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
         return
 
-    report = vox.memory.get_tasks_report()
+    registry = vox.memory.task_registry
+    if not registry:
+        console.print("[yellow]  ⚠ TaskRegistry non disponible[/yellow]")
+        return
 
-    lines = [f"[bold]Registre des Epics[/bold]\n"]
+    epics = registry.get_all_epics(limit=15)
+    active_epics = [e for e in epics if e.status in ("pending", "in_progress")]
 
-    if report["epics"]:
-        for e_str in report["epics"][:10]:
-            lines.append(f"  {e_str}")
-    else:
-        lines.append("  [dim]Aucun epic enregistré.[/dim]")
+    if not active_epics:
+        console.print(Panel(
+            "[dim]Aucun epic actif.[/dim]",
+            title="[bold cyan]🎯 Epics Actifs[/bold cyan]",
+            border_style="cyan",
+        ))
+        return
 
-    console.print(Panel(
-        "\n".join(lines),
-        title="[bold cyan]Epic Registry[/bold cyan]",
+    status_icons = {
+        "pending": "⏳",
+        "in_progress": "🔄",
+        "done": "✅",
+        "failed": "❌",
+    }
+
+    table = Table(
+        title="🎯 Epics Actifs",
+        title_style="bold cyan",
         border_style="cyan",
-    ))
+        show_header=True,
+        header_style="bold white",
+        padding=(0, 1),
+    )
+    table.add_column("Status", justify="center", width=3)
+    table.add_column("ID", style="dim", width=10)
+    table.add_column("Description", min_width=30)
+    table.add_column("Progrès", justify="center", width=12)
+    table.add_column("Stratégie", style="italic dim", max_width=25)
+
+    for epic in active_epics:
+        icon = status_icons.get(epic.status, "?")
+        epic_tasks = registry.get_epic_tasks(epic.id)
+        done = sum(1 for t in epic_tasks if t.status == "done")
+        total = len(epic_tasks)
+        pct = f"{done * 100 // total}%" if total > 0 else "—"
+        progress = f"[green]{done}[/green]/{total} ({pct})"
+        strategy = (epic.strategy[:22] + "…") if len(epic.strategy) > 25 else (epic.strategy or "—")
+
+        table.add_row(icon, epic.id[:8], epic.description[:60], progress, strategy)
+
+    console.print(table)
 
 
 def print_heartbeat(heartbeat_manager):
@@ -688,9 +723,22 @@ async def conversation_loop(vox):
         # ── Afficher les résultats Brain en attente ──
         _drain_brain_results(brain_results)
 
-        # Process via Vox → Brain → Vox (mode asynchrone)
+        # ── Callback ack : Vox envoie un accusé de réception pendant que Brain réfléchit ──
+        ack_displayed = False
+
+        def on_thinking(ack_text: str):
+            nonlocal ack_displayed
+            if not ack_displayed:
+                console.print(f"\n  [dim cyan]Vox >[/dim cyan] [dim]{ack_text}[/dim]")
+                ack_displayed = True
+
+        vox.set_thinking_callback(on_thinking)
+
+        # Process via Vox → Brain → Vox
         try:
-            response = await vox.process_message(user_input)
+            with console.status("[bold cyan]  Brain analyse...[/bold cyan]"):
+                response = await vox.process_message(user_input)
+
             console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response}\n")
         except Exception as e:
             console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")

@@ -87,14 +87,14 @@ class TestCommandment:
         assert cmd2.english == cmd.english
 
     def test_core_commandments_count(self):
-        """Vérifie qu'il y a exactement 3 commandements core."""
-        assert len(CORE_COMMANDMENTS) == 3
+        """Vérifie qu'il y a exactement 5 commandements core."""
+        assert len(CORE_COMMANDMENTS) == 5
 
     def test_core_commandments_valid(self):
-        """Les 3 commandements core sont valides."""
+        """Les 5 commandements core sont valides."""
         for c_data in CORE_COMMANDMENTS:
             cmd = Commandment(**c_data)
-            assert cmd.priority == 1
+            assert cmd.priority in (0, 1)
             assert len(cmd.french) >= 5
             assert len(cmd.english) >= 5
 
@@ -203,10 +203,10 @@ class TestNeoPersona:
     """Teste l'agrégateur de personnalité."""
 
     def test_persona_init_commandments(self):
-        """La persona crée les 3 commandements à l'init."""
+        """La persona crée les 5 commandements à l'init."""
         persona = NeoPersona()
-        assert len(persona.commandments) == 3
-        assert all(c.priority == 1 for c in persona.commandments)
+        assert len(persona.commandments) == 5
+        assert all(c.priority in (0, 1) for c in persona.commandments)
 
     def test_persona_init_traits(self):
         """La persona crée les traits par défaut."""
@@ -217,12 +217,14 @@ class TestNeoPersona:
         assert "curiosity" in persona.traits
 
     def test_persona_commandment_texts(self):
-        """Vérifie les textes des 3 commandements."""
+        """Vérifie les textes des 5 commandements."""
         persona = NeoPersona()
         texts = [c.french for c in persona.commandments]
+        assert "Neo peut tout faire" in texts
         assert "Neo ne s'éteint jamais" in texts
         assert "Neo n'oublie jamais" in texts
         assert "Neo apprend tous les jours" in texts
+        assert "Neo ne ment jamais" in texts
 
     def test_persona_validate_shutdown_rejected(self):
         """L'action 'shutdown' viole le commandement 1."""
@@ -279,7 +281,7 @@ class TestNeoPersona:
         assert "traits" in data
 
         persona2 = NeoPersona.from_dict(data)
-        assert len(persona2.commandments) == 3
+        assert len(persona2.commandments) == 5
         assert "humor_level" in persona2.traits
 
 
@@ -421,7 +423,7 @@ class TestPersonaEngine:
         engine.initialize()
 
         assert engine.is_initialized
-        assert len(engine.persona.commandments) == 3
+        assert len(engine.persona.commandments) == 5
         assert len(engine.persona.traits) == len(DEFAULT_TRAITS)
 
     def test_engine_update_trait(self):
@@ -572,7 +574,7 @@ class TestPersonaEngine:
         engine.initialize()
 
         assert engine.is_initialized
-        assert len(engine.persona.commandments) == 3
+        assert len(engine.persona.commandments) == 5
 
     def test_engine_to_dict(self):
         """Sérialisation complète de l'engine."""
@@ -700,7 +702,7 @@ class TestMemoryAgentIntegration:
         assert persona is not None
         assert "commandments" in persona
         assert "traits" in persona
-        assert len(persona["commandments"]) == 3
+        assert len(persona["commandments"]) == 5
 
     def test_get_user_profile(self):
         """get_user_profile retourne un dict valide."""

@@ -381,13 +381,22 @@ class TelegramBot:
                         epics = registry.get_all_epics(limit=10)
                         active_epics = [e for e in epics if e.status in ("pending", "in_progress")]
                         if active_epics:
+                            status_icons = {"pending": "⏳", "in_progress": "🔄"}
                             lines = ["🎯 *Epics actifs :*\n"]
                             for epic in active_epics:
+                                icon = status_icons.get(epic.status, "📦")
                                 epic_tasks = registry.get_epic_tasks(epic.id)
                                 done = sum(1 for t in epic_tasks if t.status == "done")
                                 total = len(epic_tasks)
-                                lines.append(f"📦 {epic.description[:60]} [{done}/{total}]")
-                            await message.reply_text("\n".join(lines), parse_mode="Markdown")
+                                pct = f"{done * 100 // total}%" if total > 0 else "—"
+                                bar_filled = done * 5 // total if total > 0 else 0
+                                bar = "█" * bar_filled + "░" * (5 - bar_filled)
+                                lines.append(
+                                    f"{icon} *{epic.description[:50]}*\n"
+                                    f"   `[{bar}]` {done}/{total} ({pct})\n"
+                                    f"   ID: `{epic.id[:8]}` | {epic.strategy[:30] if epic.strategy else '—'}"
+                                )
+                            await message.reply_text("\n\n".join(lines), parse_mode="Markdown")
                         else:
                             await message.reply_text("🎯 Aucun epic actif.")
                     else:

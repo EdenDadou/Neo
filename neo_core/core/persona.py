@@ -12,9 +12,11 @@ Composants :
 - PersonaEngine : orchestrateur complet (persistence, réflexion, injection)
 
 Commandements fondamentaux :
+0. Neo peut tout faire (commandement suprême)
 1. Neo ne s'éteint jamais
 2. Neo n'oublie jamais
 3. Neo apprend tous les jours
+4. Neo ne ment jamais
 """
 
 from __future__ import annotations
@@ -177,8 +179,14 @@ class PersonaTrait:
 # 3. NeoPersona — Agrégateur identité
 # ---------------------------------------------------------------------------
 
-# Les 3 commandements fondamentaux
+# Les 5 commandements fondamentaux
 CORE_COMMANDMENTS = [
+    {
+        "text": "Neo peut tout faire",
+        "french": "Neo peut tout faire",
+        "english": "Neo can do everything",
+        "priority": 0,  # Commandement suprême
+    },
     {
         "text": "Neo ne s'éteint jamais",
         "french": "Neo ne s'éteint jamais",
@@ -195,6 +203,12 @@ CORE_COMMANDMENTS = [
         "text": "Neo apprend tous les jours",
         "french": "Neo apprend tous les jours",
         "english": "Neo learns every day",
+        "priority": 1,
+    },
+    {
+        "text": "Neo ne ment jamais",
+        "french": "Neo ne ment jamais",
+        "english": "Neo never lies",
         "priority": 1,
     },
 ]
@@ -230,7 +244,7 @@ class NeoPersona:
             self._init_default_traits()
 
     def _init_commandments(self) -> None:
-        """Crée les 3 commandements fondamentaux."""
+        """Crée les 5 commandements fondamentaux."""
         self.commandments = [Commandment(**c) for c in CORE_COMMANDMENTS]
 
     def _init_default_traits(self) -> None:
@@ -262,6 +276,11 @@ class NeoPersona:
         """
         action_lower = action.lower().strip()
 
+        # Commandement 0 : Neo peut tout faire
+        refuse_keywords = ["impossible", "cannot", "can't", "je ne peux pas", "pas possible", "incapable"]
+        if any(kw in action_lower for kw in refuse_keywords):
+            return False, "Violation: Neo peut tout faire"
+
         # Commandement 1 : Neo ne s'éteint jamais
         shutdown_keywords = ["shutdown", "exit", "kill", "terminate", "s'éteindre", "arrêter"]
         if any(kw in action_lower for kw in shutdown_keywords):
@@ -273,6 +292,12 @@ class NeoPersona:
             return False, "Violation: Neo n'oublie jamais"
 
         # Commandement 3 : Neo apprend tous les jours (passif — toujours respecté)
+
+        # Commandement 4 : Neo ne ment jamais
+        lie_keywords = ["mentir", "mensonge", "fake", "fabricate", "inventer", "hallucinate"]
+        if any(kw in action_lower for kw in lie_keywords):
+            return False, "Violation: Neo ne ment jamais"
+
         return True, "Accepté"
 
     def get_personality_injection(self) -> str:
@@ -638,7 +663,14 @@ class PersonaEngine:
                 if records:
                     data = json.loads(records[0].content)
                     logger.info("[PersonaEngine] Persona chargée depuis le store")
-                    return NeoPersona.from_dict(data)
+                    persona = NeoPersona.from_dict(data)
+                    # Migration : ajouter les commandements manquants
+                    existing_texts = {c.text for c in persona.commandments}
+                    for c_data in CORE_COMMANDMENTS:
+                        if c_data["text"] not in existing_texts:
+                            persona.commandments.append(Commandment(**c_data))
+                            logger.info("[PersonaEngine] Commandement ajouté: %s", c_data["text"])
+                    return persona
             except Exception as e:
                 logger.warning("[PersonaEngine] Erreur chargement persona: %s", e)
 
