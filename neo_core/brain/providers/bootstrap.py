@@ -26,8 +26,8 @@ from neo_core.brain.providers.registry import (
 
 logger = logging.getLogger(__name__)
 
-# Chemin config pour persister les résultats de tests
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# Chemin config : neo_core/brain/providers/bootstrap.py → 4 niveaux
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _CONFIG_FILE = _PROJECT_ROOT / "data" / "neo_config.json"
 
 

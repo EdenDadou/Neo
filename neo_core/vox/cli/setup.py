@@ -25,8 +25,8 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 RESET = "\033[0m"
 
-# Racine du projet (parent de neo_core/)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# Racine du projet : neo_core/vox/cli/setup.py → 4 niveaux pour atteindre /opt/neo-core/
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 CONFIG_DIR = PROJECT_ROOT / "data"
 CONFIG_FILE = CONFIG_DIR / "neo_config.json"
 ENV_FILE = PROJECT_ROOT / ".env"

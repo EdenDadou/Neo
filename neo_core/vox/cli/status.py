@@ -17,8 +17,8 @@ from neo_core.config import NeoConfig
 
 console = Console()
 
-# Racine du projet
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# Racine du projet : neo_core/vox/cli/status.py → 4 niveaux pour atteindre /opt/neo-core/
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 CONFIG_FILE = PROJECT_ROOT / "data" / "neo_config.json"
 ENV_FILE = PROJECT_ROOT / ".env"
 
