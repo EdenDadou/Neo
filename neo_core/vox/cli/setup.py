@@ -671,14 +671,34 @@ def _test_providers(provider_keys: dict) -> dict:
 
 
 def _configure_telegram():
-    """Configure le bot Telegram (optionnel)."""
-    print(f"  {DIM}Connectez Neo à Telegram pour discuter via votre téléphone.{RESET}")
-    print(f"  {DIM}Le bot sera lancé automatiquement avec le daemon.{RESET}")
-    print()
+    """Configure le bot Telegram (optionnel). Skip si déjà configuré."""
 
-    if not ask_confirm("Configurer le bot Telegram ?", default=False):
-        print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
-        return
+    # Vérifier si Telegram est déjà configuré dans le vault
+    already_configured = False
+    try:
+        from neo_core.infra.security.vault import KeyVault
+        if (CONFIG_DIR / ".vault.db").exists():
+            vault = KeyVault(data_dir=CONFIG_DIR)
+            vault.initialize()
+            tg_token_existing = vault.retrieve("telegram_bot_token")
+            vault.close()
+            if tg_token_existing:
+                already_configured = True
+                masked = tg_token_existing[:8] + "..." + tg_token_existing[-4:] if len(tg_token_existing) > 12 else "***"
+                print(f"  {GREEN}✓{RESET} Bot Telegram déjà configuré : {DIM}{masked}{RESET}")
+                if not ask_confirm("Reconfigurer Telegram ?", default=False):
+                    return
+    except Exception:
+        pass
+
+    if not already_configured:
+        print(f"  {DIM}Connectez Neo à Telegram pour discuter via votre téléphone.{RESET}")
+        print(f"  {DIM}Le bot sera lancé automatiquement avec le daemon.{RESET}")
+        print()
+
+        if not ask_confirm("Configurer le bot Telegram ?", default=False):
+            print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
+            return
 
     print()
     print(f"  {DIM}1. Ouvrez Telegram et cherchez @BotFather{RESET}")
