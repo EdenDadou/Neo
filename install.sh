@@ -602,14 +602,17 @@ echo -e "  ${DIM}Il va vous demander votre nom et optionnellement vos clés API.
 echo -e "  ${DIM}Sans clé API, Neo fonctionne en mode démo (réponses simulées).${RESET}"
 echo
 
-# Lancer le wizard directement via le venv (PAS via le wrapper /usr/local/bin/neo
-# qui fait sudo -u neo, car sudo peut échouer si le disque est plein ou le PTY indisponible)
-# On chown les fichiers de config après
+# Lancer le wizard en tant que user neo — c'est le même user qui crée le vault
+# (chiffrement) et qui le lit ensuite (daemon systemd User=neo).
+# S'assurer que data/ et .env appartiennent à neo AVANT le wizard
+chown -R ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/data" 2>/dev/null || true
+chown ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/.env" 2>/dev/null || true
+
 echo -e "  ${DIM}Lancement du wizard...${RESET}\n"
-cd "${INSTALL_DIR}" && "${VENV_DIR}/bin/neo" setup < /dev/tty
+cd "${INSTALL_DIR}" && sudo -u ${NEO_USER} "${VENV_DIR}/bin/neo" setup < /dev/tty
 WIZARD_EXIT=$?
 
-# Rendre les fichiers de config accessibles à l'utilisateur neo
+# Re-chown au cas où le wizard a créé de nouveaux fichiers
 chown -R ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/data" 2>/dev/null || true
 chown ${NEO_USER}:${NEO_USER} "${INSTALL_DIR}/.env" 2>/dev/null || true
 
