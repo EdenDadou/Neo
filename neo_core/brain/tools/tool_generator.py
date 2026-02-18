@@ -447,13 +447,29 @@ except Exception as e:
         return True
 
     def _has_forbidden_imports(self, code: str) -> bool:
-        """Vérifie si le code contient des imports dangereux."""
+        """Vérifie si le code contient des imports dangereux ou des builtins dangereux."""
         # Pattern: import X / from X import ...
         imports = re.findall(r"^\s*(?:from|import)\s+(\w+)", code, re.MULTILINE)
         for imp in imports:
             if imp in FORBIDDEN_IMPORTS:
                 logger.warning("ToolGenerator: import interdit détecté — %s", imp)
                 return True
+
+        # Bloquer les builtins dangereux qui contournent FORBIDDEN_IMPORTS
+        dangerous_builtins = [
+            r"\b__import__\s*\(",       # __import__('os')
+            r"\bexec\s*\(",             # exec(...)
+            r"\beval\s*\(",             # eval(...)
+            r"\bcompile\s*\(",          # compile(...)
+            r"\bgetattr\s*\(",          # getattr(module, 'system')
+            r"\bglobals\s*\(",          # globals()['__builtins__']
+            r"\bopen\s*\(",             # open('/etc/passwd')
+        ]
+        for pattern in dangerous_builtins:
+            if re.search(pattern, code):
+                logger.warning("ToolGenerator: builtin dangereux détecté — %s", pattern)
+                return True
+
         return False
 
     # ──────────────────────────────────────────────

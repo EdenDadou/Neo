@@ -26,7 +26,7 @@ from neo_core.brain.providers.base import (
     LLMProvider,
     ModelInfo,
     ModelCapability,
-    TestResult,
+    ModelTestResult,
     ChatResponse,
 )
 
@@ -162,7 +162,7 @@ class ModelRegistry:
 
     # ─── Test des modèles ───────────────────────────────────
 
-    async def test_model(self, model_id: str) -> TestResult:
+    async def test_model(self, model_id: str) -> ModelTestResult:
         """
         Teste un modèle spécifique.
 
@@ -170,7 +170,7 @@ class ModelRegistry:
         """
         model = self._models.get(model_id)
         if not model:
-            return TestResult(
+            return ModelTestResult(
                 model_id=model_id,
                 success=False,
                 error=f"Modèle {model_id} non trouvé dans le catalogue",
@@ -178,7 +178,7 @@ class ModelRegistry:
 
         provider = self._providers.get(model.provider)
         if not provider:
-            return TestResult(
+            return ModelTestResult(
                 model_id=model_id,
                 success=False,
                 error=f"Provider {model.provider} non enregistré",
@@ -200,7 +200,7 @@ class ModelRegistry:
 
         return result
 
-    async def test_all(self) -> dict[str, TestResult]:
+    async def test_all(self) -> dict[str, ModelTestResult]:
         """Teste tous les modèles découverts."""
         results = {}
         for model_id in list(self._models.keys()):

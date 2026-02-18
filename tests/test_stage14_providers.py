@@ -20,7 +20,7 @@ from neo_core.brain.providers.base import (
     ModelInfo,
     ModelCapability,
     ChatResponse,
-    TestResult,
+    ModelTestResult,
 )
 from neo_core.brain.providers.registry import (
     ModelRegistry,

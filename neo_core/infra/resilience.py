@@ -140,6 +140,8 @@ class CircuitBreaker:
     - closed : fonctionnement normal
     - open : bloque les appels (trop d'échecs)
     - half_open : laisse passer un appel pour tester la recovery
+
+    Thread-safe : toutes les mutations sont protégées par un Lock.
     """
     failure_threshold: int = 5
     recovery_timeout: float = 60.0
@@ -148,48 +150,57 @@ class CircuitBreaker:
     _last_failure_time: float = 0.0
     _total_successes: int = 0
     _total_failures: int = 0
+    _lock: Any = field(default=None, repr=False)
+
+    def __post_init__(self):
+        import threading
+        self._lock = threading.Lock()
 
     def can_execute(self) -> bool:
         """Vérifie si un appel est autorisé."""
-        if self.state == "closed":
-            return True
-
-        if self.state == "open":
-            # Vérifier si le timeout de recovery est passé
-            if time.time() - self._last_failure_time >= self.recovery_timeout:
-                self.state = "half_open"
+        with self._lock:
+            if self.state == "closed":
                 return True
+
+            if self.state == "open":
+                # Vérifier si le timeout de recovery est passé
+                if time.time() - self._last_failure_time >= self.recovery_timeout:
+                    self.state = "half_open"
+                    return True
+                return False
+
+            if self.state == "half_open":
+                return True  # Laisser passer un appel pour tester
+
             return False
-
-        if self.state == "half_open":
-            return True  # Laisser passer un appel pour tester
-
-        return False
 
     def record_success(self) -> None:
         """Enregistre un succès."""
-        self._consecutive_failures = 0
-        self._total_successes += 1
+        with self._lock:
+            self._consecutive_failures = 0
+            self._total_successes += 1
 
-        if self.state == "half_open":
-            self.state = "closed"  # Recovery réussie
+            if self.state == "half_open":
+                self.state = "closed"  # Recovery réussie
 
     def record_failure(self) -> None:
         """Enregistre un échec."""
-        self._consecutive_failures += 1
-        self._total_failures += 1
-        self._last_failure_time = time.time()
+        with self._lock:
+            self._consecutive_failures += 1
+            self._total_failures += 1
+            self._last_failure_time = time.time()
 
-        if self.state == "half_open":
-            self.state = "open"  # Recovery échouée
-        elif self._consecutive_failures >= self.failure_threshold:
-            self.state = "open"
+            if self.state == "half_open":
+                self.state = "open"  # Recovery échouée
+            elif self._consecutive_failures >= self.failure_threshold:
+                self.state = "open"
 
     def reset(self) -> None:
         """Remet le circuit breaker à zéro."""
-        self.state = "closed"
-        self._consecutive_failures = 0
-        self._last_failure_time = 0.0
+        with self._lock:
+            self.state = "closed"
+            self._consecutive_failures = 0
+            self._last_failure_time = 0.0
 
     def get_stats(self) -> dict:
         """Retourne les statistiques du circuit breaker."""
@@ -216,6 +227,8 @@ class HealthMonitor:
 
     Collecte des métriques sur les appels API, les erreurs,
     et l'état des composants.
+
+    Thread-safe : mutations protégées par un Lock.
     """
     api_circuit: CircuitBreaker = field(default_factory=CircuitBreaker)
     _recent_calls: deque = field(default_factory=lambda: deque(maxlen=100))
@@ -224,29 +237,40 @@ class HealthMonitor:
     total_errors: int = 0
     total_successes: int = 0
     _memory_healthy: bool = True
+    _lock: Any = field(default=None, repr=False)
+
+    def __post_init__(self):
+        import threading
+        self._lock = threading.Lock()
 
     def record_api_call(self, success: bool, duration: float = 0.0,
                         error: str = "") -> None:
         """Enregistre un appel API."""
-        self.total_calls += 1
-        entry = {
-            "time": time.time(),
-            "success": success,
-            "duration": duration,
-            "error": error,
-        }
-        self._recent_calls.append(entry)
+        with self._lock:
+            self.total_calls += 1
+            entry = {
+                "time": time.time(),
+                "success": success,
+                "duration": duration,
+                "error": error,
+            }
+            self._recent_calls.append(entry)
 
+            if success:
+                self.total_successes += 1
+            else:
+                self.total_errors += 1
+
+        # Les appels au circuit breaker sont déjà thread-safe (leur propre lock)
         if success:
-            self.total_successes += 1
             self.api_circuit.record_success()
         else:
-            self.total_errors += 1
             self.api_circuit.record_failure()
 
     def set_memory_health(self, healthy: bool) -> None:
         """Met à jour l'état de santé de la mémoire."""
-        self._memory_healthy = healthy
+        with self._lock:
+            self._memory_healthy = healthy
 
     @property
     def error_rate(self) -> float:

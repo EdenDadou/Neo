@@ -16,7 +16,7 @@ from neo_core.brain.providers.base import (
     ProviderType,
     ModelInfo,
     ModelCapability,
-    TestResult,
+    ModelTestResult,
     ChatResponse,
 )
 from neo_core.brain.providers.hardware import HardwareDetector, HardwareProfile, GPUInfo

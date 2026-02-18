@@ -69,10 +69,12 @@ Règles :
 VOX_REFORMULATE_PROMPT = """Tu es Vox, l'interface du système Neo Core.
 Reformule cette demande utilisateur en une requête claire et structurée pour Brain (l'orchestrateur).
 
-Demande originale : {user_message}
+{recent_context}Demande originale : {user_message}
 
 Règles :
 - Conserve l'intention exacte de l'utilisateur
+- Si la demande est courte ou utilise des pronoms ("ça", "pareil", "continue"),
+  résous les références en utilisant le contexte récent ci-dessus
 - Clarifie les ambiguïtés si possible
 - Structure la demande pour faciliter le travail de Brain
 - Reste concis (1-3 phrases max)
@@ -159,8 +161,8 @@ class Vox:
         import threading
         self._session_lock = threading.Lock()
 
-        # Initialiser le conversation store
-        db_path = Path("data/memory/conversations.db")
+        # Initialiser le conversation store (chemin relatif au data_dir de la config)
+        db_path = self.config.memory.storage_path / "conversations.db"
         self._conversation_store = ConversationStore(db_path)
 
         if not self._mock_mode:
@@ -334,6 +336,9 @@ class Vox:
                         "allez", "fais-le", "lance", "démarre", "crée",
                         "non", "no", "pas maintenant", "annule", "stop",
                         "parfait", "super", "exactement", "bien sûr",
+                        "continue", "enchaîne", "enchaine", "la suite",
+                        "on avance", "on continue", "next", "go ahead",
+                        "c'est bon", "c'est parti", "let's go", "do it",
                     ]
                     if any(msg_lower.startswith(p) or msg_lower == p for p in confirmation_patterns):
                         return False  # → passer à Brain avec le contexte
@@ -461,16 +466,47 @@ class Vox:
         """
         return human_message
 
+    def _build_recent_context(self, max_turns: int = 3) -> str:
+        """
+        Construit un résumé des derniers échanges pour contextualiser
+        les messages courts ou ambigus (pronoms, références implicites).
+        """
+        if not self.conversation_history:
+            return ""
+
+        # Prendre les derniers échanges (max_turns * 2 messages)
+        recent = self.conversation_history[-(max_turns * 2):]
+        if not recent:
+            return ""
+
+        lines = ["Contexte récent de la conversation :"]
+        for msg in recent:
+            role = "User" if isinstance(msg, HumanMessage) else "Neo"
+            # Tronquer les réponses longues pour ne pas saturer le prompt
+            content = msg.content[:150] + "..." if len(msg.content) > 150 else msg.content
+            lines.append(f"  {role}: {content}")
+        lines.append("")  # Ligne vide avant la demande
+        return "\n".join(lines)
+
     async def format_request_async(self, human_message: str) -> str:
         """
         Reformule intelligemment la demande via le LLM de Vox (Haiku).
+        Injecte le contexte récent pour résoudre les pronoms et références.
         Si le LLM n'est pas disponible, retourne le message tel quel.
         """
         if self._mock_mode or (not self._llm and not is_oauth_token(self.config.llm.api_key or "")):
             return human_message
 
         try:
-            prompt = VOX_REFORMULATE_PROMPT.format(user_message=human_message)
+            # Injecter le contexte récent pour les messages courts/ambigus
+            recent_context = ""
+            if len(human_message.split()) < 10 and self.conversation_history:
+                recent_context = self._build_recent_context()
+
+            prompt = VOX_REFORMULATE_PROMPT.format(
+                user_message=human_message,
+                recent_context=recent_context,
+            )
             result = await self._vox_llm_call(prompt)
             return result.strip() if result else human_message
         except Exception as e:

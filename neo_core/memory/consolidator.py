@@ -79,10 +79,19 @@ class MemoryConsolidator:
         report.entries_after = self.store.count()
         return report
 
+    # Seuil de distance L2 FAISS sous lequel deux entrées sont considérées similaires.
+    # Plus le seuil est bas, plus la fusion est stricte.
+    # Calibré pour sentence-transformers all-MiniLM-L6-v2 (dimension 384).
+    MERGE_DISTANCE_THRESHOLD = 0.3
+
     def merge_similar(self, similarity_threshold: float = 0.85) -> ConsolidationReport:
         """
         Fusionne les entrées sémantiquement similaires.
         Garde l'entrée la plus importante et supprime les doublons.
+
+        Utilise search_semantic_with_scores pour vérifier la distance FAISS
+        avant de fusionner (évite les fusions incorrectes entre entrées
+        qui sont simplement les plus proches mais pas vraiment similaires).
         """
         report = ConsolidationReport()
         report.entries_before = self.store.count()
@@ -97,22 +106,22 @@ class MemoryConsolidator:
             if record.id in processed_ids:
                 continue
 
-            # Cherche les entrées similaires
-            similar = self.store.search_semantic(
+            # Cherche les entrées similaires AVEC scores de distance
+            similar_with_scores = self.store.search_semantic_with_scores(
                 record.content, n_results=5
             )
 
-            for sim_record in similar:
+            for sim_record, distance in similar_with_scores:
                 if sim_record.id == record.id or sim_record.id in processed_ids:
                     continue
 
-                # Si très similaire, fusionne
-                # On garde l'entrée avec la plus haute importance
-                if record.importance >= sim_record.importance:
-                    # Combine les tags
-                    combined_tags = list(set(record.tags + sim_record.tags))
-                    max_importance = max(record.importance, sim_record.importance)
+                # Vérifier que la distance est sous le seuil
+                if distance > self.MERGE_DISTANCE_THRESHOLD:
+                    continue  # Pas assez similaire → ne pas fusionner
 
+                # Fusionner : garder l'entrée avec la plus haute importance
+                if record.importance >= sim_record.importance:
+                    max_importance = max(record.importance, sim_record.importance)
                     self.store.update_importance(record.id, max_importance)
                     self.store.delete(sim_record.id)
                     processed_ids.add(sim_record.id)

@@ -34,6 +34,7 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
 # Singleton process-level pour le modèle d'embedding (évite de recharger ~2s à chaque init)
 _EMBEDDING_MODEL_CACHE = None
+_EMBEDDING_MODEL_LOCK = threading.Lock()
 
 
 @dataclass
@@ -71,6 +72,9 @@ class MemoryStore:
         self._semantic_cache: dict[str, list] = {}  # query → results
         self._semantic_cache_hits: int = 0
         self._needs_rebuild: bool = False
+        self._faiss_dirty: bool = False  # True = index modifié mais pas encore persisté
+        self._faiss_dirty_count: int = 0  # Nombre de modifications non persistées
+        _FAISS_SAVE_INTERVAL = 10  # Persister tous les N stores
         # Lock thread-safety pour les opérations FAISS (index + id_map)
         self._faiss_lock = threading.Lock()
 
@@ -86,7 +90,7 @@ class MemoryStore:
     def _init_sqlite(self) -> None:
         """Initialise la base SQLite pour les métadonnées."""
         db_path = self.config.storage_path / "memory_meta.db"
-        self._db_conn = sqlite3.connect(str(db_path))
+        self._db_conn = sqlite3.connect(str(db_path), check_same_thread=False)
 
         # Vérifier l'intégrité
         try:
@@ -95,12 +99,12 @@ class MemoryStore:
                 logger.error("Memory DB integrity check FAILED: %s — recreating", result[0])
                 self._db_conn.close()
                 db_path.unlink(missing_ok=True)
-                self._db_conn = sqlite3.connect(str(db_path))
+                self._db_conn = sqlite3.connect(str(db_path), check_same_thread=False)
         except sqlite3.DatabaseError as e:
             logger.error("Memory DB corrupted: %s — recreating", e)
             self._db_conn.close()
             db_path.unlink(missing_ok=True)
-            self._db_conn = sqlite3.connect(str(db_path))
+            self._db_conn = sqlite3.connect(str(db_path), check_same_thread=False)
 
         self._db_conn.execute("PRAGMA journal_mode=WAL")
         self._db_conn.row_factory = sqlite3.Row
@@ -191,12 +195,20 @@ class MemoryStore:
         if self._embedding_model is not None:
             return
 
-        if _EMBEDDING_MODEL_CACHE is not None:
-            self._embedding_model = _EMBEDDING_MODEL_CACHE
-            self._using_fallback_embeddings = getattr(
-                _EMBEDDING_MODEL_CACHE, "_is_fallback", False
-            )
-            return
+        with _EMBEDDING_MODEL_LOCK:
+            # Double-check après acquisition du lock
+            if _EMBEDDING_MODEL_CACHE is not None:
+                self._embedding_model = _EMBEDDING_MODEL_CACHE
+                self._using_fallback_embeddings = getattr(
+                    _EMBEDDING_MODEL_CACHE, "_is_fallback", False
+                )
+                return
+
+            self._load_embedding_model_impl()
+
+    def _load_embedding_model_impl(self) -> None:
+        """Implémentation interne du chargement du modèle (appelée sous lock)."""
+        global _EMBEDDING_MODEL_CACHE
 
         # Tenter sentence-transformers (meilleure qualité)
         # Stratégie : cache local UNIQUEMENT — jamais de réseau au démarrage.
@@ -414,7 +426,12 @@ class MemoryStore:
                 with self._faiss_lock:
                     self._faiss_index.add(embedding)
                     self._id_map.append(record_id)
-                    self._save_faiss_index()
+                    self._faiss_dirty_count += 1
+                    if self._faiss_dirty_count >= 10:
+                        self._save_faiss_index()
+                        self._faiss_dirty_count = 0
+                    else:
+                        self._faiss_dirty = True
             except OSError as e:
                 logger.critical("DISK FULL — FAISS write failed: %s", e)
 
@@ -498,6 +515,64 @@ class MemoryStore:
             return [r for r in records if r.importance >= min_importance]
         return records
 
+    def search_semantic_with_scores(
+        self, query: str, n_results: int = 5,
+    ) -> list[tuple[MemoryRecord, float]]:
+        """
+        Recherche sémantique retournant les records avec leur score de distance.
+        Score FAISS L2 : plus le score est bas, plus les vecteurs sont proches.
+        Utilisé par le Consolidator pour merge_similar avec seuil.
+        """
+        if not self._faiss_index or not self._embedding_model:
+            return []
+
+        if self._needs_rebuild:
+            self._needs_rebuild = False
+            self._rebuild_index_from_sqlite()
+
+        if self._faiss_index.ntotal == 0:
+            return []
+
+        query_embedding = self._embed([query])
+
+        with self._faiss_lock:
+            n_results = min(n_results, self._faiss_index.ntotal)
+            scores, indices = self._faiss_index.search(query_embedding, n_results)
+
+            record_ids = []
+            score_map = {}
+            for i, idx in enumerate(indices[0]):
+                if 0 <= idx < len(self._id_map):
+                    rid = self._id_map[idx]
+                    record_ids.append(rid)
+                    score_map[rid] = float(scores[0][i])
+
+        if not record_ids:
+            return []
+
+        placeholders = ",".join("?" * len(record_ids))
+        rows = self._db_conn.execute(
+            f"SELECT * FROM memories WHERE id IN ({placeholders})",
+            record_ids,
+        ).fetchall()
+        id_to_row = {row["id"]: row for row in rows}
+
+        results = []
+        for record_id in record_ids:
+            row = id_to_row.get(record_id)
+            if row:
+                record = MemoryRecord(
+                    id=row["id"],
+                    content=row["content"],
+                    source=row["source"],
+                    tags=json.loads(row["tags"]),
+                    importance=row["importance"],
+                    timestamp=row["timestamp"],
+                    metadata=json.loads(row["metadata"]),
+                )
+                results.append((record, score_map.get(record_id, float('inf'))))
+        return results
+
     def search_by_source(self, source: str, limit: int = 20) -> list[MemoryRecord]:
         """Recherche par source (conversation, system, agent, etc.)."""
         rows = self._db_conn.execute(
@@ -574,6 +649,30 @@ class MemoryStore:
         )
         self._db_conn.commit()
 
+    def mark_accessed(self, record_ids: list[str]) -> None:
+        """
+        Marque des records comme accédés en ajoutant le tag 'accessed'.
+        Utilisé par le ContextEngine pour la promotion de souvenirs utiles.
+        """
+        if not record_ids:
+            return
+        for record_id in record_ids:
+            try:
+                row = self._db_conn.execute(
+                    "SELECT tags FROM memories WHERE id = ?", (record_id,)
+                ).fetchone()
+                if row:
+                    tags = json.loads(row["tags"])
+                    if "accessed" not in tags:
+                        tags.append("accessed")
+                        self._db_conn.execute(
+                            "UPDATE memories SET tags = ? WHERE id = ?",
+                            (json.dumps(tags), record_id)
+                        )
+            except Exception as e:
+                logger.debug("Failed to mark record %s as accessed: %s", record_id, e)
+        self._db_conn.commit()
+
     def delete(self, record_id: str) -> None:
         """
         Supprime un souvenir de SQLite.
@@ -588,15 +687,18 @@ class MemoryStore:
 
         # Marquer comme supprimé dans le id_map (sera nettoyé au rebuild)
         with self._faiss_lock:
-            if record_id in self._id_map:
+            try:
                 idx = self._id_map.index(record_id)
                 self._id_map[idx] = "__deleted__"
+            except ValueError:
+                pass  # Pas dans l'index FAISS (déjà supprimé ou jamais indexé)
 
     def rebuild_index(self) -> None:
         """
         Rebuilde l'index FAISS en éliminant les entrées supprimées.
 
         Appelé périodiquement par le heartbeat ou manuellement.
+        Atomique : construit le nouvel index avant de remplacer l'ancien.
         """
         if not self._faiss_index or not self._embedding_model:
             return
@@ -608,12 +710,41 @@ class MemoryStore:
             if deleted_count == 0:
                 return
 
-            # Recréer l'index propre
-            self._faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
-            self._id_map = []
+        # Construire le nouvel index à partir de SQLite (hors lock pour ne pas bloquer les lectures)
+        rows = self._db_conn.execute(
+            "SELECT id, content FROM memories ORDER BY timestamp ASC"
+        ).fetchall()
 
-        self._rebuild_index_from_sqlite()
-        logger.info("FAISS index rebuilt: removed %d deleted entries", deleted_count)
+        if not rows:
+            with self._faiss_lock:
+                self._faiss_index = faiss.IndexFlatIP(EMBEDDING_DIM)
+                self._id_map = []
+                self._save_faiss_index()
+            logger.info("FAISS index rebuilt: removed %d deleted entries (now empty)", deleted_count)
+            return
+
+        ids = [row["id"] for row in rows]
+        contents = [row["content"] for row in rows]
+
+        # Embedder par batch
+        batch_size = 256
+        all_embeddings = []
+        for i in range(0, len(contents), batch_size):
+            batch = contents[i:i + batch_size]
+            emb = self._embed(batch)
+            all_embeddings.append(emb)
+
+        embeddings = np.vstack(all_embeddings)
+        new_index = faiss.IndexFlatIP(EMBEDDING_DIM)
+        new_index.add(embeddings)
+
+        # Swap atomique sous lock
+        with self._faiss_lock:
+            self._faiss_index = new_index
+            self._id_map = ids
+            self._save_faiss_index()
+
+        logger.info("FAISS index rebuilt: removed %d deleted entries, %d vectors", deleted_count, len(ids))
 
     def count(self) -> int:
         """Retourne le nombre total de souvenirs."""
@@ -646,8 +777,11 @@ class MemoryStore:
 
     def close(self) -> None:
         """Ferme les connexions."""
-        # Sauvegarder l'index FAISS avant de fermer
-        self._save_faiss_index()
+        # Sauvegarder l'index FAISS si des modifications non persistées
+        if self._faiss_dirty or self._faiss_dirty_count > 0:
+            self._save_faiss_index()
+            self._faiss_dirty = False
+            self._faiss_dirty_count = 0
         if self._db_conn:
             self._db_conn.close()
 

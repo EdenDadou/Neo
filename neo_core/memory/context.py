@@ -110,6 +110,18 @@ class ContextEngine:
         if block.total_tokens_estimate > self.config.max_context_tokens:
             block = self._truncate(block)
 
+        # 5. Marquer les souvenirs retournés comme "accessed"
+        # pour la promotion par le Consolidator (promote_important)
+        accessed_ids = [
+            m.id for m in block.relevant_memories + block.important_memories
+            if m.id
+        ]
+        if accessed_ids:
+            try:
+                self.store.mark_accessed(accessed_ids)
+            except Exception:
+                pass  # Non-critique, ne pas bloquer la réponse
+
         return block
 
     def store_conversation_turn(self, user_message: str, ai_response: str) -> None:
