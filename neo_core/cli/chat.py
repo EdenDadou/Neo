@@ -837,25 +837,57 @@ def run_chat():
     if not check_installation(config):
         return
 
-    # Vérifier si le daemon tourne
+    # Vérifier si le daemon tourne (PID file + process check)
     daemon_running = False
     api_url = "http://localhost:8000"
     try:
         from neo_core.core.daemon import is_running
         if is_running():
-            # Vérifier que l'API répond
+            daemon_running = True
+        else:
+            # Fallback : le daemon systemd peut tourner sans PID file
+            # (mode --foreground via systemd). Tester l'API directement.
             import httpx
-            resp = httpx.get(f"{api_url}/health", timeout=3.0)
-            if resp.status_code == 200:
-                daemon_running = True
+            try:
+                resp = httpx.get(f"{api_url}/health", timeout=5.0)
+                if resp.status_code == 200:
+                    daemon_running = True
+            except Exception:
+                pass
     except Exception:
         pass
 
     if daemon_running:
+        # Attendre que l'API soit prête (le daemon peut être en train d'init)
         console.print(
-            "[dim]  Daemon détecté — mode unifié (même conversation que Telegram).[/dim]"
+            "[dim]  Daemon détecté — connexion à l'API...[/dim]",
+            end="",
         )
-        asyncio.run(api_conversation_loop(config, api_url))
+        import httpx
+        api_ready = False
+        for _ in range(24):  # 24 x 5s = 2 minutes max
+            try:
+                resp = httpx.get(f"{api_url}/health", timeout=5.0)
+                if resp.status_code == 200:
+                    api_ready = True
+                    break
+            except Exception:
+                pass
+            import time
+            time.sleep(5)
+            console.print(".", end="")
+
+        if api_ready:
+            console.print(
+                f"\r[dim]  Daemon détecté — mode unifié (même conversation que Telegram).[/dim]"
+            )
+            asyncio.run(api_conversation_loop(config, api_url))
+        else:
+            console.print(
+                f"\r[yellow]  ⚠ Daemon actif mais API pas encore prête. Mode local.[/yellow]"
+            )
+            vox = bootstrap()
+            asyncio.run(conversation_loop(vox))
     else:
         console.print(
             "[dim]  Daemon non détecté — mode local (conversation isolée).[/dim]"

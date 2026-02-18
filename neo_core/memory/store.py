@@ -196,13 +196,13 @@ class MemoryStore:
             return
 
         # Tenter sentence-transformers (meilleure qualité)
-        # Stratégie : toujours essayer le cache local d'abord (offline),
-        # puis réseau seulement si le modèle n'est pas encore téléchargé.
-        # Ça évite 60s de retries 429 quand HuggingFace rate-limit.
+        # Stratégie : cache local UNIQUEMENT — jamais de réseau au démarrage.
+        # Le téléchargement du modèle se fait dans `neo setup`, pas au boot.
+        # Ça évite 60s de retries 429 qui bloquent le daemon et le chat.
         try:
             from sentence_transformers import SentenceTransformer
 
-            # 1) Essai offline (cache uniquement) — instantané
+            # Forcer mode offline — charge depuis le cache HuggingFace uniquement
             _old_offline = os.environ.get("HF_HUB_OFFLINE")
             os.environ["HF_HUB_OFFLINE"] = "1"
             try:
@@ -212,25 +212,16 @@ class MemoryStore:
                 logger.info("Embedding model loaded from cache: %s", EMBEDDING_MODEL)
                 return
             except Exception:
-                pass  # Pas en cache → essayer le réseau
+                logger.warning(
+                    "Modèle %s pas en cache — fallback local. "
+                    "Pour télécharger : neo setup",
+                    EMBEDDING_MODEL,
+                )
             finally:
-                # Restaurer la valeur originale
                 if _old_offline is None:
                     os.environ.pop("HF_HUB_OFFLINE", None)
                 else:
                     os.environ["HF_HUB_OFFLINE"] = _old_offline
-
-            # 2) Essai réseau (seulement si token HF dispo)
-            hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-            if hf_token:
-                logger.info("Modèle pas en cache — téléchargement avec HF_TOKEN...")
-                _EMBEDDING_MODEL_CACHE = SentenceTransformer(EMBEDDING_MODEL)
-                self._embedding_model = _EMBEDDING_MODEL_CACHE
-                self._using_fallback_embeddings = False
-                logger.info("Embedding model downloaded: %s", EMBEDDING_MODEL)
-                return
-            else:
-                logger.warning("Modèle pas en cache et pas de HF_TOKEN — fallback local")
 
         except ImportError:
             logger.warning("sentence-transformers non installé")
