@@ -164,17 +164,134 @@ def _ensure_hf_cache_dir():
         return  # Pas besoin de changer, le défaut marche
 
 
+def _verify_embedding_offline(model_name: str) -> bool:
+    """Vérifie si le modèle d'embedding est en cache (zéro réseau)."""
+    try:
+        from sentence_transformers import SentenceTransformer
+        old_offline = os.environ.get("TRANSFORMERS_OFFLINE")
+        old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        try:
+            model = SentenceTransformer(model_name)
+            result = model.encode(["test"])
+            if result is not None and len(result) > 0:
+                return True
+        finally:
+            if old_offline is None:
+                os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            else:
+                os.environ["TRANSFORMERS_OFFLINE"] = old_offline
+            if old_hf_offline is None:
+                os.environ.pop("HF_HUB_OFFLINE", None)
+            else:
+                os.environ["HF_HUB_OFFLINE"] = old_hf_offline
+    except Exception:
+        pass
+    return False
+
+
+def _download_via_git_clone(model_name: str) -> bool:
+    """Télécharge le modèle via git clone (contourne l'API HuggingFace → pas de 429)."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    hf_repo = f"sentence-transformers/{model_name}"
+    hf_home = os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
+    model_cache = Path(hf_home) / "hub" / f"models--sentence-transformers--{model_name}"
+
+    print(f"  {DIM}⧗ Téléchargement via git clone (contourne les rate-limits)...{RESET}")
+
+    # Installer git-lfs si absent
+    try:
+        subprocess.run(["git", "lfs", "version"], capture_output=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        try:
+            subprocess.run(
+                ["apt-get", "install", "-y", "git-lfs"],
+                capture_output=True, timeout=60,
+            )
+            subprocess.run(["git", "lfs", "install"], capture_output=True, timeout=10)
+        except Exception:
+            pass
+
+    temp_dir = tempfile.mkdtemp()
+    try:
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", f"https://huggingface.co/{hf_repo}", temp_dir],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            return False
+
+        # Placer dans le cache HuggingFace au format attendu
+        snapshot_dir = model_cache / "snapshots" / "local"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        for item in Path(temp_dir).iterdir():
+            if item.name == ".git":
+                continue
+            dest = snapshot_dir / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dest)
+
+        # Créer le fichier refs/main pour que HF Hub trouve le snapshot
+        refs_dir = model_cache / "refs"
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        (refs_dir / "main").write_text("local")
+
+        return True
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _download_via_hf_cli(model_name: str) -> bool:
+    """Télécharge le modèle via huggingface-cli download (plus fiable que l'API Python)."""
+    import subprocess
+
+    hf_repo = f"sentence-transformers/{model_name}"
+    print(f"  {DIM}⧗ Téléchargement via huggingface-cli...{RESET}")
+
+    # Chercher huggingface-cli
+    hf_cli = None
+    for candidate in ["huggingface-cli", sys.executable.replace("python", "huggingface-cli")]:
+        try:
+            subprocess.run([candidate, "--version"], capture_output=True, timeout=5)
+            hf_cli = candidate
+            break
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+    if not hf_cli:
+        return False
+
+    try:
+        result = subprocess.run(
+            [hf_cli, "download", hf_repo, "--quiet"],
+            capture_output=True, text=True, timeout=120,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def _download_embedding_model(provider_keys: dict | None = None) -> bool:
     """
     Télécharge et vérifie le modèle d'embedding all-MiniLM-L6-v2.
 
-    Si le modèle est déjà en cache, le charge en local sans requête réseau.
-    Sinon, télécharge avec retry et HF_TOKEN si disponible.
+    Stratégie multi-fallback (du plus fiable au moins fiable) :
+    1. Cache local (offline, zéro réseau)
+    2. huggingface-cli download (fiable, pas de rate-limit)
+    3. git clone direct (contourne l'API HuggingFace → pas de 429)
+    4. SentenceTransformer() Python API (dernier recours, peut 429)
     """
     import time
 
     model_name = "all-MiniLM-L6-v2"
-    max_retries = 3
 
     print(f"\n  {DIM}⧗ Vérification du modèle d'embedding ({model_name})...{RESET}")
 
@@ -204,61 +321,41 @@ def _download_embedding_model(provider_keys: dict | None = None) -> bool:
         return False
 
     # ── 1. Tenter le chargement offline (zéro requête réseau) ──
-    try:
-        old_offline = os.environ.get("TRANSFORMERS_OFFLINE")
-        old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        os.environ["HF_HUB_OFFLINE"] = "1"
+    if _verify_embedding_offline(model_name):
+        print(f"  {GREEN}✓{RESET} Modèle {model_name} déjà en cache")
+        return True
+
+    # ── 2. huggingface-cli download (plus fiable) ──
+    if _download_via_hf_cli(model_name) and _verify_embedding_offline(model_name):
+        print(f"  {GREEN}✓{RESET} Modèle {model_name} téléchargé via huggingface-cli")
+        return True
+
+    # ── 3. git clone direct (contourne API → pas de 429) ──
+    if _download_via_git_clone(model_name) and _verify_embedding_offline(model_name):
+        print(f"  {GREEN}✓{RESET} Modèle {model_name} téléchargé via git clone")
+        return True
+
+    # ── 4. Fallback : SentenceTransformer() API Python (risque 429) ──
+    print(f"  {DIM}⧗ Fallback: téléchargement via Python API...{RESET}")
+    for attempt in range(1, 4):
         try:
             model = SentenceTransformer(model_name)
-            result = model.encode(["test de vérification"])
-            if result is not None and len(result) > 0:
-                print(f"  {GREEN}✓{RESET} Modèle {model_name} déjà en cache (dim={len(result[0])})")
-                del model
-                return True
-        finally:
-            if old_offline is None:
-                os.environ.pop("TRANSFORMERS_OFFLINE", None)
-            else:
-                os.environ["TRANSFORMERS_OFFLINE"] = old_offline
-            if old_hf_offline is None:
-                os.environ.pop("HF_HUB_OFFLINE", None)
-            else:
-                os.environ["HF_HUB_OFFLINE"] = old_hf_offline
-    except Exception:
-        pass  # Pas en cache → télécharger
-
-    # ── 2. Téléchargement avec retry ──
-    print(f"  {DIM}⧗ Téléchargement du modèle depuis HuggingFace...{RESET}")
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            model = SentenceTransformer(model_name)
-            result = model.encode(["test de vérification"])
+            result = model.encode(["test"])
             if result is not None and len(result) > 0:
                 print(f"  {GREEN}✓{RESET} Modèle {model_name} téléchargé et vérifié (dim={len(result[0])})")
                 del model
                 return True
         except Exception as e:
             error_str = str(e)
-            if "429" in error_str:
+            if "429" in error_str and attempt < 3:
                 wait = 5 * attempt
-                if attempt < max_retries:
-                    print(f"  {YELLOW}⚠{RESET} Rate-limit HuggingFace (429) — retry dans {wait}s... ({attempt}/{max_retries})")
-                    if not hf_token:
-                        print(f"  {DIM}  Conseil: un token HF gratuit évite les 429 → https://huggingface.co/settings/tokens{RESET}")
-                    time.sleep(wait)
-                else:
-                    print(f"  {RED}✗{RESET} Échec après {max_retries} tentatives (HuggingFace 429)")
-            else:
-                print(f"  {RED}✗{RESET} Erreur: {error_str[:200]}")
+                print(f"  {YELLOW}⚠{RESET} Rate-limit HuggingFace (429) — retry dans {wait}s... ({attempt}/3)")
+                time.sleep(wait)
+            elif attempt == 3 or "429" not in error_str:
                 break
 
     print(f"  {YELLOW}⚠{RESET} Modèle d'embedding non disponible — mémoire en mode dégradé (bag-of-words)")
     print(f"  {DIM}  La recherche mémoire fonctionnera par mots-clés au lieu de sémantique.{RESET}")
-    print(f"  {DIM}  Pour corriger plus tard :{RESET}")
-    print(f"  {DIM}    export HF_TOKEN=hf_votre_token{RESET}")
-    print(f"  {DIM}    python -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('{model_name}')\" {RESET}")
     return False
 
 
