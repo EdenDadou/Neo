@@ -61,6 +61,7 @@ class MemoryStore:
         self.config = config
         self._faiss_index = None
         self._embedding_model = None
+        self._using_fallback_embeddings = False
         self._id_map: list[str] = []  # position FAISS → memory ID
         self._db_conn: Optional[sqlite3.Connection] = None
         self._initialized = False
@@ -176,6 +177,10 @@ class MemoryStore:
 
         Singleton process-level : chargé une seule fois, réutilisé par toutes
         les instances de MemoryStore. Temps de chargement : ~200ms au premier appel.
+
+        Fallback : si sentence-transformers échoue (HuggingFace 429, pas de réseau),
+        utilise un HashingVectorizer local (pas de téléchargement nécessaire).
+        Moins précis mais toujours fonctionnel.
         """
         global _EMBEDDING_MODEL_CACHE
 
@@ -184,16 +189,43 @@ class MemoryStore:
 
         if _EMBEDDING_MODEL_CACHE is not None:
             self._embedding_model = _EMBEDDING_MODEL_CACHE
+            self._using_fallback_embeddings = getattr(
+                _EMBEDDING_MODEL_CACHE, "_is_fallback", False
+            )
             return
 
+        # Tenter sentence-transformers (meilleure qualité)
         try:
             from sentence_transformers import SentenceTransformer
             _EMBEDDING_MODEL_CACHE = SentenceTransformer(EMBEDDING_MODEL)
             self._embedding_model = _EMBEDDING_MODEL_CACHE
+            self._using_fallback_embeddings = False
             logger.info("Embedding model loaded: %s", EMBEDDING_MODEL)
+            return
         except ImportError:
-            logger.warning("sentence-transformers non installé — embeddings désactivés")
-            self._embedding_model = None
+            logger.warning("sentence-transformers non installé")
+        except Exception as e:
+            logger.warning("sentence-transformers échoué (%s) — fallback local", e)
+
+        # Fallback : HashingVectorizer (sklearn) — pas de téléchargement
+        try:
+            from sklearn.feature_extraction.text import HashingVectorizer
+            vectorizer = HashingVectorizer(
+                n_features=EMBEDDING_DIM,
+                alternate_sign=False,
+                norm="l2",
+            )
+            vectorizer._is_fallback = True
+            _EMBEDDING_MODEL_CACHE = vectorizer
+            self._embedding_model = vectorizer
+            self._using_fallback_embeddings = True
+            logger.info("Fallback embedding loaded: HashingVectorizer (dim=%d)", EMBEDDING_DIM)
+            return
+        except ImportError:
+            logger.warning("sklearn non disponible — embeddings désactivés")
+
+        self._embedding_model = None
+        self._using_fallback_embeddings = False
 
     def _embed(self, texts: list[str]) -> np.ndarray:
         """
@@ -202,9 +234,23 @@ class MemoryStore:
         Retourne un array numpy (n_texts, 384) normalisé L2.
         La normalisation permet d'utiliser le produit scalaire (IP)
         comme distance cosine dans FAISS.
+
+        Supporte deux backends :
+        - sentence-transformers (qualité sémantique)
+        - HashingVectorizer fallback (bag-of-words, pas de téléchargement)
         """
         if not self._embedding_model:
             return np.zeros((len(texts), EMBEDDING_DIM), dtype=np.float32)
+
+        if self._using_fallback_embeddings:
+            # HashingVectorizer retourne une sparse matrix → dense + normalize
+            sparse = self._embedding_model.transform(texts)
+            embeddings = sparse.toarray().astype(np.float32)
+            # Normaliser L2 (certaines lignes peuvent être 0)
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1, norms)
+            embeddings = embeddings / norms
+            return embeddings
 
         embeddings = self._embedding_model.encode(
             texts,

@@ -546,7 +546,7 @@ def run_setup(auto_mode: bool = False):
     if auto_mode:
         print(f"  {BOLD}Mode automatique activé.{RESET}")
         print(f"  {DIM}Neo sera configuré avec les paramètres optimaux.{RESET}\n")
-        total_steps = 5
+        total_steps = 6
     else:
         print(f"  {BOLD}Bienvenue dans le setup de Neo Core.{RESET}")
         print(f"  {DIM}Ce wizard va tout configurer en quelques étapes.{RESET}\n")
@@ -778,10 +778,51 @@ def run_setup(auto_mode: bool = False):
 
     # ─── Démarrage du daemon ──────────────────────────────────────
     if auto_mode:
-        # En mode auto (appelé par install.sh), le daemon est géré par systemd
-        # Ne PAS démarrer le daemon ici — install.sh s'en charge après le wizard
-        step_daemon = 5
-        print_step(step_daemon, total_steps, "Vérification finale")
+        # En mode auto : proposer Telegram puis vérifier le daemon
+        step_tg = 5
+        print_step(step_tg, total_steps, "Bot Telegram (optionnel)")
+
+        print(f"  {DIM}Connectez Neo à Telegram pour discuter via votre téléphone.{RESET}")
+        print(f"  {DIM}Le bot sera lancé automatiquement avec le daemon.{RESET}")
+        print()
+
+        if ask_confirm("Configurer le bot Telegram ?", default=False):
+            print()
+            print(f"  {DIM}1. Ouvrez Telegram et cherchez @BotFather{RESET}")
+            print(f"  {DIM}2. Envoyez /newbot et suivez les instructions{RESET}")
+            print(f"  {DIM}3. Copiez le token du bot ici{RESET}")
+            print()
+
+            tg_token = ask("Token du bot Telegram", secret=False)
+            if tg_token:
+                print()
+                print(f"  {DIM}Pour trouver votre user_id Telegram :{RESET}")
+                print(f"  {DIM}  → Envoyez /start à @userinfobot{RESET}")
+                print()
+
+                tg_ids_input = ask("User IDs autorisés (séparés par des virgules)")
+                try:
+                    tg_user_ids = [int(x.strip()) for x in tg_ids_input.split(",") if x.strip()]
+                except ValueError:
+                    tg_user_ids = []
+                    print(f"  {YELLOW}⚠{RESET} IDs invalides — Telegram non configuré")
+
+                if tg_user_ids:
+                    try:
+                        from neo_core.integrations.telegram import save_telegram_config
+                        save_telegram_config(CONFIG_DIR, tg_token, tg_user_ids)
+                        print(f"  {GREEN}✓{RESET} Token chiffré dans le vault")
+                        print(f"  {GREEN}✓{RESET} {len(tg_user_ids)} utilisateur(s) autorisé(s)")
+                    except Exception as e:
+                        print(f"  {YELLOW}⚠{RESET} Erreur config Telegram: {e}")
+            else:
+                print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
+        else:
+            print(f"  {DIM}  (ignoré — configurable plus tard avec neo telegram-setup){RESET}")
+
+        # Vérification finale
+        step_final = 6
+        print_step(step_final, total_steps, "Vérification finale")
 
         # Reload la config depuis le .env qu'on vient de créer
         from dotenv import load_dotenv
