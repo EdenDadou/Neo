@@ -241,6 +241,9 @@ class HeartbeatManager:
         """
         Vérifie les Epics in_progress et lance les tâches pending
         dont les prédécesseurs sont terminés.
+
+        v2 : Détecte les crews persistants et utilise advance_one_step()
+        au lieu du système de tâches isolées.
         """
         epics = registry.get_all_epics(limit=10)
         tasks_launched = 0
@@ -249,6 +252,49 @@ class HeartbeatManager:
             if epic.status not in ("pending", "in_progress"):
                 continue
 
+            # ── v2 : Vérifier si c'est un crew persistant ──
+            try:
+                from neo_core.brain.teams.crew import CrewExecutor
+                executor = CrewExecutor(brain=self.brain)
+                crew_state = executor.load_state(epic.id)
+
+                if crew_state and crew_state.status == "active":
+                    # C'est un crew → avancer d'une étape via CrewExecutor
+                    if tasks_launched >= self.config.max_auto_tasks_per_pulse:
+                        continue
+
+                    try:
+                        event = await asyncio.wait_for(
+                            executor.advance_one_step(epic.id),
+                            timeout=300.0,
+                        )
+                        tasks_launched += 1
+                        self._emit(HeartbeatEvent(
+                            event_type="crew_step_advanced",
+                            message=f"Crew avancé: {event.message[:80]}",
+                            data={"epic_id": epic.id, "event_type": event.event_type},
+                        ))
+
+                        # Si le crew est terminé, mettre à jour l'epic
+                        if event.event_type == "crew_done":
+                            registry.update_epic_status(epic.id, "done")
+                            self._emit(HeartbeatEvent(
+                                event_type="epic_done",
+                                message=f"Epic terminé (crew): {epic.description[:60]}",
+                                data={"epic_id": epic.id, "success": True},
+                            ))
+
+                    except asyncio.TimeoutError:
+                        logger.error("[Heartbeat] Crew step timeout: %s", epic.id[:8])
+                    except Exception as e:
+                        logger.error("[Heartbeat] Crew step error: %s", e)
+
+                    continue  # Passer à l'epic suivant (crew géré)
+
+            except Exception as e:
+                logger.debug("[Heartbeat] Crew detection failed for %s: %s", epic.id[:8], e)
+
+            # ── Code existant pour les epics non-crew ──
             epic_tasks = registry.get_epic_tasks(epic.id)
             if not epic_tasks:
                 continue
@@ -612,6 +658,7 @@ class HeartbeatManager:
     _TELEGRAM_NOTIFY_EVENTS = {
         "task_completed", "task_failed", "epic_done",
         "task_stale", "self_patching", "tool_generation",
+        "crew_step_advanced",
     }
 
     def _emit(self, event: HeartbeatEvent) -> None:

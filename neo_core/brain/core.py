@@ -54,6 +54,7 @@ from neo_core.oauth import (
 )
 from neo_core.brain.teams.factory import WorkerFactory, TaskAnalysis
 from neo_core.brain.teams.worker import WorkerType, WorkerResult, WorkerState
+from neo_core.brain.teams.crew import CrewExecutor, CrewStep, CrewEvent
 from neo_core.brain.prompts import BRAIN_SYSTEM_PROMPT, DECOMPOSE_PROMPT, BrainDecision
 
 if TYPE_CHECKING:
@@ -463,6 +464,15 @@ class Brain:
         r"scrape|scraping|crawl)\b", re.IGNORECASE,
     )
 
+    # Détection de questions sur un crew actif (bidirectionnel)
+    _CREW_QUERY_RE = re.compile(
+        r"\b(où en est|avancement|statut|status|briefing|rapport|progrès|progress)\b.*"
+        r"\b(crew|epic|projet|mission|équipe)\b"
+        r"|\b(crew|epic|projet|mission)\b.*"
+        r"\b(où en est|avancement|statut|status|briefing|rapport|progrès)\b",
+        re.IGNORECASE,
+    )
+
     # Mots-clés indiquant des sous-tâches implicites (complexité élevée)
     _COMPLEXITY_MULTI_ACTION = re.compile(
         r"\b(puis|ensuite|après|et aussi|également|en plus|aussi|"
@@ -838,6 +848,22 @@ class Brain:
             else ""
         )
 
+        # ── Intercept crew queries (bidirectionnel Brain ↔ Crew) ──
+        crew_epic_id = self._detect_crew_query(request)
+        if crew_epic_id:
+            try:
+                executor = CrewExecutor(brain=self)
+                briefing = executor.get_briefing(crew_epic_id)
+                memory_context += f"\n\n=== CREW ACTIF ===\n{briefing}"
+                # Forcer direct_response pour que Brain réponde avec le contexte crew
+                decision = BrainDecision(
+                    action="direct_response",
+                    confidence=0.9,
+                    reasoning=f"Question sur crew actif {crew_epic_id[:8]}",
+                )
+            except Exception as e:
+                logger.debug("Injection contexte crew échouée: %s", e)
+
         if self._mock_mode:
             if decision.action == "delegate_crew" and decision.subtasks:
                 return await self._execute_as_epic(request, decision, memory_context)
@@ -1028,44 +1054,75 @@ class Brain:
             f"Dernière erreur: {last_error}"
         )
 
-    async def _decompose_epic_with_llm(self, request: str, memory_context: str) -> list[str]:
+    async def _decompose_crew_with_llm(
+        self, request: str, memory_context: str,
+    ) -> list[CrewStep]:
         """
         Utilise Claude Sonnet pour décomposer une requête epic en
-        sous-tâches concrètes et actionnables.
+        étapes de crew avec un worker_type par étape.
 
-        Fallback sur heuristiques si le LLM échoue.
+        Retourne une liste de CrewStep. Fallback sur heuristiques.
         """
         if self._mock_mode:
-            return self._decompose_task(request)
+            subtasks = self._decompose_task(request)
+            return [
+                CrewStep(index=i, description=st, worker_type=WorkerType.GENERIC)
+                for i, st in enumerate(subtasks)
+            ]
 
         decompose_prompt = (
             f"L'utilisateur veut créer un projet (Epic) sur ce sujet :\n"
             f"\"{request}\"\n\n"
             f"Contexte mémoire :\n{memory_context[:500]}\n\n"
-            f"Décompose ce projet en 3 à 6 sous-tâches CONCRÈTES et ACTIONNABLES.\n"
-            f"Chaque sous-tâche doit être une action précise qu'un agent peut exécuter.\n"
-            f"NE reformule PAS la demande de l'utilisateur. Donne les VRAIES étapes du projet.\n\n"
-            f"Exemple pour \"recherche sur le tennis\" :\n"
-            f"- Rechercher les tournois ATP en cours et les résultats récents\n"
-            f"- Analyser le classement mondial actuel et les mouvements récents\n"
-            f"- Identifier les joueurs en forme et les tendances du moment\n"
-            f"- Synthétiser un rapport complet sur l'état du tennis professionnel\n\n"
-            f"Réponds avec UNIQUEMENT les sous-tâches, une par ligne, commençant par '- '."
+            f"Décompose ce projet en 3 à 6 étapes CONCRÈTES avec le type de worker optimal.\n"
+            f"Types disponibles : researcher, coder, analyst, writer, summarizer, translator, generic\n\n"
+            f"Réponds en JSON strict (array) :\n"
+            f"[\n"
+            f'  {{"description": "Action concrète...", "worker_type": "researcher"}},\n'
+            f'  {{"description": "Analyser les résultats...", "worker_type": "analyst"}},\n'
+            f'  {{"description": "Rédiger le rapport...", "worker_type": "writer"}}\n'
+            f"]\n\n"
+            f"Règles :\n"
+            f"- Chaque étape bâtit sur les précédentes (recherche → analyse → synthèse)\n"
+            f"- researcher pour la collecte d'info web, coder pour du code, analyst pour l'analyse\n"
+            f"- writer pour la rédaction, summarizer pour résumer\n"
+            f"- Descriptions précises et actionnables, PAS de reformulation de la demande\n"
+            f"- Réponds UNIQUEMENT avec le JSON, rien d'autre."
         )
 
         try:
             response = await self._raw_llm_call(decompose_prompt)
-            lines = [
-                line.strip().lstrip("- ").strip()
-                for line in response.strip().split("\n")
-                if line.strip() and line.strip().startswith("-")
-            ]
-            if len(lines) >= 2:
-                return lines
-        except Exception as e:
-            logger.debug("Décomposition LLM échouée pour l'epic: %s", e)
+            # Nettoyer la réponse (enlever ```json ... ``` si présent)
+            cleaned = response.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
 
-        return self._decompose_task(request)
+            data = json.loads(cleaned)
+            if isinstance(data, list) and len(data) >= 2:
+                steps = []
+                for i, item in enumerate(data):
+                    desc = item.get("description", "")
+                    wt_str = item.get("worker_type", "generic")
+                    try:
+                        wt = WorkerType(wt_str)
+                    except ValueError:
+                        wt = WorkerType.GENERIC
+                    if desc:
+                        steps.append(CrewStep(index=i, description=desc, worker_type=wt))
+                if len(steps) >= 2:
+                    return steps
+        except Exception as e:
+            logger.debug("Décomposition crew JSON échouée: %s", e)
+
+        # Fallback : décomposition texte classique
+        subtasks = self._decompose_task(request)
+        return [
+            CrewStep(index=i, description=st, worker_type=WorkerType.GENERIC)
+            for i, st in enumerate(subtasks)
+        ]
 
     def _extract_epic_subject(self, request: str) -> str:
         """
@@ -1096,70 +1153,143 @@ class Brain:
     async def _execute_as_epic(self, request: str, decision: BrainDecision,
                                memory_context: str) -> str:
         """
-        Crée un Epic dans le TaskRegistry et exécute chaque sous-tâche
-        séquentiellement via des Workers individuels.
+        Crée un Epic et lance un Crew persistant (v2.0).
 
-        v0.9.8 : Utilise le LLM pour décomposer intelligemment le projet
-        au lieu de templates génériques. Extrait le vrai sujet de la requête.
+        Pipeline :
+        1. Extraction du sujet réel
+        2. Décomposition intelligente avec worker_type par étape (JSON LLM)
+        3. Création de l'Epic dans le registre
+        4. Création du CrewState persistant en Memory
+        5. Exécution IMMÉDIATE de la première étape (feedback rapide)
+        6. Les étapes suivantes seront avancées par le heartbeat
+
+        L'utilisateur reçoit un briefing immédiat + la première étape.
+        Le heartbeat avance ensuite le crew d'une étape par pulse.
         """
-        # 0. Extraire le vrai sujet et décomposer intelligemment
+        # 0. Extraire le vrai sujet
         epic_subject = self._extract_epic_subject(request)
-        smart_subtasks = await self._decompose_epic_with_llm(request, memory_context)
 
-        # 1. Créer l'Epic dans le registre avec le vrai sujet
+        # 1. Décomposer en étapes crew avec worker_types
+        crew_steps = await self._decompose_crew_with_llm(request, memory_context)
+
+        # 2. Créer l'Epic dans le registre
         epic = None
+        epic_id = "unknown"
         if self.memory and self.memory.is_initialized:
             try:
                 subtask_tuples = [
-                    (st, decision.worker_type or "generic")
-                    for st in smart_subtasks
+                    (step.description, step.worker_type.value)
+                    for step in crew_steps
                 ]
                 epic = self.memory.create_epic(
                     description=epic_subject,
                     subtask_descriptions=subtask_tuples,
                     strategy=decision.reasoning,
                 )
+                epic_id = epic.id
                 logger.info(
-                    "Epic créé: %s (%s) avec %d sous-tâches",
-                    epic.id[:8] if epic else "?", epic_subject[:50],
-                    len(smart_subtasks),
+                    "Crew Epic créé: %s (%s) avec %d étapes",
+                    epic_id[:8], epic_subject[:50], len(crew_steps),
                 )
             except Exception as e:
                 logger.debug("Impossible de créer l'Epic: %s", e)
 
-        # 2. Exécuter chaque sous-tâche comme un delegate_worker
-        results = []
-        for i, subtask in enumerate(smart_subtasks):
-            sub_decision = BrainDecision(
-                action="delegate_worker",
-                subtasks=[subtask],
-                confidence=decision.confidence,
-                worker_type=decision.worker_type,
-                reasoning=f"Sous-tâche {i + 1}/{len(smart_subtasks)} de l'Epic: {epic_subject[:50]}",
+        # 3. Créer le CrewState persistant
+        try:
+            executor = CrewExecutor(brain=self)
+            executor.set_event_callback(self._handle_crew_event)
+            executor.create_crew_state(
+                epic_id=epic_id,
+                epic_subject=epic_subject,
+                steps=crew_steps,
+                memory_context=memory_context,
             )
+
+            # 4. Exécuter la PREMIÈRE étape immédiatement (feedback rapide)
+            first_event = await executor.advance_one_step(epic_id)
+
+            # 5. Mettre à jour le statut de l'Epic → in_progress
+            if epic and self.memory and self.memory.is_initialized:
+                try:
+                    self.memory.update_epic_status(epic_id, "in_progress")
+                except Exception as e:
+                    logger.debug("Impossible de mettre à jour l'Epic: %s", e)
+
+            # 6. Retourner le briefing avec le résultat de la première étape
+            briefing = executor.get_briefing(epic_id)
+
+            # Si le crew est déjà terminé (1 seule étape), retourner directement
+            if first_event.event_type == "crew_done":
+                return first_event.data.get("synthesis", first_event.message)
+
+            return (
+                f"{first_event.message}\n\n"
+                f"Le crew est en marche. Les prochaines étapes seront "
+                f"exécutées automatiquement par le heartbeat.\n\n{briefing}"
+            )
+
+        except Exception as e:
+            logger.error("Crew creation/execution failed: %s", e)
+            if epic and self.memory and self.memory.is_initialized:
+                try:
+                    self.memory.update_epic_status(epic_id, "failed")
+                except Exception:
+                    pass
+            return f"[Epic échoué — {epic_subject}] {type(e).__name__}: {str(e)[:300]}"
+
+    # ─── Communication bidirectionnelle Crew ↔ Brain ────
+
+    def _detect_crew_query(self, request: str) -> Optional[str]:
+        """
+        Détecte si la requête concerne un crew actif.
+        Retourne l'epic_id ou None.
+        """
+        if not self._CREW_QUERY_RE.search(request):
+            return None
+        try:
+            executor = CrewExecutor(brain=self)
+            active_crews = executor.list_active_crews()
+            if not active_crews:
+                return None
+            if len(active_crews) == 1:
+                return active_crews[0].epic_id
+            # Plusieurs crews → chercher par similarité dans le sujet
+            request_lower = request.lower()
+            for crew in active_crews:
+                subject_words = crew.epic_subject.lower().split()[:5]
+                if any(word in request_lower for word in subject_words if len(word) > 3):
+                    return crew.epic_id
+            # Fallback: le plus récent
+            return active_crews[0].epic_id
+        except Exception as e:
+            logger.debug("Détection crew query échouée: %s", e)
+            return None
+
+    def _handle_crew_event(self, event: CrewEvent) -> None:
+        """
+        Reçoit les notifications proactives des crews.
+
+        Stocke en mémoire (pour que Brain retrouve l'info sémantiquement)
+        et notifie via Telegram.
+        """
+        # Stocker en mémoire
+        if self.memory and self.memory.is_initialized:
             try:
-                result = await self._execute_with_worker(
-                    subtask, sub_decision, memory_context,
-                )
-                results.append(f"✅ {subtask[:60]}: {result[:200]}")
-            except Exception as e:
-                results.append(f"❌ {subtask[:60]}: {type(e).__name__}: {str(e)[:100]}")
-
-        # 3. Compiler le résultat final
-        all_ok = all(r.startswith("✅") for r in results)
-        summary = "\n".join(results)
-
-        if epic and self.memory and self.memory.is_initialized:
-            try:
-                from neo_core.memory.task_registry import Epic as EpicModel
-                self.memory.update_epic_status(
-                    epic.id, "done" if all_ok else "failed",
+                self.memory.store_memory(
+                    content=f"[Crew Event] {event.message}",
+                    source=f"crew_event:{event.crew_id}",
+                    tags=["crew_event", f"crew:{event.crew_id}", event.event_type],
+                    importance=0.7 if event.event_type in ("crew_done", "insight") else 0.5,
                 )
             except Exception as e:
-                logger.debug("Impossible de mettre à jour l'Epic: %s", e)
+                logger.debug("Stockage crew event échoué: %s", e)
 
-        status = "terminé" if all_ok else "partiellement terminé"
-        return f"[Epic {status} — {epic_subject[:80]}]\n{summary}"
+        # Notifier via Telegram
+        try:
+            from neo_core.infra.registry import core_registry
+            core_registry.send_telegram(f"🔔 Crew: {event.message}")
+        except Exception:
+            pass
 
     def _improve_strategy(
         self,
