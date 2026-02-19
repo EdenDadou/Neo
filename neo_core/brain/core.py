@@ -442,6 +442,15 @@ class Brain:
             except Exception as e:
                 logger.debug("Impossible de récupérer la mémoire de travail: %s", e)
 
+        # Injecter le contexte du TaskRegistry (projets & tâches actifs)
+        # Permet au LLM Brain de connaître les projets quand il génère sa réponse
+        try:
+            registry_ctx = self._build_task_registry_context(request)
+            if registry_ctx:
+                context += f"\n\n=== Projets & Tâches ===\n{registry_ctx}"
+        except Exception as e:
+            logger.debug("Impossible de récupérer le contexte TaskRegistry: %s", e)
+
         return context
 
     # ─── Analyse et décision ────────────────────────────────
@@ -552,30 +561,24 @@ class Brain:
             return "moderate"
         return "simple"
 
-    # Patterns de requêtes qui sont clairement des conversations/questions simples
-    # → JAMAIS de worker/task pour ces patterns
-    _SIMPLE_CONVERSATION_RE = re.compile(
-        r"^(bonjour|salut|hello|hi|hey|coucou|yo|bonsoir|merci|thanks|"
-        r"ok|oui|non|d[''']accord|bien reçu|cool|top|parfait|super|"
-        r"comment (ça va|vas[- ]tu)|how are you|ça va|quoi de neuf|"
-        r"qu[''']est[- ]ce que tu (peux|sais)|"
-        r"/\w+)\s*[\.\!\?]*$",
-        re.IGNORECASE,
-    )
-    _SHORT_QUESTION_RE = re.compile(
-        r"^[^\.]{0,80}\??\s*$",
-    )
+    # (Supprimé : _SIMPLE_CONVERSATION_RE et _SHORT_QUESTION_RE)
+    # La classification est désormais gérée par le LLM dans _classify_intent()
 
     # ─── Prompt de classification LLM ────────────────────
     _CLASSIFY_PROMPT = """Classifie cette requête utilisateur. Réponds UNIQUEMENT en JSON strict.
 
 Requête : {request}
-{original_block}{context_block}
+{original_block}{context_block}{task_registry_block}
 
 Types d'intent :
-- "conversation" : question simple, discussion, demande d'info que tu peux répondre directement (pas besoin d'outil)
+- "conversation" : question simple, discussion, demande d'info, question sur un projet/tâche existant (pas besoin d'outil)
 - "tool_use" : nécessite un outil externe (recherche web, exécution code, lecture/écriture fichier, scraping)
-- "project" : demande explicite de créer un projet multi-étapes, une roadmap, un plan d'action
+- "project" : demande EXPLICITE de CRÉER un nouveau projet multi-étapes, une roadmap, un plan d'action
+
+IMPORTANT :
+- Si la requête RÉFÉRENCE un projet existant (P1, P2, T3...) sans en créer un nouveau → "conversation"
+- Si la requête est une confirmation ("oui", "ok", "continue") en contexte → "conversation"
+- Seule la CRÉATION explicite d'un nouveau projet → "project"
 
 Types de worker (si tool_use ou project) :
 - "researcher" : recherche web, collecte d'infos
@@ -587,6 +590,66 @@ Types de worker (si tool_use ou project) :
 
 Réponds UNIQUEMENT avec ce JSON :
 {{"intent": "conversation|tool_use|project", "worker_type": "researcher|coder|analyst|writer|summarizer|generic", "confidence": 0.0-1.0, "reasoning": "explication courte"}}"""
+
+    def _build_task_registry_context(self, request: str) -> str:
+        """
+        Construit un contexte compact du TaskRegistry pour injection dans les prompts.
+
+        - Détecte les références P{N} / T{N} → lookup spécifique
+        - Sinon → liste les projets/tâches actifs (max 5)
+        """
+        if not self.memory or not self.memory.task_registry:
+            return ""
+
+        try:
+            lines = []
+
+            # Détecter les références explicites (P1, P2, T3, etc.)
+            refs = re.findall(r'\b[Pp](\d+)\b|\b[Tt](\d+)\b', request)
+            if refs:
+                for p_num, t_num in refs:
+                    if p_num:
+                        epic = self.memory.task_registry.find_epic_by_short_id(f"P{p_num}")
+                        if epic:
+                            tasks = self.memory.task_registry.get_epic_tasks(epic.id)
+                            done = sum(1 for t in tasks if t.status == "done")
+                            lines.append(
+                                f"#{epic.short_id} {epic.display_name} ({epic.status}) "
+                                f"— {done}/{len(tasks)} tâche(s) terminée(s)"
+                            )
+                            for t in tasks[:5]:
+                                lines.append(f"  └ #{t.short_id} {t.description[:60]} ({t.status})")
+                    elif t_num:
+                        task = self.memory.task_registry.find_task_by_short_id(f"T{t_num}")
+                        if task:
+                            lines.append(
+                                f"#{task.short_id} {task.description[:80]} ({task.status}) "
+                                f"— worker: {task.worker_type}"
+                            )
+
+            # Si pas de référence explicite, lister les projets/tâches actifs
+            if not lines:
+                active_epics = [
+                    e for e in self.memory.task_registry.get_all_epics(limit=5)
+                    if e.status in ("pending", "in_progress")
+                ]
+                for e in active_epics:
+                    tasks = self.memory.task_registry.get_epic_tasks(e.id)
+                    done = sum(1 for t in tasks if t.status == "done")
+                    lines.append(f"#{e.short_id} {e.display_name} ({e.status}) — {done}/{len(tasks)}")
+
+                active_tasks = [
+                    t for t in self.memory.task_registry.get_all_tasks(limit=5)
+                    if t.status in ("pending", "in_progress") and not t.epic_id
+                ]
+                for t in active_tasks:
+                    lines.append(f"#{t.short_id} {t.description[:60]} ({t.status})")
+
+            return "\n".join(lines) if lines else ""
+
+        except Exception as e:
+            logger.debug("Failed to build task registry context: %s", e)
+            return ""
 
     async def _classify_intent(self, request: str, original_request: str = "",
                                 context: str = "") -> dict:
@@ -605,10 +668,19 @@ Réponds UNIQUEMENT avec ce JSON :
         if context:
             context_block = f"Contexte récent : {context[:300]}\n"
 
+        # Injection du contexte TaskRegistry (projets/tâches actifs)
+        task_registry_block = ""
+        registry_ctx = self._build_task_registry_context(
+            original_request if original_request else request
+        )
+        if registry_ctx:
+            task_registry_block = f"\nProjets et tâches actifs :\n{registry_ctx}\n"
+
         prompt = self._CLASSIFY_PROMPT.format(
             request=request,
             original_block=original_block,
             context_block=context_block,
+            task_registry_block=task_registry_block,
         )
 
         try:
@@ -667,19 +739,18 @@ Réponds UNIQUEMENT avec ce JSON :
         """
         Prend une décision stratégique sur la manière de traiter la requête.
 
-        v2.0 — Classification LLM + fallback regex :
-        1. Fast-path : conversations simples (regex) → direct_response
-        2. Classification LLM (Haiku, 3s timeout) → intent routing
-        3. Fallback regex si LLM indisponible
+        v3.0 — Classification 100% LLM (plus de heuristiques regex) :
+        0. Commandes slash (/status, /tasks) → fast-path direct
+        1. Classification LLM (Haiku, 3s timeout) → intent routing
+        2. Fallback regex UNIQUEMENT si le LLM échoue/timeout
 
         Pipeline :
-        0. Conversation simple ? → direct_response (FAST PATH)
         1. LLM intent == "project" → delegate_crew
         2. LLM intent == "tool_use" → delegate_worker
         3. LLM intent == "conversation" → direct_response
         """
-        # 0. FAST PATH : conversations simples → JAMAIS de worker/task
-        if self._is_simple_conversation(request):
+        # 0. Commandes slash → fast-path direct (pas besoin de LLM)
+        if request.strip().startswith("/"):
             return self._decide_direct(request, "simple")
 
         # Enrichir la requête pour la classification si contexte de travail disponible.
@@ -746,40 +817,9 @@ Réponds UNIQUEMENT avec ce JSON :
         # 4. Défaut → direct_response (Claude Sonnet + mémoire)
         return self._decide_direct(request, complexity)
 
-    def _is_simple_conversation(self, request: str) -> bool:
-        """
-        Détecte les requêtes qui sont de simples conversations/questions
-        et ne nécessitent JAMAIS un worker ou une task.
-
-        Critères :
-        - Salutations, remerciements, acquiescements
-        - Commandes slash (/status, /tasks, etc.)
-        - Questions très courtes (< 60 chars, pas de verbe d'action fort)
-        - Messages de moins de 4 mots
-        """
-        stripped = request.strip()
-
-        # Commandes slash → toujours direct
-        if stripped.startswith("/"):
-            return True
-
-        # Conversations simples connues
-        if self._SIMPLE_CONVERSATION_RE.match(stripped):
-            return True
-
-        # Messages très courts sans verbe d'action → direct
-        word_count = len(stripped.split())
-        if word_count <= 4 and not self._EPIC_INTENT_RE.search(stripped):
-            return True
-
-        # Questions (terminées par ?) sans marqueur d'outil → direct
-        if (len(stripped) < 100 and
-                stripped.endswith("?") and
-                not self._NEEDS_TOOL_RE.search(stripped) and
-                not self._EPIC_INTENT_RE.search(stripped)):
-            return True
-
-        return False
+    # (Supprimé : _is_simple_conversation())
+    # Toutes les décisions sont désormais prises par le LLM via _classify_intent()
+    # Seules les commandes slash (/status, /tasks) restent en fast-path dans process()
 
     def _apply_behavior_patches(self, request: str, worker_type: WorkerType) -> dict:
         """Applique les patches comportementaux du SelfPatcher (Level 3)."""
@@ -1020,9 +1060,9 @@ Réponds UNIQUEMENT avec ce JSON :
                 logger.debug("Failed to load working context for decision: %s", e)
 
         # ── Classification LLM async (Haiku, 3s timeout) ──
-        # Appel async avant make_decision (qui est sync)
+        # Toutes les requêtes passent par le LLM (sauf commandes slash)
         llm_classification = None
-        if not self._is_simple_conversation(request):
+        if not request.strip().startswith("/"):
             try:
                 llm_classification = await self._classify_intent(
                     request, original_request=original_request,
