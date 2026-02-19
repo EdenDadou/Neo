@@ -390,9 +390,10 @@ async def get_tasks():
     return vox.memory.get_tasks_report()
 
 
+@router.get("/project")
 @router.get("/epics")
 async def get_epics():
-    """Get active epics."""
+    """Get active projects (formerly epics)."""
     if not neo_core._initialized:
         raise HTTPException(503, "Neo Core not initialized")
     vox = neo_core.vox

@@ -138,7 +138,7 @@ def print_tasks(vox):
         lines.append(f"\n[bold]Résumé[/bold]")
         lines.append(
             f"  Total : {summary.get('total_tasks', 0)} tâches, "
-            f"{summary.get('total_epics', 0)} epics"
+            f"{summary.get('total_epics', 0)} projets"
         )
         if summary.get("tasks_by_status"):
             parts = [f"{k}: {v}" for k, v in summary["tasks_by_status"].items()]
@@ -146,13 +146,13 @@ def print_tasks(vox):
 
     console.print(Panel(
         "\n".join(lines),
-        title="[bold cyan]Task Registry[/bold cyan]",
+        title="[bold cyan]Tâches[/bold cyan]",
         border_style="cyan",
     ))
 
 
 def print_epics(vox):
-    """Affiche le registre des epics dans un tableau Rich."""
+    """Affiche le registre des projets dans un tableau Rich."""
     if not vox.memory or not vox.memory.is_initialized:
         console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
         return
@@ -167,8 +167,8 @@ def print_epics(vox):
 
     if not active_epics:
         console.print(Panel(
-            "[dim]Aucun epic actif.[/dim]",
-            title="[bold cyan]🎯 Epics Actifs[/bold cyan]",
+            "[dim]Aucun projet actif.[/dim]",
+            title="[bold cyan]Projets[/bold cyan]",
             border_style="cyan",
         ))
         return
@@ -180,32 +180,33 @@ def print_epics(vox):
         "failed": "❌",
     }
 
-    table = Table(
-        title="🎯 Epics Actifs",
-        title_style="bold cyan",
-        border_style="cyan",
-        show_header=True,
-        header_style="bold white",
-        padding=(0, 1),
-    )
-    table.add_column("Status", justify="center", width=3)
-    table.add_column("ID", style="dim", width=10)
-    table.add_column("Description", min_width=30)
-    table.add_column("Progrès", justify="center", width=12)
-    table.add_column("Stratégie", style="italic dim", max_width=25)
-
+    # Affichage détaillé par projet avec sous-tâches
+    lines: list[str] = []
     for epic in active_epics:
         icon = status_icons.get(epic.status, "?")
         epic_tasks = registry.get_epic_tasks(epic.id)
+        epic_tasks.sort(key=lambda t: t.created_at)
         done = sum(1 for t in epic_tasks if t.status == "done")
         total = len(epic_tasks)
         pct = f"{done * 100 // total}%" if total > 0 else "—"
-        progress = f"[green]{done}[/green]/{total} ({pct})"
-        strategy = (epic.strategy[:22] + "…") if len(epic.strategy) > 25 else (epic.strategy or "—")
 
-        table.add_row(icon, epic.id[:8], epic.description[:60], progress, strategy)
+        lines.append(f"{icon} [bold]{epic.description[:60]}[/bold]  [dim]{epic.id[:8]}[/dim]")
+        lines.append(f"  Progrès: [bold green]{done}[/bold green]/{total} ({pct})")
+        if epic.strategy:
+            lines.append(f"  [dim italic]{epic.strategy[:60]}[/dim italic]")
 
-    console.print(table)
+        # Sous-tâches du projet
+        for t in epic_tasks:
+            t_icon = status_icons.get(t.status, "?")
+            desc = t.description[:50]
+            lines.append(f"    {t_icon} {desc}  [dim]{t.worker_type}[/dim]")
+        lines.append("")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold cyan]Projets[/bold cyan]",
+        border_style="cyan",
+    ))
 
 
 def print_heartbeat(heartbeat_manager):
@@ -417,7 +418,7 @@ def print_help():
         "  [cyan]/health[/cyan]    — Rapport de santé détaillé\n"
         "  [cyan]/skills[/cyan]    — Compétences acquises\n"
         "  [cyan]/tasks[/cyan]     — Registre des tâches\n"
-        "  [cyan]/epics[/cyan]     — Registre des epics\n"
+        "  [cyan]/project[/cyan]   — Projets en cours\n"
         "  [cyan]/heartbeat[/cyan] — Statut du heartbeat\n"
         "  [cyan]/persona[/cyan]   — Personnalité de Neo\n"
         "  [cyan]/profile[/cyan]   — Profil utilisateur\n"
@@ -722,7 +723,7 @@ async def conversation_loop(vox):
                 print_tasks(vox)
                 continue
 
-            if cmd in ("/epics", "epics"):
+            if cmd in ("/project", "/epics", "project", "epics"):
                 print_epics(vox)
                 continue
 
@@ -996,42 +997,40 @@ async def api_conversation_loop(config: NeoConfig, api_url: str):
                                 lines.append(f"\n[bold]Résumé[/bold]")
                                 lines.append(
                                     f"  Total : {summary.get('total_tasks', 0)} tâches, "
-                                    f"{summary.get('total_epics', 0)} epics"
+                                    f"{summary.get('total_epics', 0)} projets"
                                 )
                                 if summary.get("tasks_by_status"):
                                     parts = [f"{k}: {v}" for k, v in summary["tasks_by_status"].items()]
                                     lines.append(f"  Statuts : {', '.join(parts)}")
-                            console.print(Panel("\n".join(lines), title="[bold cyan]Task Registry[/bold cyan]", border_style="cyan"))
+                            console.print(Panel("\n".join(lines), title="[bold cyan]Tâches[/bold cyan]", border_style="cyan"))
                         else:
                             console.print(f"[yellow]  ⚠ API error: {resp.status_code}[/yellow]")
                     except Exception as e:
                         console.print(f"[red]  Erreur: {e}[/red]")
                     continue
 
-                if cmd in ("/epics", "epics"):
+                if cmd in ("/project", "/epics", "project", "epics"):
                     try:
                         resp = await client.get(f"{api_url}/epics", headers=headers)
                         if resp.status_code == 200:
                             data = resp.json()
                             epics = data.get("epics", [])
                             if not epics:
-                                console.print(Panel("[dim]Aucun epic actif.[/dim]", title="[bold cyan]Epics[/bold cyan]", border_style="cyan"))
+                                console.print(Panel("[dim]Aucun projet actif.[/dim]", title="[bold cyan]Projets[/bold cyan]", border_style="cyan"))
                             else:
                                 status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
-                                table = Table(title="Epics Actifs", title_style="bold cyan", border_style="cyan", show_header=True, header_style="bold white", padding=(0, 1))
-                                table.add_column("Status", justify="center", width=3)
+                                table = Table(title="Projets", title_style="bold cyan", border_style="cyan", show_header=True, header_style="bold white", padding=(0, 1))
+                                table.add_column("", justify="center", width=3)
                                 table.add_column("ID", style="dim", width=10)
-                                table.add_column("Description", min_width=30)
+                                table.add_column("Projet", min_width=30)
                                 table.add_column("Progrès", justify="center", width=12)
-                                table.add_column("Stratégie", style="italic dim", max_width=25)
                                 for epic in epics:
                                     icon = status_icons.get(epic.get("status", ""), "?")
                                     table.add_row(
                                         icon,
                                         epic.get("id", "")[:10],
-                                        epic.get("description", ""),
+                                        epic.get("description", "")[:50],
                                         epic.get("progress", "0/0"),
-                                        epic.get("strategy", "")[:25],
                                     )
                                 console.print(table)
                         else:

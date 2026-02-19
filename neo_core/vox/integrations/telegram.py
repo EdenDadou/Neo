@@ -332,7 +332,7 @@ class TelegramBot:
                 "*Commandes :*\n"
                 "/status — État du système\n"
                 "/tasks — Registre des tâches\n"
-                "/epics — Registre des epics (projets)\n"
+                "/project — Projets en cours\n"
                 "/whoami — Info sur votre accès\n"
                 "/help — Cette aide",
                 parse_mode="Markdown",
@@ -373,7 +373,7 @@ class TelegramBot:
             else:
                 await message.reply_text("⚠️ Memory non initialisé.")
 
-        elif cmd == "/epics":
+        elif cmd in ("/project", "/epics"):
             if self._vox and self._vox.memory and self._vox.memory.is_initialized:
                 try:
                     registry = self._vox.memory.task_registry
@@ -382,7 +382,7 @@ class TelegramBot:
                         active_epics = [e for e in epics if e.status in ("pending", "in_progress")]
                         if active_epics:
                             status_icons = {"pending": "⏳", "in_progress": "🔄"}
-                            lines = ["🎯 *Epics actifs :*\n"]
+                            lines = ["📂 *Projets en cours :*\n"]
                             for epic in active_epics:
                                 icon = status_icons.get(epic.status, "📦")
                                 epic_tasks = registry.get_epic_tasks(epic.id)
@@ -394,16 +394,16 @@ class TelegramBot:
                                 lines.append(
                                     f"{icon} *{epic.description[:50]}*\n"
                                     f"   `[{bar}]` {done}/{total} ({pct})\n"
-                                    f"   ID: `{epic.id[:8]}` | {epic.strategy[:30] if epic.strategy else '—'}"
+                                    f"   ID: `{epic.id[:8]}`"
                                 )
                             await message.reply_text("\n\n".join(lines), parse_mode="Markdown")
                         else:
-                            await message.reply_text("🎯 Aucun epic actif.")
+                            await message.reply_text("📂 Aucun projet actif.")
                     else:
                         await message.reply_text("⚠️ TaskRegistry non disponible.")
                 except Exception as e:
-                    logger.warning("Telegram /epics error: %s", e)
-                    await message.reply_text("❌ Erreur lors de la récupération des epics.")
+                    logger.warning("Telegram /project error: %s", e)
+                    await message.reply_text("❌ Erreur lors de la récupération des projets.")
             else:
                 await message.reply_text("⚠️ Memory non initialisé.")
 

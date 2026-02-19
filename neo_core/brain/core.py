@@ -444,10 +444,10 @@ class Brain:
         re.IGNORECASE,
     )
 
-    # Mots-clés signalant une intention EXPLICITE de projet/epic
+    # Mots-clés signalant une intention EXPLICITE de projet
     # Très strict : seulement quand l'utilisateur demande clairement un projet multi-étapes
     _EPIC_INTENT_RE = re.compile(
-        r"\b(epic|crée[- ]?(?:un|mon|le)\s+(?:epic|projet)|"
+        r"\b(epic|projet|project|crée[- ]?(?:un|mon|le)\s+(?:epic|projet|project)|"
         r"roadmap|feuille de route|"
         r"multi[- ]?étapes|multi[- ]?step)\b", re.IGNORECASE,
     )
@@ -732,7 +732,7 @@ class Brain:
                 subtasks=subtasks,
                 confidence=confidence,
                 worker_type=worker_type.value,
-                reasoning=f"Tâche complexe ({len(subtasks)} sous-tâches) → Epic (crew)",
+                reasoning=f"Projet ({len(subtasks)} étapes) → Crew",
                 metadata=metadata,
             )
 
@@ -1139,7 +1139,7 @@ class Brain:
             ]
 
         decompose_prompt = (
-            f"L'utilisateur veut créer un projet (Epic) sur ce sujet :\n"
+            f"L'utilisateur veut créer un projet sur ce sujet :\n"
             f"\"{request}\"\n\n"
             f"Contexte mémoire :\n{memory_context[:500]}\n\n"
             f"Décompose ce projet en 3 à 6 étapes CONCRÈTES avec le type de worker optimal.\n"
@@ -1303,7 +1303,7 @@ class Brain:
                     self.memory.update_epic_status(epic_id, "failed")
                 except Exception:
                     pass
-            return f"[Epic échoué — {epic_subject}] {type(e).__name__}: {str(e)[:300]}"
+            return f"[Projet échoué — {epic_subject}] {type(e).__name__}: {str(e)[:300]}"
 
     # ─── Communication bidirectionnelle Crew ↔ Brain ────
 

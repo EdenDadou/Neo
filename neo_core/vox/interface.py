@@ -48,7 +48,7 @@ Ce que Neo Core peut faire (informe l'utilisateur s'il demande) :
 - Rédiger des textes (articles, emails, rapports)
 - Traduire dans toutes les langues
 - Analyser des données et identifier des tendances
-- Créer des tâches et des epics (projets multi-étapes)
+- Créer des tâches et des projets (missions multi-étapes)
 - Mémoriser les préférences et apprendre des interactions
 - Utiliser des plugins personnalisés
 
@@ -415,7 +415,7 @@ class Vox:
                 f"à ce message de l'utilisateur (max 2-3 phrases). "
                 f"Si on te demande tes capacités, explique ce que Neo peut faire : "
                 f"chercher sur internet, écrire du code, analyser des données, rédiger des textes, "
-                f"traduire, créer des tâches/epics, mémoriser et apprendre.\n\n"
+                f"traduire, créer des tâches/projets, mémoriser et apprendre.\n\n"
                 f"Message : {message}\n\n"
                 f"{'Note: Brain travaille actuellement sur une tâche en arrière-plan.' if self._brain_busy else ''}"
             )

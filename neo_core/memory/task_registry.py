@@ -1,13 +1,13 @@
 """
-Task Registry — Registre de Tâches et Epics
-=============================================
+Task Registry — Registre de Tâches et Projets
+==============================================
 Gère le cycle de vie des tâches dans le système Neo Core.
 
 Deux types d'entrées :
-- Task : problème simple → 1 seul agent (worker)
-- Epic : problème complexe → équipe d'agents coordonnés
+- Task : action simple → 1 seul agent (worker)
+- Epic (Projet) : mission complexe → équipe d'agents coordonnés (Crew)
 
-Le Brain décide du type (Task vs Epic) selon la complexité.
+Le Brain décide du type (Task vs Projet) selon la complexité.
 Persistance via MemoryStore.
 """
 
@@ -76,7 +76,7 @@ class Task:
 
 @dataclass
 class Epic:
-    """Un problème complexe nécessitant une équipe d'agents coordonnés."""
+    """Un projet complexe nécessitant une équipe d'agents coordonnés (Crew)."""
     id: str
     description: str
     task_ids: list[str] = field(default_factory=list)

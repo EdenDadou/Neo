@@ -623,7 +623,7 @@ class MemoryAgent:
             "total_error_patterns": len(error_patterns),
         }
 
-    # ─── Task Registry (Tâches et Epics) ─────────────────
+    # ─── Task Registry (Tâches et Projets) ─────────────────
 
     @property
     def task_registry(self) -> Optional[TaskRegistry]:
@@ -640,7 +640,7 @@ class MemoryAgent:
     def create_epic(self, description: str,
                     subtask_descriptions: list[tuple[str, str]],
                     strategy: str = "") -> Epic | None:
-        """Crée un Epic avec ses sous-tâches."""
+        """Crée un Projet (Epic) avec ses étapes."""
         if not self._initialized or not self._task_registry:
             return None
         return self._task_registry.create_epic(description, subtask_descriptions, strategy)
@@ -653,7 +653,7 @@ class MemoryAgent:
         return self._task_registry.update_task_status(task_id, status, result)
 
     def update_epic_status(self, epic_id: str, status: str) -> Epic | None:
-        """Met à jour le statut d'un Epic."""
+        """Met à jour le statut d'un projet."""
         if not self._initialized or not self._task_registry:
             return None
         return self._task_registry.update_epic_status(epic_id, status)
@@ -665,7 +665,7 @@ class MemoryAgent:
         return self._task_registry.add_task_context(task_id, note)
 
     def add_epic_context(self, epic_id: str, note: str) -> Epic | None:
-        """Ajoute une note de contexte à un epic actif."""
+        """Ajoute une note de contexte à un projet actif."""
         if not self._initialized or not self._task_registry:
             return None
         return self._task_registry.add_epic_context(epic_id, note)
