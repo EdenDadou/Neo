@@ -446,10 +446,16 @@ class Brain:
 
     # Mots-clés signalant une intention EXPLICITE de projet
     # Très strict : seulement quand l'utilisateur demande clairement un projet multi-étapes
+    # Intention de CRÉER un projet — exige un verbe d'action AVANT "projet"
+    # Ne matche PAS "projet" tout seul (sinon "pk tu ne met pas dans le projet ?" créerait un projet)
     _EPIC_INTENT_RE = re.compile(
-        r"\b(epic|projet|project|crée[- ]?(?:un|mon|le)\s+(?:epic|projet|project)|"
-        r"roadmap|feuille de route|"
-        r"multi[- ]?étapes|multi[- ]?step)\b", re.IGNORECASE,
+        r"(?:crée|créer|lance|lancer|fais|faire|monte|monter|prépare|préparer|démarre|démarrer|"
+        r"nouveau|nouvelle|nouvel|create|start|begin)\s+"
+        r"(?:un|une|le|la|mon|ma|moi\s+un|moi\s+une)?\s*"
+        r"(?:epic|projet|project|roadmap|feuille de route|plan d[''']action)"
+        r"|"
+        r"\b(?:multi[- ]?étapes|multi[- ]?step)\b",
+        re.IGNORECASE,
     )
 
     # Mots-clés qui NÉCESSITENT un outil externe (= worker requis)
@@ -633,10 +639,11 @@ class Brain:
         if word_count <= 4 and not self._EPIC_INTENT_RE.search(stripped):
             return True
 
-        # Questions courtes (< 60 chars) sans marqueur d'outil
-        if (len(stripped) < 60 and
+        # Questions (terminées par ?) sans marqueur d'outil → direct
+        if (len(stripped) < 100 and
                 stripped.endswith("?") and
-                not self._NEEDS_TOOL_RE.search(stripped)):
+                not self._NEEDS_TOOL_RE.search(stripped) and
+                not self._EPIC_INTENT_RE.search(stripped)):
             return True
 
         return False
@@ -1217,8 +1224,9 @@ class Brain:
         """
         name = ""
 
-        # 1. Chercher un nom entre guillemets/quotes : 'Smash Gang' ou "Smash Gang"
-        name_match = re.search(r"""['"'«]([^'"'»]+)['"'»]""", request)
+        # 1. Chercher un nom entre guillemets/quotes (tous types Unicode)
+        # Couvre : 'x' "x" 'x' 'x' "x" "x" «x» ‹x›
+        name_match = re.search(r"""['"'\u2018\u2019\u201C\u201D«»‹›]([^'"'\u2018\u2019\u201C\u201D«»‹›]+)['"'\u2018\u2019\u201C\u201D«»‹›]""", request)
         if name_match:
             name = name_match.group(1).strip()
 

@@ -310,11 +310,13 @@ class TelegramBot:
 
     async def _handle_command(self, text: str, message) -> None:
         """Gère les commandes /slash Telegram."""
-        # Support multi-word commands like "/tasks reset"
-        parts = text.strip().lower().split()
-        cmd = parts[0]
-        if len(parts) >= 2 and parts[1] == "reset":
-            cmd = f"{parts[0]} {parts[1]}"
+        # Support multi-word commands like "/tasks reset", "/tasks delete T3"
+        parts = text.strip().split()
+        cmd = parts[0].lower()
+        if len(parts) >= 2 and parts[1].lower() in ("reset", "delete"):
+            cmd = f"{parts[0].lower()} {parts[1].lower()}"
+            if parts[1].lower() == "delete" and len(parts) >= 3:
+                cmd = f"{cmd} {parts[2]}"
 
         if cmd == "/start":
             user_name = message.from_user.first_name or "utilisateur"
@@ -336,8 +338,10 @@ class TelegramBot:
                 "*Commandes :*\n"
                 "/status — État du système\n"
                 "/tasks — Registre des tâches\n"
+                "/tasks delete {id} — Supprimer une tâche\n"
                 "/tasks reset — Supprimer toutes les tâches\n"
                 "/project — Projets en cours\n"
+                "/project delete {id} — Supprimer un projet\n"
                 "/project reset — Supprimer tous les projets\n"
                 "/whoami — Info sur votre accès\n"
                 "/help — Cette aide",
@@ -372,6 +376,25 @@ class TelegramBot:
             else:
                 await message.reply_text("⚠️ Memory non initialisé.")
 
+        elif cmd.startswith("/tasks delete "):
+            sid = cmd.split("delete", 1)[1].strip()
+            if self._vox and self._vox.memory and self._vox.memory.is_initialized:
+                try:
+                    registry = self._vox.memory.task_registry
+                    if registry:
+                        task = registry.delete_task(sid)
+                        if task:
+                            await message.reply_text(f"✅ Tâche #{task.short_id} supprimée : {task.description[:50]}")
+                        else:
+                            await message.reply_text(f"⚠️ Tâche '{sid}' non trouvée.")
+                    else:
+                        await message.reply_text("⚠️ TaskRegistry non disponible.")
+                except Exception as e:
+                    logger.warning("Telegram /tasks delete error: %s", e)
+                    await message.reply_text("❌ Erreur.")
+            else:
+                await message.reply_text("⚠️ Memory non initialisé.")
+
         elif cmd == "/tasks":
             if self._vox and self._vox.memory and self._vox.memory.is_initialized:
                 try:
@@ -382,7 +405,6 @@ class TelegramBot:
                         if not standalone:
                             await message.reply_text("📋 Aucune tâche indépendante.\n\n/tasks reset pour tout supprimer")
                         else:
-                            status_emoji = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
                             in_progress = [t for t in standalone if t.status == "in_progress"]
                             pending = [t for t in standalone if t.status == "pending"]
                             done = [t for t in standalone if t.status == "done"]
@@ -391,28 +413,54 @@ class TelegramBot:
                             if in_progress:
                                 lines.append("▶ *En cours*")
                                 for t in in_progress:
-                                    lines.append(f"  🔄 {t.description[:55]} ({t.worker_type})")
+                                    sid = f"#{t.short_id} " if t.short_id else ""
+                                    lines.append(f"  🔄 {sid}{t.description[:50]} ({t.worker_type})")
                             if pending:
                                 lines.append("\n◻ *À faire*")
                                 for t in pending[:10]:
-                                    lines.append(f"  ⏳ {t.description[:55]} ({t.worker_type})")
+                                    sid = f"#{t.short_id} " if t.short_id else ""
+                                    lines.append(f"  ⏳ {sid}{t.description[:50]} ({t.worker_type})")
                                 if len(pending) > 10:
                                     lines.append(f"  ... et {len(pending) - 10} autres")
                             if done:
                                 lines.append(f"\n✓ *Terminées* ({len(done)})")
                                 for t in done[-5:]:
-                                    lines.append(f"  ✅ {t.description[:55]}")
+                                    sid = f"#{t.short_id} " if t.short_id else ""
+                                    lines.append(f"  ✅ {sid}{t.description[:50]}")
                             if failed:
                                 lines.append(f"\n✗ *Échouées* ({len(failed)})")
                                 for t in failed[-3:]:
-                                    lines.append(f"  ❌ {t.description[:55]}")
-                            lines.append(f"\n{len(standalone)} tâche(s) · /tasks reset pour supprimer")
+                                    sid = f"#{t.short_id} " if t.short_id else ""
+                                    lines.append(f"  ❌ {sid}{t.description[:50]}")
+                            lines.append(f"\n{len(standalone)} tâche(s) · /tasks delete {{id}} | /tasks reset")
                             await message.reply_text("\n".join(lines), parse_mode="Markdown")
                     else:
                         await message.reply_text("⚠️ TaskRegistry non disponible.")
                 except Exception as e:
                     logger.warning("Telegram /tasks error: %s", e)
                     await message.reply_text("❌ Erreur lors de la récupération des tâches.")
+            else:
+                await message.reply_text("⚠️ Memory non initialisé.")
+
+        elif cmd.startswith(("/project delete ", "/epics delete ")):
+            sid = cmd.split("delete", 1)[1].strip()
+            if self._vox and self._vox.memory and self._vox.memory.is_initialized:
+                try:
+                    registry = self._vox.memory.task_registry
+                    if registry:
+                        epic, tasks_deleted = registry.delete_epic(sid)
+                        if epic:
+                            await message.reply_text(
+                                f"✅ Projet #{epic.short_id} '{epic.display_name[:40]}' supprimé "
+                                f"({tasks_deleted} tâches liées)."
+                            )
+                        else:
+                            await message.reply_text(f"⚠️ Projet '{sid}' non trouvé.")
+                    else:
+                        await message.reply_text("⚠️ TaskRegistry non disponible.")
+                except Exception as e:
+                    logger.warning("Telegram /project delete error: %s", e)
+                    await message.reply_text("❌ Erreur.")
             else:
                 await message.reply_text("⚠️ Memory non initialisé.")
 
@@ -460,13 +508,15 @@ class TelegramBot:
                                 pct = f"{d * 100 // tot}%" if tot > 0 else "—"
                                 bar_filled = d * 5 // tot if tot > 0 else 0
                                 bar = "█" * bar_filled + "░" * (5 - bar_filled)
+                                e_sid = f"#{epic.short_id} " if epic.short_id else ""
                                 lines.append(
-                                    f"{icon} *{epic.display_name[:50]}*\n"
-                                    f"   `[{bar}]` {d}/{tot} ({pct})  ID: `{epic.id[:8]}`"
+                                    f"{icon} {e_sid}*{epic.display_name[:45]}*\n"
+                                    f"   `[{bar}]` {d}/{tot} ({pct})"
                                 )
                                 for t in epic_tasks:
                                     t_icon = status_icons.get(t.status, "❓")
-                                    lines.append(f"      {t_icon} {t.description[:48]} ({t.worker_type})")
+                                    t_sid = f"#{t.short_id} " if t.short_id else ""
+                                    lines.append(f"      {t_icon} {t_sid}{t.description[:42]} ({t.worker_type})")
                             if active:
                                 lines.append("▶ *En cours*")
                                 for e in active:

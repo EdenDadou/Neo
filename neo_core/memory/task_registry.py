@@ -30,6 +30,7 @@ class Task:
     id: str
     description: str
     worker_type: str
+    short_id: str = ""  # ID court affiché (ex: "T1", "T2")
     status: str = "pending"  # pending | in_progress | done | failed
     result: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -43,6 +44,7 @@ class Task:
             "id": self.id,
             "description": self.description,
             "worker_type": self.worker_type,
+            "short_id": self.short_id,
             "status": self.status,
             "result": self.result,
             "created_at": self.created_at,
@@ -69,9 +71,10 @@ class Task:
             "failed": "❌",
         }
         icon = status_icons.get(self.status, "?")
-        epic_tag = f" [Epic:{self.epic_id[:8]}]" if self.epic_id else ""
+        sid = f"#{self.short_id}" if self.short_id else f"[{self.id[:8]}]"
+        epic_tag = f" [P:{self.epic_id[:8]}]" if self.epic_id else ""
         attempts = f" (×{self.attempt_count})" if self.attempt_count > 1 else ""
-        return f"{icon} [{self.id[:8]}] {self.description[:60]}{epic_tag}{attempts} — {self.worker_type}"
+        return f"{icon} {sid} {self.description[:60]}{epic_tag}{attempts} — {self.worker_type}"
 
 
 @dataclass
@@ -80,6 +83,7 @@ class Epic:
     id: str
     description: str
     name: str = ""  # Nom court du projet (donné par l'utilisateur)
+    short_id: str = ""  # ID court affiché (ex: "P1", "P2")
     task_ids: list[str] = field(default_factory=list)
     status: str = "pending"  # pending | in_progress | done | failed
     strategy: str = ""  # Stratégie de coordination
@@ -97,6 +101,7 @@ class Epic:
             "id": self.id,
             "description": self.description,
             "name": self.name,
+            "short_id": self.short_id,
             "task_ids": self.task_ids,
             "status": self.status,
             "strategy": self.strategy,
@@ -121,8 +126,9 @@ class Epic:
             "failed": "❌",
         }
         icon = status_icons.get(self.status, "?")
+        sid = f"#{self.short_id}" if self.short_id else f"[{self.id[:8]}]"
         n_tasks = len(self.task_ids)
-        return f"{icon} [{self.id[:8]}] {self.display_name} — {n_tasks} tâche(s)"
+        return f"{icon} {sid} {self.display_name} — {n_tasks} tâche(s)"
 
 
 # ─── Task Registry ──────────────────────────────────────
@@ -141,6 +147,47 @@ class TaskRegistry:
 
     def __init__(self, store: MemoryStore):
         self.store = store
+        # Compteurs pour les short_ids — initialisés paresseusement
+        self._next_task_num: int | None = None
+        self._next_epic_num: int | None = None
+
+    def _init_counters(self) -> None:
+        """Initialise les compteurs short_id à partir des records existants."""
+        if self._next_task_num is not None:
+            return  # Déjà initialisé
+        max_t, max_e = 0, 0
+        for record in self.store.search_by_source(self.SOURCE_TASK, limit=500):
+            try:
+                data = json.loads(record.content)
+                sid = data.get("short_id", "")
+                if sid and sid.startswith("T"):
+                    num = int(sid[1:])
+                    max_t = max(max_t, num)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        for record in self.store.search_by_source(self.SOURCE_EPIC, limit=100):
+            try:
+                data = json.loads(record.content)
+                sid = data.get("short_id", "")
+                if sid and sid.startswith("P"):
+                    num = int(sid[1:])
+                    max_e = max(max_e, num)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        self._next_task_num = max_t + 1
+        self._next_epic_num = max_e + 1
+
+    def _next_task_short_id(self) -> str:
+        self._init_counters()
+        sid = f"T{self._next_task_num}"
+        self._next_task_num += 1
+        return sid
+
+    def _next_epic_short_id(self) -> str:
+        self._init_counters()
+        sid = f"P{self._next_epic_num}"
+        self._next_epic_num += 1
+        return sid
 
     # ─── Création ────────────────────────────────────
 
@@ -155,6 +202,7 @@ class TaskRegistry:
             id=str(uuid.uuid4()),
             description=description,
             worker_type=worker_type,
+            short_id=self._next_task_short_id(),
             epic_id=epic_id,
         )
         self._persist_task(task)
@@ -180,6 +228,7 @@ class TaskRegistry:
             id=str(uuid.uuid4()),
             description=description,
             name=name,
+            short_id=self._next_epic_short_id(),
             strategy=strategy,
         )
 
@@ -344,6 +393,62 @@ class TaskRegistry:
         """Retourne toutes les tâches d'un Epic."""
         all_tasks = self.get_all_tasks(limit=200)
         return [t for t in all_tasks if t.epic_id == epic_id]
+
+    # ─── Recherche par short_id ───────────────────────
+
+    def find_task_by_short_id(self, short_id: str) -> Optional[Task]:
+        """Trouve une tâche par son short_id (ex: 'T3' ou '3')."""
+        # Normaliser : "3" → "T3", "t3" → "T3"
+        sid = short_id.strip().upper()
+        if sid.isdigit():
+            sid = f"T{sid}"
+        for task in self.get_all_tasks(limit=200):
+            if task.short_id == sid:
+                return task
+        return None
+
+    def find_epic_by_short_id(self, short_id: str) -> Optional[Epic]:
+        """Trouve un projet par son short_id (ex: 'P1' ou '1')."""
+        sid = short_id.strip().upper()
+        if sid.isdigit():
+            sid = f"P{sid}"
+        for epic in self.get_all_epics(limit=100):
+            if epic.short_id == sid:
+                return epic
+        return None
+
+    # ─── Suppression individuelle ─────────────────────
+
+    def delete_task(self, short_id: str) -> Optional[Task]:
+        """Supprime une tâche par son short_id. Retourne la tâche supprimée ou None."""
+        task = self.find_task_by_short_id(short_id)
+        if not task:
+            return None
+        _, record_id = self._find_task_with_id(task.id)
+        if record_id:
+            self.store.delete(record_id)
+        return task
+
+    def delete_epic(self, short_id: str) -> tuple[Optional[Epic], int]:
+        """
+        Supprime un projet et toutes ses tâches liées.
+        Retourne (epic, nombre_tâches_supprimées) ou (None, 0).
+        """
+        epic = self.find_epic_by_short_id(short_id)
+        if not epic:
+            return None, 0
+        # Supprimer les tâches liées
+        tasks_deleted = 0
+        for task in self.get_epic_tasks(epic.id):
+            _, record_id = self._find_task_with_id(task.id)
+            if record_id:
+                self.store.delete(record_id)
+                tasks_deleted += 1
+        # Supprimer l'epic
+        _, record_id = self._find_epic_with_id(epic.id)
+        if record_id:
+            self.store.delete(record_id)
+        return epic, tasks_deleted
 
     def get_summary(self) -> dict:
         """Retourne un résumé du registre."""

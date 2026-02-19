@@ -401,12 +401,22 @@ class NeoTUI(App):
             await self._cmd_tasks_reset(chat)
             return
 
+        if cmd.startswith(("/tasks delete ", "tasks delete ")):
+            sid = cmd.split("delete", 1)[1].strip()
+            await self._cmd_tasks_delete(chat, sid)
+            return
+
         if cmd in ("/tasks", "tasks"):
             await self._cmd_tasks(chat)
             return
 
         if cmd in ("/project reset", "/epics reset", "project reset"):
             await self._cmd_epics_reset(chat)
+            return
+
+        if cmd.startswith(("/project delete ", "/epics delete ", "project delete ")):
+            sid = cmd.split("delete", 1)[1].strip()
+            await self._cmd_epics_delete(chat, sid)
             return
 
         if cmd in ("/project", "/epics", "project", "epics"):
@@ -890,18 +900,21 @@ class NeoTUI(App):
         done = [t for t in standalone if t.status == "done"]
         failed = [t for t in standalone if t.status == "failed"]
 
+        def _sid(t):
+            return f"[bold cyan]#{t.short_id}[/bold cyan]" if t.short_id else ""
+
         # ── En cours ──
         if in_progress:
             lines.append("[bold green]▶ En cours[/bold green]")
             for t in in_progress:
-                lines.append(f"  🔄 {t.description[:55]}  [dim]{t.worker_type}[/dim]")
+                lines.append(f"  🔄 {_sid(t)} {t.description[:50]}  [dim]{t.worker_type}[/dim]")
             lines.append("")
 
         # ── À faire ──
         if pending:
             lines.append("[bold yellow]◻ À faire[/bold yellow]")
             for t in pending[:10]:
-                lines.append(f"  ⏳ {t.description[:55]}  [dim]{t.worker_type}[/dim]")
+                lines.append(f"  ⏳ {_sid(t)} {t.description[:50]}  [dim]{t.worker_type}[/dim]")
             if len(pending) > 10:
                 lines.append(f"  [dim]... et {len(pending) - 10} autres[/dim]")
             lines.append("")
@@ -910,7 +923,7 @@ class NeoTUI(App):
         if done:
             lines.append("[bold dim]✓ Terminées[/bold dim]")
             for t in done[-5:]:
-                lines.append(f"  [dim]✅ {t.description[:55]}  {t.worker_type}[/dim]")
+                lines.append(f"  [dim]✅ {_sid(t)} {t.description[:50]}  {t.worker_type}[/dim]")
             if len(done) > 5:
                 lines.append(f"  [dim]... et {len(done) - 5} autres[/dim]")
             lines.append("")
@@ -919,13 +932,13 @@ class NeoTUI(App):
         if failed:
             lines.append("[bold red]✗ Échouées[/bold red]")
             for t in failed[-3:]:
-                lines.append(f"  [dim red]❌ {t.description[:55]}  {t.worker_type}[/dim red]")
+                lines.append(f"  [dim red]❌ {_sid(t)} {t.description[:50]}  {t.worker_type}[/dim red]")
             lines.append("")
 
         # Stats
         total = len(standalone)
         if total > 0:
-            lines.append(f"[dim]{total} tâche(s) · /tasks reset pour tout supprimer[/dim]")
+            lines.append(f"[dim]{total} tâche(s) · /tasks delete {{id}} | /tasks reset[/dim]")
         else:
             lines.append("[dim]Aucune tâche indépendante.[/dim]")
 
@@ -979,22 +992,25 @@ class NeoTUI(App):
         def _render_epic(epic, icon_override=None):
             if from_api:
                 icon = icon_override or status_icons.get(epic.get("status", ""), "?")
+                sid = epic.get("short_id", "")
+                sid_tag = f"[bold cyan]#{sid}[/bold cyan] " if sid else ""
                 name = epic.get("name", "") or epic.get("description", "")[:50]
-                eid = epic.get("id", "")[:8]
                 progress = epic.get("progress", "0/0")
-                lines.append(f"  {icon} [bold]{name[:50]}[/bold]  [dim]{eid}[/dim]  {progress}")
+                lines.append(f"  {icon} {sid_tag}[bold]{name[:45]}[/bold]  {progress}")
             else:
                 icon = icon_override or status_icons.get(epic.status, "?")
+                sid_tag = f"[bold cyan]#{epic.short_id}[/bold cyan] " if epic.short_id else ""
                 epic_tasks = registry.get_epic_tasks(epic.id) if registry else []
                 epic_tasks.sort(key=lambda t: t.created_at)
                 d = sum(1 for t in epic_tasks if t.status == "done")
                 tot = len(epic_tasks)
                 pct = f"{d * 100 // tot}%" if tot > 0 else "—"
-                lines.append(f"  {icon} [bold]{epic.display_name[:50]}[/bold]  [dim]{epic.id[:8]}[/dim]  {d}/{tot} ({pct})")
+                lines.append(f"  {icon} {sid_tag}[bold]{epic.display_name[:45]}[/bold]  {d}/{tot} ({pct})")
                 # Sous-tâches du projet
                 for t in epic_tasks:
                     t_icon = status_icons.get(t.status, "?")
-                    lines.append(f"      {t_icon} {t.description[:48]}  [dim]{t.worker_type}[/dim]")
+                    t_sid = f"[cyan]#{t.short_id}[/cyan] " if t.short_id else ""
+                    lines.append(f"      {t_icon} {t_sid}{t.description[:42]}  [dim]{t.worker_type}[/dim]")
 
         # ── En cours ──
         if active:
@@ -1035,7 +1051,7 @@ class NeoTUI(App):
             lines.append("")
 
         total = len(epics)
-        lines.append(f"[dim]{total} projet(s) · /project reset pour tout supprimer[/dim]")
+        lines.append(f"[dim]{total} projet(s) · /project delete {{id}} | /project reset[/dim]")
 
         chat.write(Panel("\n".join(lines), title="[bold cyan]Projets[/bold cyan]", border_style="cyan"))
 
@@ -1112,6 +1128,72 @@ class NeoTUI(App):
                     title="[bold cyan]Projects Reset[/bold cyan]",
                     border_style="cyan",
                 ))
+                return
+        else:
+            chat.write(Text("  ⚠ Memory non disponible", style="yellow"))
+
+    async def _cmd_tasks_delete(self, chat: RichLog, short_id: str) -> None:
+        """Commande /tasks delete {id} — supprime une tâche spécifique."""
+        if self.mode == "daemon" and self._http_client:
+            try:
+                resp = await self._http_client.request(
+                    "DELETE",
+                    f"{self.api_url}/tasks/{short_id}",
+                    headers=self._api_headers,
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    chat.write(Text(f"  ✅ Tâche #{data.get('short_id', short_id)} supprimée.", style="green"))
+                else:
+                    chat.write(Text(f"  ⚠ Tâche '{short_id}' non trouvée.", style="yellow"))
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
+        elif self.vox and self.vox.memory and self.vox.memory.is_initialized:
+            registry = self.vox.memory.task_registry
+            if registry:
+                task = registry.delete_task(short_id)
+                if task:
+                    chat.write(Text(f"  ✅ Tâche #{task.short_id} supprimée : {task.description[:50]}", style="green"))
+                else:
+                    chat.write(Text(f"  ⚠ Tâche '{short_id}' non trouvée.", style="yellow"))
+                return
+        else:
+            chat.write(Text("  ⚠ Memory non disponible", style="yellow"))
+
+    async def _cmd_epics_delete(self, chat: RichLog, short_id: str) -> None:
+        """Commande /project delete {id} — supprime un projet et ses tâches."""
+        if self.mode == "daemon" and self._http_client:
+            try:
+                resp = await self._http_client.request(
+                    "DELETE",
+                    f"{self.api_url}/project/{short_id}",
+                    headers=self._api_headers,
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    chat.write(Text(
+                        f"  ✅ Projet #{data.get('short_id', short_id)} supprimé "
+                        f"({data.get('tasks_deleted', 0)} tâches liées).",
+                        style="green",
+                    ))
+                else:
+                    chat.write(Text(f"  ⚠ Projet '{short_id}' non trouvé.", style="yellow"))
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
+        elif self.vox and self.vox.memory and self.vox.memory.is_initialized:
+            registry = self.vox.memory.task_registry
+            if registry:
+                epic, tasks_deleted = registry.delete_epic(short_id)
+                if epic:
+                    chat.write(Text(
+                        f"  ✅ Projet #{epic.short_id} '{epic.display_name[:40]}' supprimé "
+                        f"({tasks_deleted} tâches liées).",
+                        style="green",
+                    ))
+                else:
+                    chat.write(Text(f"  ⚠ Projet '{short_id}' non trouvé.", style="yellow"))
                 return
         else:
             chat.write(Text("  ⚠ Memory non disponible", style="yellow"))

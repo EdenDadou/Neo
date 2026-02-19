@@ -190,7 +190,8 @@ def print_epics(vox):
         total = len(epic_tasks)
         pct = f"{done * 100 // total}%" if total > 0 else "—"
 
-        lines.append(f"{icon} [bold]{epic.display_name[:60]}[/bold]  [dim]{epic.id[:8]}[/dim]")
+        sid_tag = f"[bold cyan]#{epic.short_id}[/bold cyan] " if epic.short_id else ""
+        lines.append(f"{icon} {sid_tag}[bold]{epic.display_name[:55]}[/bold]")
         lines.append(f"  Progrès: [bold green]{done}[/bold green]/{total} ({pct})")
         if epic.strategy:
             lines.append(f"  [dim italic]{epic.strategy[:60]}[/dim italic]")
@@ -198,8 +199,8 @@ def print_epics(vox):
         # Sous-tâches du projet
         for t in epic_tasks:
             t_icon = status_icons.get(t.status, "?")
-            desc = t.description[:50]
-            lines.append(f"    {t_icon} {desc}  [dim]{t.worker_type}[/dim]")
+            t_sid = f"[cyan]#{t.short_id}[/cyan] " if t.short_id else ""
+            lines.append(f"    {t_icon} {t_sid}{t.description[:45]}  [dim]{t.worker_type}[/dim]")
         lines.append("")
 
     console.print(Panel(
@@ -241,6 +242,41 @@ def reset_epics(vox):
     except Exception:
         pass
     console.print(f"[green]  ✅ {deleted} entrée(s) supprimée(s). Tous les projets remis à zéro.[/green]")
+
+
+def delete_task(vox, short_id: str):
+    """Supprime une tâche par son short_id."""
+    if not vox.memory or not vox.memory.is_initialized:
+        console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
+        return
+    registry = vox.memory.task_registry
+    if not registry:
+        console.print("[yellow]  ⚠ TaskRegistry non disponible[/yellow]")
+        return
+    task = registry.delete_task(short_id)
+    if task:
+        console.print(f"[green]  ✅ Tâche #{task.short_id} supprimée : {task.description[:50]}[/green]")
+    else:
+        console.print(f"[yellow]  ⚠ Tâche '{short_id}' non trouvée.[/yellow]")
+
+
+def delete_epic(vox, short_id: str):
+    """Supprime un projet et ses tâches liées."""
+    if not vox.memory or not vox.memory.is_initialized:
+        console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
+        return
+    registry = vox.memory.task_registry
+    if not registry:
+        console.print("[yellow]  ⚠ TaskRegistry non disponible[/yellow]")
+        return
+    epic, tasks_deleted = registry.delete_epic(short_id)
+    if epic:
+        console.print(
+            f"[green]  ✅ Projet #{epic.short_id} '{epic.display_name[:40]}' supprimé "
+            f"({tasks_deleted} tâches liées).[/green]"
+        )
+    else:
+        console.print(f"[yellow]  ⚠ Projet '{short_id}' non trouvé.[/yellow]")
 
 
 def print_heartbeat(heartbeat_manager):
@@ -757,12 +793,22 @@ async def conversation_loop(vox):
                 reset_tasks(vox)
                 continue
 
+            if cmd.startswith(("/tasks delete ", "tasks delete ")):
+                sid = cmd.split("delete", 1)[1].strip()
+                delete_task(vox, sid)
+                continue
+
             if cmd in ("/tasks", "tasks"):
                 print_tasks(vox)
                 continue
 
             if cmd in ("/project reset", "/epics reset", "project reset"):
                 reset_epics(vox)
+                continue
+
+            if cmd.startswith(("/project delete ", "/epics delete ", "project delete ")):
+                sid = cmd.split("delete", 1)[1].strip()
+                delete_epic(vox, sid)
                 continue
 
             if cmd in ("/project", "/epics", "project", "epics"):

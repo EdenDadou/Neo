@@ -410,6 +410,7 @@ async def get_epics():
         total = len(tasks)
         result.append({
             "id": epic.id,
+            "short_id": epic.short_id,
             "name": epic.display_name,
             "description": epic.description,
             "status": epic.status,
@@ -432,6 +433,56 @@ async def reset_tasks():
         raise HTTPException(503, "TaskRegistry not available")
     deleted = registry.reset_all_tasks()
     return {"deleted": deleted, "message": f"{deleted} tâche(s) supprimée(s)"}
+
+
+@router.delete("/tasks/{short_id}")
+async def delete_task(short_id: str):
+    """Delete a single task by short ID (e.g. T3 or 3)."""
+    if short_id == "reset":
+        return await reset_tasks()
+    if not neo_core._initialized:
+        raise HTTPException(503, "Neo Core not initialized")
+    vox = neo_core.vox
+    if not vox or not vox.memory or not vox.memory.is_initialized:
+        raise HTTPException(503, "Memory not initialized")
+    registry = vox.memory.task_registry
+    if not registry:
+        raise HTTPException(503, "TaskRegistry not available")
+    task = registry.delete_task(short_id)
+    if not task:
+        raise HTTPException(404, f"Task '{short_id}' not found")
+    return {
+        "deleted": True,
+        "short_id": task.short_id,
+        "description": task.description,
+        "message": f"Tâche #{task.short_id} supprimée",
+    }
+
+
+@router.delete("/project/{short_id}")
+@router.delete("/epics/{short_id}")
+async def delete_epic(short_id: str):
+    """Delete a project and its tasks by short ID (e.g. P1 or 1)."""
+    if short_id == "reset":
+        return await _reset_epics_impl()
+    if not neo_core._initialized:
+        raise HTTPException(503, "Neo Core not initialized")
+    vox = neo_core.vox
+    if not vox or not vox.memory or not vox.memory.is_initialized:
+        raise HTTPException(503, "Memory not initialized")
+    registry = vox.memory.task_registry
+    if not registry:
+        raise HTTPException(503, "TaskRegistry not available")
+    epic, tasks_deleted = registry.delete_epic(short_id)
+    if not epic:
+        raise HTTPException(404, f"Project '{short_id}' not found")
+    return {
+        "deleted": True,
+        "short_id": epic.short_id,
+        "name": epic.display_name,
+        "tasks_deleted": tasks_deleted,
+        "message": f"Projet #{epic.short_id} supprimé ({tasks_deleted} tâches)",
+    }
 
 
 @router.delete("/project/reset")
