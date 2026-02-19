@@ -446,6 +446,7 @@ class Worker:
         # Compteur d'extensions dynamiques
         _extensions_used = 0
         _max_extensions = 2  # Max 2 extensions de 2 itérations chacune
+        _absolute_max = 15  # Plafond absolu, jamais dépassé
         iteration = 0
 
         while iteration < max_iterations:
@@ -547,7 +548,7 @@ class Worker:
             iteration += 1
 
             # Extension dynamique : si le worker n'a pas fini et qu'il reste des extensions
-            if iteration >= max_iterations and _extensions_used < _max_extensions:
+            if iteration >= max_iterations and _extensions_used < _max_extensions and max_iterations < _absolute_max:
                 if total_text_parts:
                     last_text = total_text_parts[-1].lower()
                     needs_more = any(kw in last_text for kw in [
@@ -556,7 +557,7 @@ class Worker:
                         "prochaine étape", "next step",
                     ])
                     if needs_more:
-                        max_iterations += 2
+                        max_iterations = min(max_iterations + 2, _absolute_max)
                         _extensions_used += 1
                         logger.info(
                             "[Worker %s] Dynamic extension +2 iterations (total: %d, ext: %d)",
@@ -677,12 +678,13 @@ class Worker:
 
             parts = []
             for rec in records:
-                # Extraire un résumé court
+                # Extraire un résumé court (max 200 chars par record)
                 lines = rec.content.split("\n")
-                status_line = lines[0] if lines else ""
+                status_line = (lines[0] if lines else "")[:200]
                 parts.append(f"- {status_line}")
 
-            return "\n".join(parts)
+            result = "\n".join(parts)
+            return result[:1000]  # Plafonner pour ne pas saturer le contexte
         except Exception as e:
             logger.debug("Learning context retrieval failed: %s", e)
             return ""

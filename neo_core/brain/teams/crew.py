@@ -152,6 +152,8 @@ class CrewState:
 
     @property
     def is_complete(self) -> bool:
+        if not self.steps:
+            return True
         # v2: terminé quand tous les steps sont dans completed_indices
         if self.completed_indices:
             return len(self.completed_indices) >= len(self.steps)
@@ -162,7 +164,8 @@ class CrewState:
     def progress_pct(self) -> float:
         if not self.steps:
             return 0.0
-        done = len(self.completed_indices) if self.completed_indices else self.current_step_index
+        # Utiliser le max entre completed_indices et current_step_index pour compat v1/v2
+        done = max(len(self.completed_indices), self.current_step_index)
         return (done / len(self.steps)) * 100
 
     def get_accumulated_text(self) -> str:
@@ -392,10 +395,11 @@ class CrewExecutor:
                 f"Crew {epic_id[:8]} déjà terminé ou inactif (status={state.status})",
             )]
 
-        # Vérifier si les steps ont des dépendances (format v2)
-        has_dependencies = any(step.depends_on for step in state.steps)
-        if not has_dependencies:
-            # Fallback séquentiel (compat ancien format)
+        # Vérifier si les steps utilisent le format v2 (completed_indices renseigné
+        # OU au moins un step a des depends_on non-vides)
+        is_v2 = bool(state.completed_indices) or any(len(step.depends_on) > 0 for step in state.steps)
+        if not is_v2:
+            # Fallback séquentiel (compat ancien format v1)
             event = await self.advance_one_step(epic_id)
             return [event]
 
@@ -430,7 +434,18 @@ class CrewExecutor:
             output, success = await self._execute_step(step, enriched_task)
             return step, output, success, time.time() - t0
 
-        results = await _aio.gather(*[_run_step(s) for s in ready_steps])
+        results = await _aio.gather(*[_run_step(s) for s in ready_steps], return_exceptions=True)
+
+        # Filtrer les exceptions : les transformer en résultats d'échec
+        processed_results = []
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                step = ready_steps[i]
+                logger.error("[Crew %s] Step %d exception: %s", epic_id[:8], step.index, res)
+                processed_results.append((step, f"[Exception] {type(res).__name__}: {str(res)[:300]}", False, 0.0))
+            else:
+                processed_results.append(res)
+        results = processed_results
 
         for step, output, success, elapsed in results:
             # Enregistrer le résultat
@@ -556,6 +571,9 @@ class CrewExecutor:
         )
         state.results.append(result)
         state.current_step_index += 1
+        # Synchroniser completed_indices (compat v2)
+        if step.index not in state.completed_indices:
+            state.completed_indices.append(step.index)
 
         # 4. Stocker en mémoire (pour recherche sémantique)
         self._store_step_result(epic_id, step, step_output)
@@ -694,16 +712,8 @@ Réponds UNIQUEMENT avec le JSON."""
         try:
             response = await self.brain._raw_llm_call(prompt)
 
-            # Parser le JSON
-            cleaned = response.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3]
-                cleaned = cleaned.strip()
-
-            import json as _json
-            data = _json.loads(cleaned)
+            # Parser le JSON via le helper de Brain
+            data = self.brain._parse_json_response(response)
             action = data.get("action", "continue")
             reasoning = data.get("reasoning", "")
 
@@ -760,6 +770,10 @@ Réponds UNIQUEMENT avec le JSON."""
 
         except Exception as e:
             logger.debug("[Crew Orchestrator] Replan failed: %s", e)
+
+        # Sauvegarder l'état après replan (même si continue, pour les events)
+        if events:
+            self.save_state(state)
 
         return events
 
@@ -875,7 +889,7 @@ Réponds UNIQUEMENT avec le JSON."""
         try:
             registry = self.memory.task_registry
             if registry:
-                registry.add_task(
+                registry.create_task(
                     description=step.description[:200],
                     worker_type=step.worker_type.value,
                     epic_id=epic_id,

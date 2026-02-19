@@ -273,9 +273,10 @@ class HeartbeatManager:
                         continue
 
                     try:
+                        # Timeout < heartbeat interval pour ne pas bloquer le pulse
                         events = await asyncio.wait_for(
                             executor.advance_ready_steps(epic.id),
-                            timeout=300.0,
+                            timeout=240.0,
                         )
                         # Compter uniquement les steps réellement exécutés (pas les events orchestrateur/blocked)
                         step_events = [e for e in events if e.event_type in ("step_completed", "step_failed")]

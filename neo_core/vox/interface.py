@@ -104,6 +104,15 @@ STATIC_ACKS = [
     "Bien reçu, je traite votre requête...",
 ]
 
+# Liste UNIQUE de pronoms/expressions ambigus nécessitant contexte pour désambiguïser
+# Utilisée à la fois par process_message() (skip reformulation) et format_request_async()
+_AMBIGUOUS_PRONOUNS = frozenset([
+    "ça", "cela", "ce", "il", "elle", "les", "eux", "celle", "celui",
+    "pareil", "même", "même chose", "le même", "la même", "les mêmes",
+    "continue", "enchaîne", "enchaine", "la suite",
+    "fais-le", "fais le", "fais-la", "fais la",
+])
+
 
 @dataclass
 class AgentStatus:
@@ -520,11 +529,8 @@ class Vox:
         try:
             # Injecter le contexte récent pour les messages courts/ambigus ou avec pronoms
             recent_context = ""
-            _has_pronoun = any(p in human_message.lower() for p in [
-                "ça", "cela", "ce", "pareil", "même", "ça", "il", "elle",
-                "les", "les mêmes", "eux", "celle", "celui", "continue",
-                "enchaîne", "la suite", "fais-le", "fais le",
-            ])
+            msg_lower = human_message.lower()
+            _has_pronoun = any(p in msg_lower for p in _AMBIGUOUS_PRONOUNS)
             if (len(human_message.split()) < 20 or _has_pronoun) and self.conversation_history:
                 recent_context = self._build_recent_context()
 
@@ -577,9 +583,7 @@ class Vox:
         self.update_agent_status("Vox", active=True, task="reformulation", progress=0.3)
 
         # Skip reformulation pour les messages longs et clairs (>100 chars sans pronoms ambigus)
-        _ambiguous_pronouns = ["ça", "cela", "pareil", "même chose", "le même", "la même",
-                               "continue", "enchaîne", "la suite", "fais-le", "fais le"]
-        _has_ambiguity = any(p in human_message.lower() for p in _ambiguous_pronouns)
+        _has_ambiguity = any(p in human_message.lower() for p in _AMBIGUOUS_PRONOUNS)
         if len(human_message) > 100 and not _has_ambiguity:
             logger.info("[VOX] Reformulation skipped (long clear message: %d chars)", len(human_message))
             formatted_request = human_message

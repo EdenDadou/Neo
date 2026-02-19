@@ -214,6 +214,18 @@ class Brain:
                 return True
         return False
 
+    @staticmethod
+    def _parse_json_response(text: str) -> dict:
+        """Parse un JSON depuis une réponse LLM (gère les backticks markdown)."""
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            # Retirer la ligne ```json ou ``` initiale
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+        return json.loads(cleaned)
+
     @property
     def factory(self) -> WorkerFactory:
         """Accès lazy à la Factory (créée à la demande)."""
@@ -612,14 +624,7 @@ Réponds UNIQUEMENT avec ce JSON :
             )
 
             if response.text and not response.text.startswith("[Erreur"):
-                # Parser le JSON
-                cleaned = response.text.strip()
-                if cleaned.startswith("```"):
-                    cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-                    if cleaned.endswith("```"):
-                        cleaned = cleaned[:-3]
-                    cleaned = cleaned.strip()
-                data = json.loads(cleaned)
+                data = self._parse_json_response(response.text)
                 logger.info(
                     "[Brain] LLM classifier: intent=%s, worker=%s, confidence=%.1f — %s",
                     data.get("intent"), data.get("worker_type"),
@@ -934,16 +939,7 @@ Réponds UNIQUEMENT avec ce JSON :
             )
 
             response_text = await self._raw_llm_call(prompt)
-
-            # Parser le JSON
-            cleaned = response_text.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3]
-                cleaned = cleaned.strip()
-
-            data = json.loads(cleaned)
+            data = self._parse_json_response(response_text)
 
             worker_type_str = data.get("worker_type", "generic")
             try:
@@ -1303,15 +1299,7 @@ Réponds UNIQUEMENT avec ce JSON :
 
         try:
             response = await self._raw_llm_call(decompose_prompt)
-            # Nettoyer la réponse (enlever ```json ... ``` si présent)
-            cleaned = response.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3]
-                cleaned = cleaned.strip()
-
-            data = json.loads(cleaned)
+            data = self._parse_json_response(response)
             if isinstance(data, list) and len(data) >= 2:
                 steps = []
                 for i, item in enumerate(data):
