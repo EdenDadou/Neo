@@ -118,41 +118,78 @@ def print_skills(vox):
 
 
 def print_tasks(vox):
-    """Affiche le registre des tâches."""
+    """Affiche le registre des tâches, groupées par statut."""
     if not vox.memory or not vox.memory.is_initialized:
         console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
         return
 
-    report = vox.memory.get_tasks_report()
-    summary = report.get("summary", {})
+    registry = vox.memory.task_registry
+    if not registry:
+        console.print("[yellow]  ⚠ TaskRegistry non disponible[/yellow]")
+        return
 
-    lines = [f"[bold]Registre des tâches[/bold]\n"]
+    tasks = registry.get_all_tasks(limit=50)
 
-    if report["tasks"]:
-        for t_str in report["tasks"][:20]:
-            lines.append(f"  {t_str}")
-    else:
-        lines.append("  [dim]Aucune tâche enregistrée.[/dim]")
+    if not tasks:
+        console.print(Panel(
+            "[dim]Aucune tâche enregistrée.[/dim]",
+            title="[bold cyan]Tâches[/bold cyan]",
+            border_style="cyan",
+        ))
+        return
 
-    if summary:
-        lines.append(f"\n[bold]Résumé[/bold]")
-        lines.append(
-            f"  Total : {summary.get('total_tasks', 0)} tâches, "
-            f"{summary.get('total_epics', 0)} projets"
-        )
-        if summary.get("tasks_by_status"):
-            parts = [f"{k}: {v}" for k, v in summary["tasks_by_status"].items()]
-            lines.append(f"  Statuts : {', '.join(parts)}")
+    # Grouper par statut
+    in_progress = [t for t in tasks if t.status == "in_progress"]
+    pending = [t for t in tasks if t.status == "pending"]
+    done = [t for t in tasks if t.status == "done"]
+    failed = [t for t in tasks if t.status == "failed"]
+
+    lines = []
+
+    if in_progress:
+        lines.append("[bold yellow]🔄 En cours[/bold yellow]")
+        for t in in_progress:
+            lines.append(f"  {t}")
+        lines.append("")
+
+    if pending:
+        lines.append("[bold blue]⏳ À faire[/bold blue]")
+        for t in pending:
+            lines.append(f"  {t}")
+        lines.append("")
+
+    if done:
+        lines.append("[bold green]✅ Terminées[/bold green]")
+        for t in done[:10]:
+            lines.append(f"  {t}")
+        if len(done) > 10:
+            lines.append(f"  [dim]... et {len(done) - 10} autres[/dim]")
+        lines.append("")
+
+    if failed:
+        lines.append("[bold red]❌ Échouées[/bold red]")
+        for t in failed[:5]:
+            lines.append(f"  {t}")
+        if len(failed) > 5:
+            lines.append(f"  [dim]... et {len(failed) - 5} autres[/dim]")
+        lines.append("")
+
+    # Résumé
+    summary = registry.get_summary()
+    lines.append(
+        f"[dim]Total : {summary['total_tasks']} tâches, "
+        f"{summary['total_epics']} projets[/dim]"
+    )
 
     console.print(Panel(
-        "\n".join(lines),
+        "\n".join(lines).rstrip(),
         title="[bold cyan]Tâches[/bold cyan]",
         border_style="cyan",
     ))
 
 
 def print_epics(vox):
-    """Affiche le registre des projets dans un tableau Rich."""
+    """Affiche le registre des projets avec sous-tâches et barre de progression."""
     if not vox.memory or not vox.memory.is_initialized:
         console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
         return
@@ -163,11 +200,10 @@ def print_epics(vox):
         return
 
     epics = registry.get_all_epics(limit=15)
-    active_epics = [e for e in epics if e.status in ("pending", "in_progress")]
 
-    if not active_epics:
+    if not epics:
         console.print(Panel(
-            "[dim]Aucun projet actif.[/dim]",
+            "[dim]Aucun projet enregistré.[/dim]",
             title="[bold cyan]Projets[/bold cyan]",
             border_style="cyan",
         ))
@@ -180,31 +216,77 @@ def print_epics(vox):
         "failed": "❌",
     }
 
-    # Affichage détaillé par projet avec sous-tâches
+    # Séparer actifs et terminés
+    active_epics = [e for e in epics if e.status in ("pending", "in_progress")]
+    completed_epics = [e for e in epics if e.status in ("done", "failed")]
+
     lines: list[str] = []
-    for epic in active_epics:
+
+    def _render_epic(epic, show_subtasks=True):
+        """Rend un epic avec sa barre de progression et ses sous-tâches."""
         icon = status_icons.get(epic.status, "?")
         epic_tasks = registry.get_epic_tasks(epic.id)
         epic_tasks.sort(key=lambda t: t.created_at)
-        done = sum(1 for t in epic_tasks if t.status == "done")
+
+        done_count = sum(1 for t in epic_tasks if t.status == "done")
+        failed_count = sum(1 for t in epic_tasks if t.status == "failed")
+        in_progress_count = sum(1 for t in epic_tasks if t.status == "in_progress")
         total = len(epic_tasks)
-        pct = f"{done * 100 // total}%" if total > 0 else "—"
+        pct = (done_count * 100 // total) if total > 0 else 0
 
+        # Titre du projet
         sid_tag = f"[bold cyan]#{epic.short_id}[/bold cyan] " if epic.short_id else ""
-        lines.append(f"{icon} {sid_tag}[bold]{epic.display_name[:55]}[/bold]")
-        lines.append(f"  Progrès: [bold green]{done}[/bold green]/{total} ({pct})")
-        if epic.strategy:
-            lines.append(f"  [dim italic]{epic.strategy[:60]}[/dim italic]")
+        lines.append(f"{icon} {sid_tag}[bold]{epic.display_name[:70]}[/bold]")
 
-        # Sous-tâches du projet
-        for t in epic_tasks:
-            t_icon = status_icons.get(t.status, "?")
-            t_sid = f"[cyan]#{t.short_id}[/cyan] " if t.short_id else ""
-            lines.append(f"    {t_icon} {t_sid}{t.description[:45]}  [dim]{t.worker_type}[/dim]")
+        # Barre de progression visuelle
+        if total > 0:
+            bar_width = 20
+            filled = int(bar_width * done_count / total)
+            bar = "[bold green]" + "█" * filled + "[/bold green]" + "[dim]░[/dim]" * (bar_width - filled)
+            lines.append(f"  {bar} {pct}%  ({done_count}/{total} tâches)")
+        else:
+            lines.append("  [dim]Aucune sous-tâche[/dim]")
+
+        if epic.strategy:
+            lines.append(f"  [dim italic]{epic.strategy[:80]}[/dim italic]")
+
+        # Sous-tâches détaillées
+        if show_subtasks and epic_tasks:
+            for t in epic_tasks:
+                t_icon = status_icons.get(t.status, "?")
+                t_sid = f"[cyan]#{t.short_id}[/cyan] " if t.short_id else ""
+                # Couleur selon le statut
+                if t.status == "done":
+                    style_open, style_close = "[dim]", "[/dim]"
+                elif t.status == "failed":
+                    style_open, style_close = "[red]", "[/red]"
+                elif t.status == "in_progress":
+                    style_open, style_close = "[bold yellow]", "[/bold yellow]"
+                else:
+                    style_open, style_close = "", ""
+                lines.append(
+                    f"    {t_icon} {t_sid}{style_open}{t.description[:60]}{style_close}"
+                    f"  [dim]{t.worker_type}[/dim]"
+                )
+
         lines.append("")
 
+    # Projets actifs (avec sous-tâches)
+    if active_epics:
+        lines.append("[bold yellow]── Projets en cours ──[/bold yellow]\n")
+        for epic in active_epics:
+            _render_epic(epic, show_subtasks=True)
+
+    # Projets terminés (avec sous-tâches résumées)
+    if completed_epics:
+        lines.append("[bold green]── Projets terminés ──[/bold green]\n")
+        for epic in completed_epics[:5]:
+            _render_epic(epic, show_subtasks=True)
+        if len(completed_epics) > 5:
+            lines.append(f"  [dim]... et {len(completed_epics) - 5} autres projets terminés[/dim]\n")
+
     console.print(Panel(
-        "\n".join(lines),
+        "\n".join(lines).rstrip(),
         title="[bold cyan]Projets[/bold cyan]",
         border_style="cyan",
     ))
