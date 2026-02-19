@@ -709,6 +709,29 @@ Réponds UNIQUEMENT avec ce JSON :
                 worker_type = WorkerType(llm_worker_type)
             except ValueError:
                 worker_type = self.factory.classify_task(classification_input)
+
+            # Si la classification vient de la LLM (pas du fallback regex),
+            # on fait confiance et on force delegate_crew directement.
+            # La LLM comprend le langage naturel — pas besoin de re-vérifier
+            # avec _EPIC_INTENT_RE qui rate les formulations libres.
+            if llm_classification and llm_classification.get("intent") == "project":
+                confidence = float(classification.get("confidence", 0.7))
+                subtasks = self._decompose_task(request)
+                advice = self._consult_learning(request, "generic")
+                metadata = {"_cached_learning_advice": advice} if advice else {}
+                metadata["epic_intent"] = True
+                metadata["llm_classified"] = True
+                return BrainDecision(
+                    action="delegate_crew",
+                    subtasks=subtasks if subtasks else [request],
+                    confidence=max(confidence, 0.7),
+                    worker_type=worker_type.value,
+                    reasoning=f"Projet détecté par LLM ({classification.get('reasoning', '')[:60]}) → Crew",
+                    metadata=metadata,
+                )
+
+            # Fallback regex : on passe par _decide_complex_generic
+            # qui re-vérifie avec _EPIC_INTENT_RE
             return self._decide_complex_generic(request, worker_type)
 
         if intent == "tool_use":
@@ -1329,57 +1352,57 @@ Réponds UNIQUEMENT avec ce JSON :
             for i, st in enumerate(subtasks)
         ]
 
-    def _extract_epic_name_and_subject(self, request: str) -> tuple[str, str]:
+    async def _extract_epic_name_and_subject(self, request: str) -> tuple[str, str]:
         """
-        Extrait le NOM du projet et le SUJET/DESCRIPTION.
+        Extrait le NOM du projet et le SUJET/DESCRIPTION via la LLM.
 
-        Le nom est extrait des guillemets, quotes, ou après "appelé/nommé".
-        Le sujet est le reste de la requête nettoyée.
+        La LLM comprend le langage naturel et extrait correctement le nom
+        du projet quelle que soit la formulation (avec ou sans guillemets,
+        en français, avec des contractions, etc.).
 
         Exemples :
         - "crée un projet 'Smash Gang', objectif : devenir rentable"
-          → name="Smash Gang", subject="devenir rentable en pariant..."
+          → name="Smash Gang", subject="devenir rentable"
         - "lance un projet roadmap pour la refonte du site"
-          → name="", subject="refonte du site"
+          → name="Roadmap Refonte Site", subject="refonte du site"
+        - "Neo j'ai besoin que tu creer un nouveau projet Smash gang"
+          → name="Smash Gang", subject="créer le projet Smash Gang"
 
         Returns:
             (name, subject) — name peut être vide si non détecté
         """
-        name = ""
+        extraction_prompt = (
+            "Extrait le NOM du projet et sa DESCRIPTION à partir de cette demande utilisateur.\n\n"
+            f"Demande : \"{request}\"\n\n"
+            "RÈGLES :\n"
+            "- 'name' : le nom court du projet tel que l'utilisateur le souhaite "
+            "(ex: 'Smash Gang', 'Alpha Team', 'Roadmap Q1'). "
+            "Capitalise chaque mot.\n"
+            "- 'subject' : une description concise de l'objectif/sujet du projet.\n"
+            "- Si l'utilisateur ne donne pas de nom explicite, génère un nom court et pertinent "
+            "basé sur le sujet.\n"
+            "- Ignore les formules de politesse, les préfixes comme 'Neo', "
+            "'j\\'ai besoin que tu', etc.\n"
+            "- NE PAS inclure de préfixes comme 'Projet' dans le nom.\n\n"
+            "Réponds UNIQUEMENT en JSON strict :\n"
+            '{"name": "Nom Du Projet", "subject": "Description courte du projet"}'
+        )
 
-        # 1. Chercher un nom entre guillemets/quotes (tous types Unicode)
-        # Couvre : 'x' "x" 'x' 'x' "x" "x" «x» ‹x›
-        name_match = re.search(r"""['"'\u2018\u2019\u201C\u201D«»‹›]([^'"'\u2018\u2019\u201C\u201D«»‹›]+)['"'\u2018\u2019\u201C\u201D«»‹›]""", request)
-        if name_match:
-            name = name_match.group(1).strip()
+        try:
+            response = await self._raw_llm_call(extraction_prompt)
+            data = self._parse_json_response(response)
+            name = str(data.get("name", "")).strip()[:100]
+            subject = str(data.get("subject", "")).strip()[:1000]
 
-        # 2. Sinon chercher après "appelé/nommé/intitulé"
-        if not name:
-            name_match = re.search(
-                r"(?:appel[ée]|nomm[ée]|intitul[ée])\s+(.+?)(?:[,.\n]|$)",
-                request, re.IGNORECASE,
-            )
-            if name_match:
-                name = name_match.group(1).strip()[:60]
+            if name:
+                logger.info("Extraction LLM — name=%r, subject=%r", name, subject[:50])
+                return name, subject if len(subject) >= 5 else request
 
-        # 3. Extraire le sujet (description) — retirer les préfixes d'intention
-        subject = re.sub(
-            r"^(?:crée|créer|lance|lancer|fais|faire|monte|prépare)\s+"
-            r"(?:un|une|le|la|mon|ma|moi\s+un|moi\s+une)\s+"
-            r"(?:epic|epics|projet|project|roadmap|feuille de route|plan)\s+"
-            r"(?:pour|sur|de|du|des|d['']\s*)?\s*",
-            "", request, flags=re.IGNORECASE,
-        ).strip()
+        except Exception as e:
+            logger.debug("Extraction LLM du nom échouée: %s — fallback requête brute", e)
 
-        # Retirer le nom entre quotes du sujet pour ne garder que la description
-        if name and name_match:
-            subject = subject.replace(name_match.group(0), "").strip(" ,;:-")
-
-        # Si le nettoyage a tout supprimé, garder la requête originale
-        if len(subject) < 5:
-            subject = request
-
-        return name[:100], subject[:1000]
+        # Fallback minimal : retourner la requête comme sujet
+        return "", request[:1000]
 
     async def _execute_as_epic(self, request: str, decision: BrainDecision,
                                memory_context: str,
@@ -1400,10 +1423,10 @@ Réponds UNIQUEMENT avec ce JSON :
         """
         # 0. Extraire le nom et le sujet (préférer le message original pour les quotes)
         source_for_name = original_request if original_request else request
-        epic_name, epic_subject = self._extract_epic_name_and_subject(source_for_name)
+        epic_name, epic_subject = await self._extract_epic_name_and_subject(source_for_name)
         # Si le sujet extrait est trop court, enrichir avec la reformulation
         if len(epic_subject) < 20 and request != source_for_name:
-            _, alt_subject = self._extract_epic_name_and_subject(request)
+            _, alt_subject = await self._extract_epic_name_and_subject(request)
             if len(alt_subject) > len(epic_subject):
                 epic_subject = alt_subject
 

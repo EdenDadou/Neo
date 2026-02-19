@@ -4,8 +4,11 @@ __pycache__/
 *.so
 .env
 .venv/
+.venv_*/
 venv/
 env/
+.claude/
+=*
 data/
 *.egg-info/
 dist/
