@@ -418,6 +418,55 @@ async def get_epics():
     return {"epics": result}
 
 
+@router.delete("/tasks/reset")
+async def reset_tasks():
+    """Reset all standalone tasks."""
+    if not neo_core._initialized:
+        raise HTTPException(503, "Neo Core not initialized")
+    vox = neo_core.vox
+    if not vox or not vox.memory or not vox.memory.is_initialized:
+        raise HTTPException(503, "Memory not initialized")
+    registry = vox.memory.task_registry
+    if not registry:
+        raise HTTPException(503, "TaskRegistry not available")
+    deleted = registry.reset_all_tasks()
+    return {"deleted": deleted, "message": f"{deleted} tâche(s) supprimée(s)"}
+
+
+@router.delete("/project/reset")
+async def reset_projects():
+    """Reset all projects and their tasks."""
+    return await _reset_epics_impl()
+
+
+@router.delete("/epics/reset")
+async def reset_epics():
+    """Reset all projects and their tasks (alias)."""
+    return await _reset_epics_impl()
+
+
+async def _reset_epics_impl():
+    """Reset all projects and their tasks."""
+    if not neo_core._initialized:
+        raise HTTPException(503, "Neo Core not initialized")
+    vox = neo_core.vox
+    if not vox or not vox.memory or not vox.memory.is_initialized:
+        raise HTTPException(503, "Memory not initialized")
+    registry = vox.memory.task_registry
+    if not registry:
+        raise HTTPException(503, "TaskRegistry not available")
+    deleted = registry.reset_all_epics()
+    # Also clean CrewStates
+    try:
+        records = vox.memory._store.search_by_tags(["crew_state"], limit=100)
+        for record in records:
+            vox.memory._store.delete(record.id)
+            deleted += 1
+    except Exception:
+        pass
+    return {"deleted": deleted, "message": f"{deleted} entrée(s) supprimée(s)"}
+
+
 @router.websocket("/ws/chat")
 async def websocket_chat(ws: WebSocket, token: str = Query(default="")):
     """

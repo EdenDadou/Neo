@@ -838,17 +838,42 @@ class NeoTUI(App):
                 chat.write(Text("  ⚠ Memory non initialisé", style="yellow"))
 
     def _render_tasks_organized(self, chat: RichLog, data: dict) -> None:
-        """Rendu organisé des tâches (mode daemon, depuis API)."""
-        summary = data.get("summary", {})
-        lines = ["[bold]Registre des tâches[/bold]\n"]
-        if data.get("tasks"):
-            for t_str in data["tasks"][:20]:
-                lines.append(f"  {t_str}")
+        """Rendu organisé des tâches (mode daemon, depuis API), groupé par statut."""
+        tasks = data.get("tasks", [])
+        lines: list[str] = []
+
+        if not tasks:
+            lines.append("[dim]Aucune tâche indépendante.[/dim]")
         else:
-            lines.append("  [dim]Aucune tâche enregistrée.[/dim]")
-        if summary:
-            lines.append(f"\n[dim]Total : {summary.get('total_tasks', 0)} tâches · {summary.get('total_epics', 0)} projets[/dim]")
-        lines.append("[dim]/tasks reset pour tout supprimer[/dim]")
+            # Grouper par statut — les tâches API sont des strings, on parse le statut
+            in_progress = [t for t in tasks if "🔄" in t or "in_progress" in t]
+            pending = [t for t in tasks if "⏳" in t or "pending" in t]
+            done = [t for t in tasks if "✅" in t or "done" in t]
+            failed = [t for t in tasks if "❌" in t or "failed" in t]
+
+            if in_progress:
+                lines.append("[bold green]▶ En cours[/bold green]")
+                for t in in_progress:
+                    lines.append(f"  {t}")
+                lines.append("")
+            if pending:
+                lines.append("[bold yellow]◻ À faire[/bold yellow]")
+                for t in pending[:10]:
+                    lines.append(f"  {t}")
+                lines.append("")
+            if done:
+                lines.append("[bold dim]✓ Terminées[/bold dim]")
+                for t in done[-5:]:
+                    lines.append(f"  [dim]{t}[/dim]")
+                lines.append("")
+            if failed:
+                lines.append("[bold red]✗ Échouées[/bold red]")
+                for t in failed[-3:]:
+                    lines.append(f"  {t}")
+                lines.append("")
+
+            lines.append(f"[dim]{len(tasks)} tâche(s) · /tasks reset pour tout supprimer[/dim]")
+
         chat.write(Panel("\n".join(lines), title="[bold cyan]Tâches[/bold cyan]", border_style="cyan"))
 
     def _render_tasks_local(self, chat: RichLog, organized: dict) -> None:
@@ -1016,7 +1041,27 @@ class NeoTUI(App):
 
     async def _cmd_tasks_reset(self, chat: RichLog) -> None:
         """Commande /tasks reset — supprime toutes les tâches standalone."""
-        if self.vox and self.vox.memory and self.vox.memory.is_initialized:
+        if self.mode == "daemon" and self._http_client:
+            try:
+                resp = await self._http_client.request(
+                    "DELETE",
+                    f"{self.api_url}/tasks/reset",
+                    headers=self._api_headers,
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    deleted = data.get("deleted", 0)
+                    chat.write(Panel(
+                        f"[green]✅ {deleted} tâche(s) supprimée(s).[/green]\nLe registre de tâches est remis à zéro.",
+                        title="[bold cyan]Tasks Reset[/bold cyan]",
+                        border_style="cyan",
+                    ))
+                else:
+                    chat.write(Text(f"  Erreur API: {resp.status_code}", style="red"))
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
+        elif self.vox and self.vox.memory and self.vox.memory.is_initialized:
             registry = self.vox.memory.task_registry
             if registry:
                 deleted = registry.reset_all_tasks()
@@ -1026,17 +1071,36 @@ class NeoTUI(App):
                     border_style="cyan",
                 ))
                 return
-        chat.write(Text("  ⚠ Memory non disponible", style="yellow"))
+        else:
+            chat.write(Text("  ⚠ Memory non disponible", style="yellow"))
 
     async def _cmd_epics_reset(self, chat: RichLog) -> None:
         """Commande /project reset — supprime tous les projets et leurs tâches."""
-        if self.vox and self.vox.memory and self.vox.memory.is_initialized:
+        if self.mode == "daemon" and self._http_client:
+            try:
+                resp = await self._http_client.request(
+                    "DELETE",
+                    f"{self.api_url}/project/reset",
+                    headers=self._api_headers,
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    deleted = data.get("deleted", 0)
+                    chat.write(Panel(
+                        f"[green]✅ {deleted} entrée(s) supprimée(s).[/green]\nTous les projets sont remis à zéro.",
+                        title="[bold cyan]Projects Reset[/bold cyan]",
+                        border_style="cyan",
+                    ))
+                else:
+                    chat.write(Text(f"  Erreur API: {resp.status_code}", style="red"))
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
+        elif self.vox and self.vox.memory and self.vox.memory.is_initialized:
             registry = self.vox.memory.task_registry
             if registry:
                 deleted = registry.reset_all_epics()
-                # Aussi nettoyer les CrewStates en mémoire
                 try:
-                    from neo_core.brain.teams.crew import _CREW_STATE_SOURCE_PREFIX
                     records = self.vox.memory._store.search_by_tags(["crew_state"], limit=100)
                     for record in records:
                         self.vox.memory._store.delete(record.id)
@@ -1049,7 +1113,8 @@ class NeoTUI(App):
                     border_style="cyan",
                 ))
                 return
-        chat.write(Text("  ⚠ Memory non disponible", style="yellow"))
+        else:
+            chat.write(Text("  ⚠ Memory non disponible", style="yellow"))
 
     def _cmd_heartbeat(self, chat: RichLog) -> None:
         if self._heartbeat_manager:

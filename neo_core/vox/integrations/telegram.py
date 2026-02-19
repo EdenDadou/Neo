@@ -310,7 +310,11 @@ class TelegramBot:
 
     async def _handle_command(self, text: str, message) -> None:
         """Gère les commandes /slash Telegram."""
-        cmd = text.split()[0].lower()
+        # Support multi-word commands like "/tasks reset"
+        parts = text.strip().lower().split()
+        cmd = parts[0]
+        if len(parts) >= 2 and parts[1] == "reset":
+            cmd = f"{parts[0]} {parts[1]}"
 
         if cmd == "/start":
             user_name = message.from_user.first_name or "utilisateur"
@@ -332,7 +336,9 @@ class TelegramBot:
                 "*Commandes :*\n"
                 "/status — État du système\n"
                 "/tasks — Registre des tâches\n"
+                "/tasks reset — Supprimer toutes les tâches\n"
                 "/project — Projets en cours\n"
+                "/project reset — Supprimer tous les projets\n"
                 "/whoami — Info sur votre accès\n"
                 "/help — Cette aide",
                 parse_mode="Markdown",
@@ -351,20 +357,57 @@ class TelegramBot:
             else:
                 await message.reply_text("⚠️ Système non initialisé")
 
+        elif cmd == "/tasks reset":
+            if self._vox and self._vox.memory and self._vox.memory.is_initialized:
+                try:
+                    registry = self._vox.memory.task_registry
+                    if registry:
+                        deleted = registry.reset_all_tasks()
+                        await message.reply_text(f"✅ {deleted} tâche(s) supprimée(s). Registre remis à zéro.")
+                    else:
+                        await message.reply_text("⚠️ TaskRegistry non disponible.")
+                except Exception as e:
+                    logger.warning("Telegram /tasks reset error: %s", e)
+                    await message.reply_text("❌ Erreur lors du reset.")
+            else:
+                await message.reply_text("⚠️ Memory non initialisé.")
+
         elif cmd == "/tasks":
             if self._vox and self._vox.memory and self._vox.memory.is_initialized:
                 try:
                     registry = self._vox.memory.task_registry
                     if registry:
-                        tasks = registry.get_active_tasks()
-                        if tasks:
-                            lines = ["📋 *Tâches actives :*\n"]
-                            for t in tasks[:10]:
-                                status_emoji = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}.get(t.status, "❓")
-                                lines.append(f"{status_emoji} {t.description[:60]} ({t.worker_type})")
-                            await message.reply_text("\n".join(lines), parse_mode="Markdown")
+                        organized = registry.get_organized_summary()
+                        standalone = organized.get("standalone_tasks", [])
+                        if not standalone:
+                            await message.reply_text("📋 Aucune tâche indépendante.\n\n/tasks reset pour tout supprimer")
                         else:
-                            await message.reply_text("📋 Aucune tâche active.")
+                            status_emoji = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
+                            in_progress = [t for t in standalone if t.status == "in_progress"]
+                            pending = [t for t in standalone if t.status == "pending"]
+                            done = [t for t in standalone if t.status == "done"]
+                            failed = [t for t in standalone if t.status == "failed"]
+                            lines = ["📋 *Tâches :*\n"]
+                            if in_progress:
+                                lines.append("▶ *En cours*")
+                                for t in in_progress:
+                                    lines.append(f"  🔄 {t.description[:55]} ({t.worker_type})")
+                            if pending:
+                                lines.append("\n◻ *À faire*")
+                                for t in pending[:10]:
+                                    lines.append(f"  ⏳ {t.description[:55]} ({t.worker_type})")
+                                if len(pending) > 10:
+                                    lines.append(f"  ... et {len(pending) - 10} autres")
+                            if done:
+                                lines.append(f"\n✓ *Terminées* ({len(done)})")
+                                for t in done[-5:]:
+                                    lines.append(f"  ✅ {t.description[:55]}")
+                            if failed:
+                                lines.append(f"\n✗ *Échouées* ({len(failed)})")
+                                for t in failed[-3:]:
+                                    lines.append(f"  ❌ {t.description[:55]}")
+                            lines.append(f"\n{len(standalone)} tâche(s) · /tasks reset pour supprimer")
+                            await message.reply_text("\n".join(lines), parse_mode="Markdown")
                     else:
                         await message.reply_text("⚠️ TaskRegistry non disponible.")
                 except Exception as e:
@@ -373,32 +416,75 @@ class TelegramBot:
             else:
                 await message.reply_text("⚠️ Memory non initialisé.")
 
+        elif cmd in ("/project reset", "/epics reset"):
+            if self._vox and self._vox.memory and self._vox.memory.is_initialized:
+                try:
+                    registry = self._vox.memory.task_registry
+                    if registry:
+                        deleted = registry.reset_all_epics()
+                        try:
+                            records = self._vox.memory._store.search_by_tags(["crew_state"], limit=100)
+                            for record in records:
+                                self._vox.memory._store.delete(record.id)
+                                deleted += 1
+                        except Exception:
+                            pass
+                        await message.reply_text(f"✅ {deleted} entrée(s) supprimée(s). Tous les projets remis à zéro.")
+                    else:
+                        await message.reply_text("⚠️ TaskRegistry non disponible.")
+                except Exception as e:
+                    logger.warning("Telegram /project reset error: %s", e)
+                    await message.reply_text("❌ Erreur lors du reset.")
+            else:
+                await message.reply_text("⚠️ Memory non initialisé.")
+
         elif cmd in ("/project", "/epics"):
             if self._vox and self._vox.memory and self._vox.memory.is_initialized:
                 try:
                     registry = self._vox.memory.task_registry
                     if registry:
-                        epics = registry.get_all_epics(limit=10)
-                        active_epics = [e for e in epics if e.status in ("pending", "in_progress")]
-                        if active_epics:
-                            status_icons = {"pending": "⏳", "in_progress": "🔄"}
-                            lines = ["📂 *Projets en cours :*\n"]
-                            for epic in active_epics:
-                                icon = status_icons.get(epic.status, "📦")
+                        epics = registry.get_all_epics(limit=15)
+                        if not epics:
+                            await message.reply_text("📂 Aucun projet.\n\n/project reset pour tout supprimer")
+                        else:
+                            status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
+                            active = [e for e in epics if e.status == "in_progress"]
+                            pending = [e for e in epics if e.status == "pending"]
+                            done = [e for e in epics if e.status == "done"]
+                            failed = [e for e in epics if e.status == "failed"]
+                            lines = ["📂 *Projets :*\n"]
+                            def _fmt_epic(epic, icon):
                                 epic_tasks = registry.get_epic_tasks(epic.id)
-                                done = sum(1 for t in epic_tasks if t.status == "done")
-                                total = len(epic_tasks)
-                                pct = f"{done * 100 // total}%" if total > 0 else "—"
-                                bar_filled = done * 5 // total if total > 0 else 0
+                                d = sum(1 for t in epic_tasks if t.status == "done")
+                                tot = len(epic_tasks)
+                                pct = f"{d * 100 // tot}%" if tot > 0 else "—"
+                                bar_filled = d * 5 // tot if tot > 0 else 0
                                 bar = "█" * bar_filled + "░" * (5 - bar_filled)
                                 lines.append(
                                     f"{icon} *{epic.description[:50]}*\n"
-                                    f"   `[{bar}]` {done}/{total} ({pct})\n"
-                                    f"   ID: `{epic.id[:8]}`"
+                                    f"   `[{bar}]` {d}/{tot} ({pct})  ID: `{epic.id[:8]}`"
                                 )
-                            await message.reply_text("\n\n".join(lines), parse_mode="Markdown")
-                        else:
-                            await message.reply_text("📂 Aucun projet actif.")
+                                for t in epic_tasks:
+                                    t_icon = status_icons.get(t.status, "❓")
+                                    lines.append(f"      {t_icon} {t.description[:48]} ({t.worker_type})")
+                            if active:
+                                lines.append("▶ *En cours*")
+                                for e in active:
+                                    _fmt_epic(e, "🔄")
+                            if pending:
+                                lines.append("\n◻ *À faire*")
+                                for e in pending:
+                                    _fmt_epic(e, "⏳")
+                            if done:
+                                lines.append(f"\n✓ *Terminés* ({len(done)})")
+                                for e in done[-5:]:
+                                    lines.append(f"  ✅ {e.description[:50]}")
+                            if failed:
+                                lines.append(f"\n✗ *Échoués* ({len(failed)})")
+                                for e in failed[-3:]:
+                                    lines.append(f"  ❌ {e.description[:50]}")
+                            lines.append(f"\n{len(epics)} projet(s) · /project reset pour supprimer")
+                            await message.reply_text("\n".join(lines), parse_mode="Markdown")
                     else:
                         await message.reply_text("⚠️ TaskRegistry non disponible.")
                 except Exception as e:
