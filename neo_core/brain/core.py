@@ -471,9 +471,13 @@ class Brain:
     # Ne matche PAS "projet" tout seul (sinon "pk tu ne met pas dans le projet ?" créerait un projet)
     _EPIC_INTENT_RE = re.compile(
         r"(?:crée|créer|lance|lancer|fais|faire|monte|monter|prépare|préparer|démarre|démarrer|"
+        r"mets?\s+en\s+place|construi[st]|build|setup|met[st]?\s+en\s+place|"
         r"nouveau|nouvelle|nouvel|create|start|begin)\s+"
-        r"(?:un|une|le|la|mon|ma|moi\s+un|moi\s+une)?\s*"
-        r"(?:epic|projet|project|roadmap|feuille de route|plan d[''']action)"
+        r"(?:un|une|le|la|mon|ma|moi\s+un|moi\s+une|nous\s+un|nous\s+une)?\s*"
+        r"(?:epic|projet|project|roadmap|feuille de route|plan d[''']action|"
+        r"système|systeme|system|truc|outil|tool|bot|app|programme|stratégie|strategie|strategy)"
+        r"|"
+        r"(?:j['''](?:aimerais?|veu[xt]|voudrais?|souhaite)\s+(?:qu[''']on\s+)?(?:crée|monte|lance|fasse|prépare|construise|mette en place))"
         r"|"
         r"\b(?:multi[- ]?étapes|multi[- ]?step)\b",
         re.IGNORECASE,
@@ -571,17 +575,18 @@ Requête : {request}
 {original_block}{context_block}{task_registry_block}
 
 Types d'intent :
-- "conversation" : question simple, discussion, demande d'info, question sur un projet/tâche existant (pas besoin d'outil)
+- "conversation" : question simple, discussion, demande d'info PURE (pas d'action demandée)
 - "tool_use" : nécessite un outil externe (recherche web, exécution code, lecture/écriture fichier, scraping)
-- "project" : demande EXPLICITE de CRÉER un nouveau projet multi-étapes, une roadmap, un plan d'action
+- "project" : l'utilisateur veut CRÉER, MONTER, LANCER un nouveau projet, plan, système, ou tâche structurée. Même si la formulation est informelle ("j'aimerais qu'on fasse...", "on pourrait monter...", "fais-moi un truc pour...")
 - "crew_directive" : l'utilisateur veut DIRIGER, MODIFIER, PILOTER un projet/crew EXISTANT. Exemples : "change l'approche du P1", "mets en pause le projet", "ajoute une étape de test", "concentre-toi sur X pour P2", "arrête le projet", "reprends le projet", "modifie l'étape 3"
 
 IMPORTANT :
 - Si la requête RÉFÉRENCE un projet existant (P1, P2, T3...) sans en créer un nouveau → "conversation" OU "crew_directive"
 - "crew_directive" = l'utilisateur donne un ORDRE/INSTRUCTION au crew (pause, resume, modifier, rediriger, ajouter étape)
-- "conversation" = l'utilisateur POSE UNE QUESTION sur le projet (statut, avancement, info)
+- "conversation" = l'utilisateur POSE UNE QUESTION sans demander d'action (statut, avancement, info)
 - Si la requête est une confirmation ("oui", "ok", "continue") en contexte → "conversation"
-- Seule la CRÉATION explicite d'un nouveau projet → "project"
+- Dès que l'utilisateur demande de CRÉER, FAIRE, MONTER, PRÉPARER quelque chose de nouveau → "project" (même sans le mot "projet")
+- En cas de doute entre "conversation" et "project", privilégie "project" si une ACTION est demandée
 - Si la requête demande une action (tool_use) qui CONCERNE un projet existant, indique le short_id du projet dans "target_project"
 
 Pour "crew_directive", indique aussi :
@@ -784,7 +789,7 @@ Réponds UNIQUEMENT avec ce JSON :
                     max_tokens=200,
                     temperature=0.1,
                 ),
-                timeout=3.0,
+                timeout=8.0,
             )
 
             if response.text and not response.text.startswith("[Erreur"):
@@ -797,11 +802,11 @@ Réponds UNIQUEMENT avec ce JSON :
                 return data
 
         except _aio.TimeoutError:
-            logger.debug("[Brain] LLM classifier timeout (>3s), fallback regex")
+            logger.warning("[Brain] LLM classifier timeout (>8s), fallback regex")
         except (json.JSONDecodeError, KeyError) as e:
-            logger.debug("[Brain] LLM classifier parse error: %s", e)
+            logger.warning("[Brain] LLM classifier parse error: %s", e)
         except Exception as e:
-            logger.debug("[Brain] LLM classifier error: %s", e)
+            logger.warning("[Brain] LLM classifier error: %s", e)
 
         # Fallback: classification par regex (ancien système)
         return self._classify_intent_regex(request, original_request)
@@ -1172,7 +1177,7 @@ Réponds UNIQUEMENT avec ce JSON :
             except Exception as e:
                 logger.debug("Failed to load working context for decision: %s", e)
 
-        # ── Classification LLM async (Haiku, 3s timeout) ──
+        # ── Classification LLM async (Haiku, 8s timeout) ──
         # Toutes les requêtes passent par le LLM (sauf commandes slash)
         llm_classification = None
         if not request.strip().startswith("/"):
@@ -1182,7 +1187,7 @@ Réponds UNIQUEMENT avec ce JSON :
                     context=working_context[:300] if working_context else "",
                 )
             except Exception as e:
-                logger.debug("[Brain] LLM classification failed, using regex: %s", e)
+                logger.warning("[Brain] LLM classification failed, using regex: %s", e)
 
         decision = self.make_decision(
             request, working_context=working_context,
