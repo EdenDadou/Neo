@@ -554,27 +554,124 @@ class Brain:
         r"^[^\.]{0,80}\??\s*$",
     )
 
-    def make_decision(self, request: str, working_context: str = "") -> BrainDecision:
+    # ─── Prompt de classification LLM ────────────────────
+    _CLASSIFY_PROMPT = """Classifie cette requête utilisateur. Réponds UNIQUEMENT en JSON strict.
+
+Requête : {request}
+{original_block}{context_block}
+
+Types d'intent :
+- "conversation" : question simple, discussion, demande d'info que tu peux répondre directement (pas besoin d'outil)
+- "tool_use" : nécessite un outil externe (recherche web, exécution code, lecture/écriture fichier, scraping)
+- "project" : demande explicite de créer un projet multi-étapes, une roadmap, un plan d'action
+
+Types de worker (si tool_use ou project) :
+- "researcher" : recherche web, collecte d'infos
+- "coder" : écriture/exécution de code
+- "analyst" : analyse de données, calculs, stratégie
+- "writer" : rédaction de textes, rapports
+- "summarizer" : résumés, synthèses
+- "generic" : tâches mixtes
+
+Réponds UNIQUEMENT avec ce JSON :
+{{"intent": "conversation|tool_use|project", "worker_type": "researcher|coder|analyst|writer|summarizer|generic", "confidence": 0.0-1.0, "reasoning": "explication courte"}}"""
+
+    async def _classify_intent(self, request: str, original_request: str = "",
+                                context: str = "") -> dict:
+        """
+        Classifie l'intention via un appel LLM Haiku (rapide, ~200 tokens).
+
+        Retourne un dict avec : intent, worker_type, confidence, reasoning.
+        Fallback sur les regex en cas d'erreur/timeout.
+        """
+        import asyncio as _aio
+
+        original_block = ""
+        if original_request and original_request != request:
+            original_block = f"Message original (avant reformulation) : {original_request}\n"
+        context_block = ""
+        if context:
+            context_block = f"Contexte récent : {context[:300]}\n"
+
+        prompt = self._CLASSIFY_PROMPT.format(
+            request=request,
+            original_block=original_block,
+            context_block=context_block,
+        )
+
+        try:
+            from neo_core.brain.providers.router import route_chat
+            response = await _aio.wait_for(
+                route_chat(
+                    agent_name="vox",  # Utilise Haiku (rapide)
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=200,
+                    temperature=0.1,
+                ),
+                timeout=3.0,
+            )
+
+            if response.text and not response.text.startswith("[Erreur"):
+                # Parser le JSON
+                cleaned = response.text.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                    if cleaned.endswith("```"):
+                        cleaned = cleaned[:-3]
+                    cleaned = cleaned.strip()
+                data = json.loads(cleaned)
+                logger.info(
+                    "[Brain] LLM classifier: intent=%s, worker=%s, confidence=%.1f — %s",
+                    data.get("intent"), data.get("worker_type"),
+                    data.get("confidence", 0), data.get("reasoning", "")[:60],
+                )
+                return data
+
+        except _aio.TimeoutError:
+            logger.debug("[Brain] LLM classifier timeout (>3s), fallback regex")
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.debug("[Brain] LLM classifier parse error: %s", e)
+        except Exception as e:
+            logger.debug("[Brain] LLM classifier error: %s", e)
+
+        # Fallback: classification par regex (ancien système)
+        return self._classify_intent_regex(request, original_request)
+
+    def _classify_intent_regex(self, request: str, original_request: str = "") -> dict:
+        """Fallback regex pour la classification (ancien système)."""
+        # Epic intent
+        has_epic = bool(self._EPIC_INTENT_RE.search(request))
+        if not has_epic and original_request:
+            has_epic = bool(self._EPIC_INTENT_RE.search(original_request))
+        if has_epic:
+            return {"intent": "project", "worker_type": "generic", "confidence": 0.7,
+                    "reasoning": "regex: epic intent detected"}
+
+        # Tool needed
+        if self._NEEDS_TOOL_RE.search(request):
+            return {"intent": "tool_use", "worker_type": "researcher", "confidence": 0.7,
+                    "reasoning": "regex: tool keyword detected"}
+
+        # Default
+        return {"intent": "conversation", "worker_type": "generic", "confidence": 0.6,
+                "reasoning": "regex: no special pattern"}
+
+    def make_decision(self, request: str, working_context: str = "",
+                      original_request: str = "",
+                      llm_classification: dict | None = None) -> BrainDecision:
         """
         Prend une décision stratégique sur la manière de traiter la requête.
 
-        Philosophie v0.9.9 — "Direct by default, task only when needed" :
-        Brain répond DIRECTEMENT via Claude Sonnet (avec mémoire + contexte)
-        pour la grande majorité des requêtes. Un Worker n'est spawné QUE
-        quand un outil externe est EXPLICITEMENT nécessaire (web search,
-        exécution de code, accès fichier).
-
-        IMPORTANT: Les conversations simples, questions courtes, salutations,
-        et commandes slash ne créent JAMAIS de tâche dans le registre.
+        v2.0 — Classification LLM + fallback regex :
+        1. Fast-path : conversations simples (regex) → direct_response
+        2. Classification LLM (Haiku, 3s timeout) → intent routing
+        3. Fallback regex si LLM indisponible
 
         Pipeline :
         0. Conversation simple ? → direct_response (FAST PATH)
-        1. Epic explicite ? → delegate_crew
-        2. Outil externe nécessaire ? → delegate_worker
-        3. Sinon → direct_response (Claude Sonnet répond avec intelligence)
-
-        Le working_context (mémoire de travail) permet de comprendre les requêtes
-        courtes qui font référence à une conversation en cours ("continue", "fais pareil").
+        1. LLM intent == "project" → delegate_crew
+        2. LLM intent == "tool_use" → delegate_worker
+        3. LLM intent == "conversation" → direct_response
         """
         # 0. FAST PATH : conversations simples → JAMAIS de worker/task
         if self._is_simple_conversation(request):
@@ -596,16 +693,24 @@ class Brain:
             except ValueError:
                 pass
 
-        # 2. Intention epic EXPLICITE → delegate_crew
-        has_epic_intent = bool(self._EPIC_INTENT_RE.search(request))
-        if has_epic_intent:
-            worker_type = self.factory.classify_task(classification_input)
+        # 2. Classification LLM (ou fallback regex)
+        classification = llm_classification or self._classify_intent_regex(request, original_request)
+        intent = classification.get("intent", "conversation")
+        llm_worker_type = classification.get("worker_type", "generic")
+
+        # 3. Routing basé sur l'intent
+        if intent == "project":
+            try:
+                worker_type = WorkerType(llm_worker_type)
+            except ValueError:
+                worker_type = self.factory.classify_task(classification_input)
             return self._decide_complex_generic(request, worker_type)
 
-        # 3. Besoin d'un outil externe ? → delegate_worker
-        needs_tool = bool(self._NEEDS_TOOL_RE.search(request))
-        if needs_tool:
-            worker_type = self.factory.classify_task(classification_input)
+        if intent == "tool_use":
+            try:
+                worker_type = WorkerType(llm_worker_type)
+            except ValueError:
+                worker_type = self.factory.classify_task(classification_input)
             return self._decide_typed_worker(
                 request, complexity, worker_type, patch_overrides
             )
@@ -895,7 +1000,23 @@ class Brain:
             except Exception as e:
                 logger.debug("Failed to load working context for decision: %s", e)
 
-        decision = self.make_decision(request, working_context=working_context)
+        # ── Classification LLM async (Haiku, 3s timeout) ──
+        # Appel async avant make_decision (qui est sync)
+        llm_classification = None
+        if not self._is_simple_conversation(request):
+            try:
+                llm_classification = await self._classify_intent(
+                    request, original_request=original_request,
+                    context=working_context[:300] if working_context else "",
+                )
+            except Exception as e:
+                logger.debug("[Brain] LLM classification failed, using regex: %s", e)
+
+        decision = self.make_decision(
+            request, working_context=working_context,
+            original_request=original_request,
+            llm_classification=llm_classification,
+        )
 
         # Contexte mémoire chargé pour TOUTES les réponses
         # direct_response est maintenant le chemin principal → toujours enrichir
@@ -1164,15 +1285,19 @@ class Brain:
             f"- generic : tâches mixtes\n\n"
             f"Réponds en JSON strict (array) :\n"
             f"[\n"
-            f'  {{"description": "Action concrète et spécifique...", "worker_type": "researcher"}},\n'
-            f'  {{"description": "Analyser X pour déterminer Y...", "worker_type": "analyst"}}\n'
+            f'  {{"description": "Action concrète...", "worker_type": "researcher", "depends_on": []}},\n'
+            f'  {{"description": "Analyser les données collectées...", "worker_type": "analyst", "depends_on": [0]}},\n'
+            f'  {{"description": "Coder la simulation...", "worker_type": "coder", "depends_on": [0]}},\n'
+            f'  {{"description": "Rédiger le rapport final...", "worker_type": "writer", "depends_on": [1, 2]}}\n'
             f"]\n\n"
             f"RÈGLES CRUCIALES :\n"
             f"- Les descriptions doivent être SPÉCIFIQUES au projet, pas génériques\n"
             f"- VARIE les worker_type selon l'étape — PAS que des researcher\n"
-            f"- Chaque étape bâtit sur les résultats de la précédente\n"
-            f"- Adapte les étapes à l'OBJECTIF RÉEL du projet (ex: si c'est du trading → analyse cotes, "
-            f"modèle de mise, simulation bankroll... PAS juste 'rechercher sur le trading')\n"
+            f"- depends_on : liste des INDEX des étapes qui doivent être terminées AVANT cette étape\n"
+            f"- Les étapes SANS dépendance commune peuvent s'exécuter EN PARALLÈLE\n"
+            f"- La première étape a toujours depends_on: []\n"
+            f"- L'étape finale dépend de toutes les étapes précédentes nécessaires\n"
+            f"- Adapte les étapes à l'OBJECTIF RÉEL du projet\n"
             f"- Réponds UNIQUEMENT avec le JSON, rien d'autre."
         )
 
@@ -1192,12 +1317,18 @@ class Brain:
                 for i, item in enumerate(data):
                     desc = item.get("description", "")
                     wt_str = item.get("worker_type", "generic")
+                    depends_on = item.get("depends_on", [])
+                    # Valider les dépendances (doivent être des indices < i)
+                    depends_on = [d for d in depends_on if isinstance(d, int) and 0 <= d < i]
                     try:
                         wt = WorkerType(wt_str)
                     except ValueError:
                         wt = WorkerType.GENERIC
                     if desc:
-                        steps.append(CrewStep(index=i, description=desc, worker_type=wt))
+                        steps.append(CrewStep(
+                            index=i, description=desc, worker_type=wt,
+                            depends_on=depends_on,
+                        ))
                 if len(steps) >= 2:
                     return steps
         except Exception as e:
@@ -1279,11 +1410,19 @@ class Brain:
         L'utilisateur reçoit un briefing immédiat + la première étape.
         Le heartbeat avance ensuite le crew d'une étape par pulse.
         """
-        # 0. Extraire le nom et le sujet
-        epic_name, epic_subject = self._extract_epic_name_and_subject(request)
+        # 0. Extraire le nom et le sujet (préférer le message original pour les quotes)
+        source_for_name = original_request if original_request else request
+        epic_name, epic_subject = self._extract_epic_name_and_subject(source_for_name)
+        # Si le sujet extrait est trop court, enrichir avec la reformulation
+        if len(epic_subject) < 20 and request != source_for_name:
+            _, alt_subject = self._extract_epic_name_and_subject(request)
+            if len(alt_subject) > len(epic_subject):
+                epic_subject = alt_subject
 
         # 1. Décomposer en étapes crew avec worker_types
-        crew_steps = await self._decompose_crew_with_llm(request, memory_context)
+        # Utiliser le message original car il est plus riche en détails
+        decompose_input = original_request if original_request else request
+        crew_steps = await self._decompose_crew_with_llm(decompose_input, memory_context)
 
         # 2. Créer l'Epic dans le registre
         epic = None

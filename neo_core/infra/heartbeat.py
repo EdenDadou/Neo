@@ -37,17 +37,17 @@ if TYPE_CHECKING:
 @dataclass
 class HeartbeatConfig:
     """Configuration du heartbeat."""
-    interval_seconds: float = 1800.0  # Intervalle entre les pulses (30 minutes)
-    stale_task_minutes: float = 10.0  # Tâche considérée "stale" après N minutes
-    max_auto_tasks_per_pulse: int = 1  # Max tâches auto-lancées par pulse
+    interval_seconds: float = 300.0  # Intervalle entre les pulses (5 minutes)
+    stale_task_minutes: float = 15.0  # Tâche considérée "stale" après N minutes
+    max_auto_tasks_per_pulse: int = 6  # Max tâches auto-lancées par pulse (permet le parallélisme crew)
     auto_consolidation: bool = True  # Consolider Memory automatiquement
-    consolidation_interval_pulses: int = 10  # Consolider toutes les N pulses
+    consolidation_interval_pulses: int = 60  # Consolider toutes les 60 pulses (~5h)
     auto_tuning: bool = True  # Lancer l'auto-tuning périodiquement
-    auto_tuning_interval_pulses: int = 5  # Toutes les 5 pulses (~2h30)
+    auto_tuning_interval_pulses: int = 30  # Toutes les 30 pulses (~2h30)
     self_patching: bool = True  # Level 3 — auto-correction comportementale
-    self_patching_interval_pulses: int = 10  # Toutes les 10 pulses (~5h)
+    self_patching_interval_pulses: int = 60  # Toutes les 60 pulses (~5h)
     tool_generation: bool = True  # Level 4 — création autonome d'outils
-    tool_generation_interval_pulses: int = 15  # Toutes les 15 pulses (~7h30)
+    tool_generation_interval_pulses: int = 90  # Toutes les 90 pulses (~7h30)
     enabled: bool = True
 
 
@@ -268,30 +268,33 @@ class HeartbeatManager:
                 crew_state = executor.load_state(epic.id)
 
                 if crew_state and crew_state.status == "active":
-                    # C'est un crew → avancer d'une étape via CrewExecutor
+                    # C'est un crew → avancer les steps prêts (parallèle si dépendances)
                     if tasks_launched >= self.config.max_auto_tasks_per_pulse:
                         continue
 
                     try:
-                        event = await asyncio.wait_for(
-                            executor.advance_one_step(epic.id),
+                        events = await asyncio.wait_for(
+                            executor.advance_ready_steps(epic.id),
                             timeout=300.0,
                         )
-                        tasks_launched += 1
-                        self._emit(HeartbeatEvent(
-                            event_type="crew_step_advanced",
-                            message=f"Crew avancé: {event.message[:80]}",
-                            data={"epic_id": epic.id, "event_type": event.event_type},
-                        ))
-
-                        # Si le crew est terminé, mettre à jour l'epic
-                        if event.event_type == "crew_done":
-                            registry.update_epic_status(epic.id, "done")
+                        # Compter uniquement les steps réellement exécutés (pas les events orchestrateur/blocked)
+                        step_events = [e for e in events if e.event_type in ("step_completed", "step_failed")]
+                        tasks_launched += max(len(step_events), 1)
+                        for event in events:
                             self._emit(HeartbeatEvent(
-                                event_type="epic_done",
-                                message=f"Epic terminé (crew): {epic.description[:60]}",
-                                data={"epic_id": epic.id, "success": True},
+                                event_type="crew_step_advanced",
+                                message=f"Crew avancé: {event.message[:80]}",
+                                data={"epic_id": epic.id, "event_type": event.event_type},
                             ))
+
+                            # Si le crew est terminé, mettre à jour l'epic
+                            if event.event_type == "crew_done":
+                                registry.update_epic_status(epic.id, "done")
+                                self._emit(HeartbeatEvent(
+                                    event_type="epic_done",
+                                    message=f"Epic terminé (crew): {epic.description[:60]}",
+                                    data={"epic_id": epic.id, "success": True},
+                                ))
 
                     except asyncio.TimeoutError:
                         logger.error("[Heartbeat] Crew step timeout: %s", epic.id[:8])
@@ -668,7 +671,7 @@ class HeartbeatManager:
     _TELEGRAM_NOTIFY_EVENTS = {
         "task_completed", "task_failed", "epic_done",
         "task_stale", "self_patching", "tool_generation",
-        "crew_step_advanced",
+        "crew_step_advanced", "orchestrator_replan",
     }
 
     def _emit(self, event: HeartbeatEvent) -> None:

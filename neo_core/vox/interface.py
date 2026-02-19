@@ -575,7 +575,16 @@ class Vox:
 
         # ── Message complexe → Brain nécessaire ──
         self.update_agent_status("Vox", active=True, task="reformulation", progress=0.3)
-        formatted_request = await self.format_request_async(human_message)
+
+        # Skip reformulation pour les messages longs et clairs (>100 chars sans pronoms ambigus)
+        _ambiguous_pronouns = ["ça", "cela", "pareil", "même chose", "le même", "la même",
+                               "continue", "enchaîne", "la suite", "fais-le", "fais le"]
+        _has_ambiguity = any(p in human_message.lower() for p in _ambiguous_pronouns)
+        if len(human_message) > 100 and not _has_ambiguity:
+            logger.info("[VOX] Reformulation skipped (long clear message: %d chars)", len(human_message))
+            formatted_request = human_message
+        else:
+            formatted_request = await self.format_request_async(human_message)
 
         # Mode asynchrone : lancer Brain en arrière-plan
         if self._on_brain_done_callback:

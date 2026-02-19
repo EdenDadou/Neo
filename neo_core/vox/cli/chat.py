@@ -628,7 +628,8 @@ async def conversation_loop(vox):
 
         def on_heartbeat_event(event):
             """Affiche les événements importants du heartbeat."""
-            important = {"task_completed", "task_failed", "epic_done", "task_stale", "persona_reflection"}
+            important = {"task_completed", "task_failed", "epic_done", "task_stale",
+                         "persona_reflection", "crew_step_advanced", "orchestrator_replan"}
             if event.event_type in important:
                 console.print(
                     f"\n  [dim magenta]♥ {event.message}[/dim magenta]"
@@ -637,7 +638,7 @@ async def conversation_loop(vox):
         heartbeat_manager = HeartbeatManager(
             brain=vox.brain,
             memory=vox.memory,
-            config=HeartbeatConfig(interval_seconds=1800.0),  # 30 minutes
+            config=HeartbeatConfig(interval_seconds=300.0),  # 5 minutes
             on_event=on_heartbeat_event,
         )
         heartbeat_manager.start()

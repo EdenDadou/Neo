@@ -229,7 +229,7 @@ async def _run_daemon(host: str = "127.0.0.1", port: int = 8000) -> None:
             brain = core_registry.get_brain()
             memory = core_registry.get_memory()
 
-            hb_config = HeartbeatConfig(interval_seconds=1800.0)
+            hb_config = HeartbeatConfig(interval_seconds=300.0)  # 5 minutes
             heartbeat = HeartbeatManager(
                 brain=brain,
                 memory=memory,

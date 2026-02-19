@@ -396,6 +396,11 @@ class Worker:
         if self.memory:
             memory_context = self.memory.get_context(self.task)
 
+        # Enrichir avec le contexte d'apprentissage (3 dernières exécutions du même type)
+        learning_context = self._build_learning_context()
+        if learning_context:
+            memory_context += f"\n\n=== Apprentissage (exécutions précédentes) ===\n{learning_context}"
+
         # Construire le prompt système avec la date réelle
         from datetime import datetime
         now = datetime.now()
@@ -438,7 +443,12 @@ class Worker:
         )
         total_text_parts = []
 
-        for iteration in range(max_iterations):
+        # Compteur d'extensions dynamiques
+        _extensions_used = 0
+        _max_extensions = 2  # Max 2 extensions de 2 itérations chacune
+        iteration = 0
+
+        while iteration < max_iterations:
             # Appel via le router multi-provider
             response_data = await self._provider_call(
                 agent_name=agent_name,
@@ -534,9 +544,26 @@ class Worker:
 
             # Renvoyer les résultats au LLM
             messages.append({"role": "user", "content": tool_results})
+            iteration += 1
 
-        # Max iterations atteint — prendre le texte le plus récent
-        # (le dernier text_part est la réponse la plus complète)
+            # Extension dynamique : si le worker n'a pas fini et qu'il reste des extensions
+            if iteration >= max_iterations and _extensions_used < _max_extensions:
+                if total_text_parts:
+                    last_text = total_text_parts[-1].lower()
+                    needs_more = any(kw in last_text for kw in [
+                        "je continue", "pas terminé", "need more", "en cours",
+                        "je vais", "laissez-moi", "let me", "i'll continue",
+                        "prochaine étape", "next step",
+                    ])
+                    if needs_more:
+                        max_iterations += 2
+                        _extensions_used += 1
+                        logger.info(
+                            "[Worker %s] Dynamic extension +2 iterations (total: %d, ext: %d)",
+                            self._worker_id, max_iterations, _extensions_used,
+                        )
+
+        # Prendre le texte le plus récent
         if total_text_parts:
             final_output = total_text_parts[-1]
         else:
@@ -547,7 +574,11 @@ class Worker:
             worker_type=self.worker_type.value,
             task=self.task,
             tool_calls=tool_calls,
-            metadata={"iterations": max_iterations, "max_reached": True},
+            metadata={
+                "iterations": max_iterations,
+                "max_reached": True,
+                "extensions": _extensions_used,
+            },
         )
 
     async def _provider_call(
@@ -627,6 +658,34 @@ class Worker:
             "model": self._model_config.model if self._model_config else "unknown",
             "task": self.task[:80],
         }
+
+    def _build_learning_context(self) -> str:
+        """
+        Récupère les 3 dernières exécutions du même type de worker
+        depuis Memory pour enrichir le contexte d'apprentissage.
+        """
+        if not self.memory or not self.memory.is_initialized:
+            return ""
+
+        try:
+            records = self.memory._store.search_by_tags(
+                [f"type:{self.worker_type.value}", "worker_execution"],
+                limit=3,
+            )
+            if not records:
+                return ""
+
+            parts = []
+            for rec in records:
+                # Extraire un résumé court
+                lines = rec.content.split("\n")
+                status_line = lines[0] if lines else ""
+                parts.append(f"- {status_line}")
+
+            return "\n".join(parts)
+        except Exception as e:
+            logger.debug("Learning context retrieval failed: %s", e)
+            return ""
 
     def _report_to_memory(self, result: WorkerResult) -> None:
         """

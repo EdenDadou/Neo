@@ -427,14 +427,15 @@ class NeoTUI(App):
                 from neo_core.infra.heartbeat import HeartbeatManager, HeartbeatConfig
 
                 def on_heartbeat_event(event):
-                    important = {"task_completed", "task_failed", "epic_done", "task_stale", "persona_reflection"}
+                    important = {"task_completed", "task_failed", "epic_done", "task_stale",
+                                 "persona_reflection", "crew_step_advanced", "orchestrator_replan"}
                     if event.event_type in important:
                         self.post_message(HeartbeatEvent(event.message))
 
                 self._heartbeat_manager = HeartbeatManager(
                     brain=self.vox.brain,
                     memory=self.vox.memory,
-                    config=HeartbeatConfig(interval_seconds=1800.0),
+                    config=HeartbeatConfig(interval_seconds=300.0),  # 5 minutes
                     on_event=on_heartbeat_event,
                 )
                 self._heartbeat_manager.start()

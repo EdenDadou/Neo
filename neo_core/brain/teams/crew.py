@@ -48,17 +48,19 @@ _CREW_STATE_SOURCE_PREFIX = "crew_state:"
 
 @dataclass
 class CrewStep:
-    """Une étape du pipeline crew."""
+    """Une étape du pipeline crew avec dépendances optionnelles."""
 
     index: int
     description: str
     worker_type: WorkerType
+    depends_on: list[int] = field(default_factory=list)  # indices des steps requis avant exécution
 
     def to_dict(self) -> dict:
         return {
             "index": self.index,
             "description": self.description,
             "worker_type": self.worker_type.value,
+            "depends_on": self.depends_on,
         }
 
     @classmethod
@@ -72,6 +74,7 @@ class CrewStep:
             index=data["index"],
             description=data["description"],
             worker_type=worker_type,
+            depends_on=data.get("depends_on", []),
         )
 
 
@@ -139,6 +142,7 @@ class CrewState:
     steps: list[CrewStep] = field(default_factory=list)
     results: list[CrewStepResult] = field(default_factory=list)
     current_step_index: int = 0
+    completed_indices: list[int] = field(default_factory=list)  # v2: indices des steps terminés
     status: str = "active"  # "active" | "paused" | "done" | "failed"
     memory_context: str = ""
     original_request: str = ""  # Requête utilisateur ORIGINALE — jamais tronquée
@@ -148,13 +152,18 @@ class CrewState:
 
     @property
     def is_complete(self) -> bool:
+        # v2: terminé quand tous les steps sont dans completed_indices
+        if self.completed_indices:
+            return len(self.completed_indices) >= len(self.steps)
+        # Compat v1: fallback sur current_step_index
         return self.current_step_index >= len(self.steps)
 
     @property
     def progress_pct(self) -> float:
         if not self.steps:
             return 0.0
-        return (self.current_step_index / len(self.steps)) * 100
+        done = len(self.completed_indices) if self.completed_indices else self.current_step_index
+        return (done / len(self.steps)) * 100
 
     def get_accumulated_text(self) -> str:
         """Résultats accumulés des étapes terminées (pour injection contexte)."""
@@ -178,6 +187,7 @@ class CrewState:
             "steps": [s.to_dict() for s in self.steps],
             "results": [r.to_dict() for r in self.results],
             "current_step_index": self.current_step_index,
+            "completed_indices": self.completed_indices,
             "status": self.status,
             "memory_context": self.memory_context[:2000],  # Limiter la taille
             "created_at": self.created_at,
@@ -194,6 +204,7 @@ class CrewState:
             steps=[CrewStep.from_dict(s) for s in data.get("steps", [])],
             results=[CrewStepResult.from_dict(r) for r in data.get("results", [])],
             current_step_index=data.get("current_step_index", 0),
+            completed_indices=data.get("completed_indices", []),
             status=data.get("status", "active"),
             memory_context=data.get("memory_context", ""),
             created_at=data.get("created_at", datetime.now().isoformat()),
@@ -355,6 +366,143 @@ class CrewExecutor:
 
     # ─── Exécution progressive (heartbeat) ──────────
 
+    async def advance_ready_steps(self, epic_id: str) -> list[CrewEvent]:
+        """
+        Avance TOUS les steps prêts en parallèle. Appelé par le heartbeat.
+
+        Un step est "prêt" quand :
+        - Il n'est pas encore terminé (pas dans completed_indices)
+        - Toutes ses dépendances sont terminées
+
+        Si des steps n'ont pas de depends_on (ancien format), fallback
+        sur l'exécution séquentielle classique via advance_one_step().
+        """
+        import asyncio as _aio
+
+        state = self.load_state(epic_id)
+        if not state:
+            return [self._make_event(
+                epic_id, "crew_blocked",
+                f"Impossible de charger l'état du crew {epic_id[:8]}",
+            )]
+
+        if state.is_complete or state.status != "active":
+            return [self._make_event(
+                epic_id, "crew_blocked",
+                f"Crew {epic_id[:8]} déjà terminé ou inactif (status={state.status})",
+            )]
+
+        # Vérifier si les steps ont des dépendances (format v2)
+        has_dependencies = any(step.depends_on for step in state.steps)
+        if not has_dependencies:
+            # Fallback séquentiel (compat ancien format)
+            event = await self.advance_one_step(epic_id)
+            return [event]
+
+        completed_set = set(state.completed_indices)
+
+        # Trouver les steps prêts (dépendances satisfaites, pas encore terminés)
+        ready_steps = [
+            step for step in state.steps
+            if step.index not in completed_set
+            and all(d in completed_set for d in step.depends_on)
+        ]
+
+        if not ready_steps:
+            return [self._make_event(
+                epic_id, "crew_blocked",
+                f"Crew {epic_id[:8]} — aucun step prêt (dépendances non satisfaites)",
+            )]
+
+        logger.info(
+            "[Crew %s] Exécution parallèle de %d steps: %s",
+            epic_id[:8], len(ready_steps),
+            [f"#{s.index}({s.worker_type.value})" for s in ready_steps],
+        )
+
+        # Exécuter tous les steps prêts en parallèle
+        events = []
+        total = len(state.steps)
+
+        async def _run_step(step: CrewStep) -> tuple[CrewStep, str, bool, float]:
+            enriched_task = self._build_enriched_task_from_state(step, state)
+            t0 = time.time()
+            output, success = await self._execute_step(step, enriched_task)
+            return step, output, success, time.time() - t0
+
+        results = await _aio.gather(*[_run_step(s) for s in ready_steps])
+
+        for step, output, success, elapsed in results:
+            # Enregistrer le résultat
+            result = CrewStepResult(
+                index=step.index,
+                worker_type=step.worker_type.value,
+                output=output,
+                success=success,
+                execution_time=elapsed,
+            )
+            state.results.append(result)
+            state.completed_indices.append(step.index)
+            state.current_step_index = max(state.current_step_index, step.index + 1)
+
+            # Stocker en mémoire
+            self._store_step_result(epic_id, step, output)
+            self._sync_task_registry(epic_id, step.index, success, output)
+
+            if success:
+                event = self._make_event(
+                    epic_id, "step_completed",
+                    f"Étape {step.index + 1}/{total} terminée — "
+                    f"{step.worker_type.value}: {step.description[:60]}",
+                    data={"step_index": step.index, "progress_pct": state.progress_pct},
+                )
+            else:
+                event = self._make_event(
+                    epic_id, "step_failed",
+                    f"Étape {step.index + 1}/{total} échouée — "
+                    f"{step.worker_type.value}: {output[:100]}",
+                    data={"step_index": step.index, "error": output[:300]},
+                )
+            state.events.append(event)
+            events.append(event)
+
+            logger.info(
+                "[Crew %s] Étape %d/%d %s — %.1fs",
+                epic_id[:8], step.index + 1, total,
+                "✅" if success else "❌", elapsed,
+            )
+
+        # ── Orchestrateur : réévaluer le plan après ce batch ──
+        # Si il reste des steps non terminés, l'orchestrateur peut adapter le plan
+        if not state.is_complete:
+            orchestrator_events = await self._orchestrator_replan(state)
+            events.extend(orchestrator_events)
+            # Recalculer total après possible ajout de steps
+            total = len(state.steps)
+
+        # Vérifier si tout est terminé → synthèse
+        if state.is_complete:
+            synthesis = await self._synthesize(state.epic_subject, state)
+            state.status = "done"
+            self._store_step_result_raw(
+                epic_id, "synthesis", synthesis,
+                tags=["crew_synthesis", f"crew:{epic_id}"],
+            )
+            done_event = self._make_event(
+                epic_id, "crew_done",
+                f"Crew « {state.epic_subject[:50]} » terminé ({total} étapes). "
+                f"Synthèse: {synthesis[:200]}...",
+                data={"synthesis": synthesis[:2000], "total_steps": total},
+            )
+            state.events.append(done_event)
+            events.append(done_event)
+
+        self.save_state(state)
+        for event in events:
+            self._emit_event(event)
+
+        return events
+
     async def advance_one_step(self, epic_id: str) -> CrewEvent:
         """
         Avance le crew d'UNE étape. Appelé par le heartbeat.
@@ -460,6 +608,280 @@ class CrewExecutor:
         )
 
         return event
+
+    # ─── Orchestrateur : réévaluation du plan ───────
+
+    _ORCHESTRATOR_PROMPT = """Tu es l'orchestrateur du projet « {epic_subject} ».
+
+DEMANDE ORIGINALE : {original_request}
+
+PLAN ACTUEL ({total_steps} étapes) :
+{plan_summary}
+
+RÉSULTATS DES ÉTAPES TERMINÉES :
+{results_summary}
+
+ÉTAPES RESTANTES (pas encore exécutées) :
+{remaining_summary}
+
+Ta mission : analyser les résultats et décider si le plan doit être adapté.
+
+Réponds en JSON strict :
+{{
+  "action": "continue|add_steps|remove_steps|replace_steps",
+  "reasoning": "explication courte de ta décision",
+  "new_steps": [
+    {{"description": "...", "worker_type": "researcher|coder|analyst|writer|summarizer|generic", "depends_on": [indices]}}
+  ],
+  "remove_indices": [indices des steps à supprimer],
+  "replace": {{old_index: {{"description": "...", "worker_type": "...", "depends_on": [...]}} }}
+}}
+
+RÈGLES :
+- "continue" : le plan est bon, on continue tel quel (new_steps=[], remove_indices=[], replace={{}})
+- "add_steps" : les résultats révèlent un besoin imprévu → ajouter des étapes
+- "remove_steps" : certaines étapes restantes sont devenues inutiles
+- "replace_steps" : une étape restante doit être redéfinie vu les nouveaux résultats
+- Les depends_on des new_steps font référence aux indices EXISTANTS ou aux nouveaux (ajoutés à la suite)
+- Maximum 3 étapes ajoutées à la fois
+- Si tout va bien, préfère "continue" — ne change le plan que si c'est VRAIMENT nécessaire
+
+Réponds UNIQUEMENT avec le JSON."""
+
+    async def _orchestrator_replan(self, state: CrewState) -> list[CrewEvent]:
+        """
+        Agent orchestrateur : réévalue le plan après chaque batch de steps.
+
+        Analyse les résultats des étapes terminées et décide si le plan
+        doit être adapté (ajouter/supprimer/remplacer des étapes).
+
+        Retourne des CrewEvents décrivant les modifications.
+        """
+        events: list[CrewEvent] = []
+        completed_set = set(state.completed_indices)
+        remaining = [s for s in state.steps if s.index not in completed_set]
+
+        # Pas besoin de replan si tout est terminé ou s'il ne reste qu'1 step
+        if not remaining or len(remaining) <= 1:
+            return events
+
+        # Construire les résumés pour le prompt
+        plan_lines = []
+        for s in state.steps:
+            status = "✅" if s.index in completed_set else "⏳"
+            deps = f" (après {s.depends_on})" if s.depends_on else ""
+            plan_lines.append(f"  {status} Step {s.index}: {s.worker_type.value} — {s.description[:80]}{deps}")
+
+        results_lines = []
+        for r in state.results:
+            icon = "✅" if r.success else "❌"
+            results_lines.append(f"  {icon} Step {r.index} ({r.worker_type}): {r.output[:200]}")
+
+        remaining_lines = []
+        for s in remaining:
+            deps = f" (après {s.depends_on})" if s.depends_on else ""
+            remaining_lines.append(f"  Step {s.index}: {s.worker_type.value} — {s.description[:80]}{deps}")
+
+        prompt = self._ORCHESTRATOR_PROMPT.format(
+            epic_subject=state.epic_subject,
+            original_request=state.original_request[:500],
+            total_steps=len(state.steps),
+            plan_summary="\n".join(plan_lines),
+            results_summary="\n".join(results_lines) or "  (aucun résultat)",
+            remaining_summary="\n".join(remaining_lines),
+        )
+
+        try:
+            response = await self.brain._raw_llm_call(prompt)
+
+            # Parser le JSON
+            cleaned = response.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+
+            import json as _json
+            data = _json.loads(cleaned)
+            action = data.get("action", "continue")
+            reasoning = data.get("reasoning", "")
+
+            logger.info(
+                "[Crew Orchestrator %s] Décision: %s — %s",
+                state.epic_id[:8], action, reasoning[:80],
+            )
+
+            if action == "continue":
+                # Plan inchangé
+                return events
+
+            if action == "add_steps":
+                new_steps_data = data.get("new_steps", [])
+                if new_steps_data:
+                    added = self._apply_add_steps(state, new_steps_data)
+                    if added:
+                        event = self._make_event(
+                            state.epic_id, "orchestrator_replan",
+                            f"Orchestrateur: +{len(added)} étapes ajoutées — {reasoning[:100]}",
+                            data={"action": "add_steps", "added_count": len(added),
+                                  "reasoning": reasoning},
+                        )
+                        state.events.append(event)
+                        events.append(event)
+
+            elif action == "remove_steps":
+                remove_indices = data.get("remove_indices", [])
+                if remove_indices:
+                    removed = self._apply_remove_steps(state, remove_indices)
+                    if removed:
+                        event = self._make_event(
+                            state.epic_id, "orchestrator_replan",
+                            f"Orchestrateur: -{len(removed)} étapes supprimées — {reasoning[:100]}",
+                            data={"action": "remove_steps", "removed_count": len(removed),
+                                  "reasoning": reasoning},
+                        )
+                        state.events.append(event)
+                        events.append(event)
+
+            elif action == "replace_steps":
+                replacements = data.get("replace", {})
+                if replacements:
+                    replaced = self._apply_replace_steps(state, replacements)
+                    if replaced:
+                        event = self._make_event(
+                            state.epic_id, "orchestrator_replan",
+                            f"Orchestrateur: {len(replaced)} étapes modifiées — {reasoning[:100]}",
+                            data={"action": "replace_steps", "replaced_count": len(replaced),
+                                  "reasoning": reasoning},
+                        )
+                        state.events.append(event)
+                        events.append(event)
+
+        except Exception as e:
+            logger.debug("[Crew Orchestrator] Replan failed: %s", e)
+
+        return events
+
+    def _apply_add_steps(self, state: CrewState, new_steps_data: list[dict]) -> list[CrewStep]:
+        """Ajoute de nouvelles étapes au plan. Max 3."""
+        added = []
+        base_index = len(state.steps)
+
+        for i, item in enumerate(new_steps_data[:3]):  # Max 3
+            desc = item.get("description", "")
+            wt_str = item.get("worker_type", "generic")
+            depends_on = item.get("depends_on", [])
+            # Valider les dépendances
+            max_valid = base_index + i
+            depends_on = [d for d in depends_on if isinstance(d, int) and 0 <= d < max_valid]
+
+            try:
+                wt = WorkerType(wt_str)
+            except ValueError:
+                wt = WorkerType.GENERIC
+
+            if desc:
+                step = CrewStep(
+                    index=base_index + i,
+                    description=desc,
+                    worker_type=wt,
+                    depends_on=depends_on,
+                )
+                state.steps.append(step)
+                added.append(step)
+
+                # Synchroniser avec le TaskRegistry
+                self._register_new_step_task(state.epic_id, step, state.epic_subject)
+
+        if added:
+            logger.info(
+                "[Crew Orchestrator %s] %d étapes ajoutées: %s",
+                state.epic_id[:8], len(added),
+                [f"#{s.index}({s.worker_type.value})" for s in added],
+            )
+        return added
+
+    def _apply_remove_steps(self, state: CrewState, remove_indices: list[int]) -> list[int]:
+        """Marque des étapes comme 'terminées' (skip) sans les exécuter."""
+        completed_set = set(state.completed_indices)
+        removed = []
+
+        for idx in remove_indices:
+            if isinstance(idx, int) and idx not in completed_set:
+                # Vérifier que l'index existe
+                if any(s.index == idx for s in state.steps):
+                    state.completed_indices.append(idx)
+                    # Ajouter un résultat "skipped"
+                    state.results.append(CrewStepResult(
+                        index=idx,
+                        worker_type="skipped",
+                        output="[Orchestrateur] Étape supprimée du plan — jugée non nécessaire",
+                        success=True,
+                        execution_time=0.0,
+                    ))
+                    removed.append(idx)
+
+        if removed:
+            logger.info(
+                "[Crew Orchestrator %s] %d étapes supprimées: %s",
+                state.epic_id[:8], len(removed), removed,
+            )
+        return removed
+
+    def _apply_replace_steps(self, state: CrewState, replacements: dict) -> list[int]:
+        """Remplace la description/type de steps non encore exécutés."""
+        completed_set = set(state.completed_indices)
+        replaced = []
+
+        for idx_str, new_data in replacements.items():
+            try:
+                idx = int(idx_str)
+            except (ValueError, TypeError):
+                continue
+
+            if idx in completed_set:
+                continue  # Ne pas modifier un step déjà terminé
+
+            # Trouver le step
+            for step in state.steps:
+                if step.index == idx:
+                    if "description" in new_data:
+                        step.description = new_data["description"]
+                    if "worker_type" in new_data:
+                        try:
+                            step.worker_type = WorkerType(new_data["worker_type"])
+                        except ValueError:
+                            pass
+                    if "depends_on" in new_data:
+                        step.depends_on = [
+                            d for d in new_data["depends_on"]
+                            if isinstance(d, int) and 0 <= d < len(state.steps) and d != idx
+                        ]
+                    replaced.append(idx)
+                    break
+
+        if replaced:
+            logger.info(
+                "[Crew Orchestrator %s] %d étapes remplacées: %s",
+                state.epic_id[:8], len(replaced), replaced,
+            )
+        return replaced
+
+    def _register_new_step_task(self, epic_id: str, step: CrewStep, epic_subject: str) -> None:
+        """Enregistre une nouvelle étape dans le TaskRegistry."""
+        if not self.memory or not self.memory.is_initialized:
+            return
+        try:
+            registry = self.memory.task_registry
+            if registry:
+                registry.add_task(
+                    description=step.description[:200],
+                    worker_type=step.worker_type.value,
+                    epic_id=epic_id,
+                )
+        except Exception as e:
+            logger.debug("[Crew Orchestrator] Task registration failed: %s", e)
 
     # ─── Interface Brain → Crew (channel) ───────────
 
