@@ -412,6 +412,9 @@ async def get_tasks():
     if not registry:
         return {"tasks": [], "summary": {}}
     tasks = registry.get_all_tasks(limit=50)
+    # /tasks ne retourne que les tâches standalone (sans projet)
+    # Les tâches liées à un projet sont visibles via /project
+    standalone = [t for t in tasks if not t.epic_id]
     return {
         "tasks": [
             {
@@ -420,9 +423,8 @@ async def get_tasks():
                 "description": t.description,
                 "status": t.status,
                 "worker_type": t.worker_type,
-                "epic_id": t.epic_id or "",
             }
-            for t in tasks
+            for t in standalone
         ],
         "summary": registry.get_summary(),
     }
@@ -441,11 +443,96 @@ async def get_epics():
     if not registry:
         return {"epics": []}
     epics = registry.get_all_epics(limit=15)
+
+    # Map worker_type → model name (for display)
+    from neo_core.config import AGENT_MODELS
+    def _model_for_worker(wtype: str) -> str:
+        key = f"worker:{wtype}"
+        cfg = AGENT_MODELS.get(key, AGENT_MODELS.get("brain"))
+        if cfg:
+            name = cfg.model
+            # Shorten: "claude-sonnet-4-6" → "Sonnet 4.6"
+            if "sonnet" in name:
+                return "Sonnet"
+            if "haiku" in name:
+                return "Haiku"
+            if "opus" in name:
+                return "Opus"
+            return name
+        return "?"
+
+    # Try loading CrewState for richer data (execution times, etc.)
+    crew_states = {}
+    try:
+        from neo_core.brain.teams.crew import CrewExecutor
+        brain = getattr(vox, "brain", None)
+        if brain:
+            executor = CrewExecutor(brain=brain)
+            for epic in epics:
+                cs = executor.load_state(epic.id)
+                if cs:
+                    crew_states[epic.id] = cs
+    except Exception:
+        pass
+
     result = []
     for epic in epics:
         tasks = registry.get_epic_tasks(epic.id)
+        tasks.sort(key=lambda t: t.created_at)
         done = sum(1 for t in tasks if t.status == "done")
         total = len(tasks)
+
+        crew_state = crew_states.get(epic.id)
+
+        # Compute elapsed time
+        elapsed_str = ""
+        try:
+            from datetime import datetime as _dt
+            started = _dt.fromisoformat(epic.created_at)
+            if epic.status in ("done", "failed") and epic.completed_at:
+                ended = _dt.fromisoformat(epic.completed_at)
+            else:
+                ended = _dt.now()
+            delta = ended - started
+            total_secs = int(delta.total_seconds())
+            if total_secs < 60:
+                elapsed_str = f"{total_secs}s"
+            elif total_secs < 3600:
+                elapsed_str = f"{total_secs // 60}m{total_secs % 60:02d}s"
+            else:
+                h = total_secs // 3600
+                m = (total_secs % 3600) // 60
+                elapsed_str = f"{h}h{m:02d}m"
+        except Exception:
+            pass
+
+        # Build enriched task list
+        enriched_tasks = []
+        for i, t in enumerate(tasks):
+            model = _model_for_worker(t.worker_type)
+            # Try to get execution time from CrewState
+            exec_time = ""
+            if crew_state:
+                for r in crew_state.results:
+                    if r.index == i:
+                        if r.execution_time > 0:
+                            et = r.execution_time
+                            exec_time = f"{et:.1f}s" if et < 60 else f"{et / 60:.1f}m"
+                        break
+
+            enriched_tasks.append({
+                "short_id": t.short_id,
+                "description": t.description,
+                "status": t.status,
+                "worker_type": t.worker_type,
+                "model": model,
+                "created_at": t.created_at,
+                "completed_at": t.completed_at,
+                "result_preview": t.result[:120] if t.result else "",
+                "execution_time": exec_time,
+                "attempt_count": t.attempt_count,
+            })
+
         result.append({
             "id": epic.id,
             "short_id": epic.short_id,
@@ -454,15 +541,11 @@ async def get_epics():
             "status": epic.status,
             "strategy": getattr(epic, "strategy", ""),
             "progress": f"{done}/{total}",
-            "tasks": [
-                {
-                    "short_id": t.short_id,
-                    "description": t.description,
-                    "status": t.status,
-                    "worker_type": t.worker_type,
-                }
-                for t in tasks
-            ],
+            "created_at": epic.created_at,
+            "completed_at": getattr(epic, "completed_at", ""),
+            "elapsed": elapsed_str,
+            "crew_status": crew_state.status if crew_state else None,
+            "tasks": enriched_tasks,
         })
     return {"epics": result}
 

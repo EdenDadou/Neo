@@ -977,6 +977,165 @@ Réponds UNIQUEMENT avec le JSON."""
         )
         return True
 
+    # ─── Directives Brain → Crew (pilotage interactif) ──
+
+    def send_directive(self, epic_id: str, instruction: str) -> CrewEvent:
+        """
+        Injecte une directive de Brain dans un crew actif.
+
+        La directive est stockée dans le memory_context du CrewState,
+        ce qui l'injecte automatiquement dans les prochains steps.
+        L'orchestrateur la verra aussi lors du prochain replan.
+
+        Retourne un CrewEvent confirmant l'injection.
+        """
+        state = self.load_state(epic_id)
+        if not state:
+            return self._make_event(
+                epic_id, "crew_blocked",
+                f"Crew {epic_id[:8]} introuvable — directive ignorée",
+            )
+
+        if state.status not in ("active", "paused"):
+            return self._make_event(
+                epic_id, "crew_blocked",
+                f"Crew {epic_id[:8]} est {state.status} — directive ignorée",
+            )
+
+        # Injecter la directive dans le memory_context (visible par tous les prochains steps)
+        directive_block = (
+            f"\n\n=== DIRECTIVE DE L'UTILISATEUR ({datetime.now().strftime('%H:%M')}) ===\n"
+            f"{instruction}\n"
+            f"=== FIN DIRECTIVE ==="
+        )
+        state.memory_context = (state.memory_context or "") + directive_block
+
+        # Aussi stocker en mémoire persistante pour la recherche sémantique
+        if self.memory and self.memory.is_initialized:
+            try:
+                self.memory.store_memory(
+                    content=f"[Directive utilisateur → Crew {state.epic_subject[:50]}] {instruction}",
+                    source=f"crew_directive:{epic_id}",
+                    tags=["crew_directive", f"crew:{epic_id}", "user_instruction"],
+                    importance=0.9,
+                )
+            except Exception as e:
+                logger.debug("[Crew] Stockage directive échoué: %s", e)
+
+        event = self._make_event(
+            epic_id, "directive_received",
+            f"Directive reçue pour « {state.epic_subject[:50]} » : {instruction[:100]}",
+            data={"instruction": instruction, "epic_subject": state.epic_subject},
+        )
+        state.events.append(event)
+        self.save_state(state)
+        self._emit_event(event)
+
+        logger.info(
+            "[Crew %s] Directive injectée: %s",
+            epic_id[:8], instruction[:80],
+        )
+        return event
+
+    def pause_crew(self, epic_id: str, reason: str = "") -> CrewEvent:
+        """Met un crew en pause. Le heartbeat ne l'avancera plus."""
+        state = self.load_state(epic_id)
+        if not state:
+            return self._make_event(epic_id, "crew_blocked", f"Crew {epic_id[:8]} introuvable")
+
+        if state.status != "active":
+            return self._make_event(
+                epic_id, "crew_blocked",
+                f"Crew {epic_id[:8]} est déjà {state.status}",
+            )
+
+        state.status = "paused"
+        event = self._make_event(
+            epic_id, "crew_paused",
+            f"Crew « {state.epic_subject[:50]} » mis en pause"
+            + (f" — {reason}" if reason else ""),
+            data={"reason": reason},
+        )
+        state.events.append(event)
+        self.save_state(state)
+        self._emit_event(event)
+        logger.info("[Crew %s] Mis en pause: %s", epic_id[:8], reason or "par l'utilisateur")
+        return event
+
+    def resume_crew(self, epic_id: str) -> CrewEvent:
+        """Reprend un crew en pause."""
+        state = self.load_state(epic_id)
+        if not state:
+            return self._make_event(epic_id, "crew_blocked", f"Crew {epic_id[:8]} introuvable")
+
+        if state.status != "paused":
+            return self._make_event(
+                epic_id, "crew_blocked",
+                f"Crew {epic_id[:8]} n'est pas en pause (status={state.status})",
+            )
+
+        state.status = "active"
+        event = self._make_event(
+            epic_id, "crew_resumed",
+            f"Crew « {state.epic_subject[:50]} » repris — le heartbeat va continuer l'exécution",
+        )
+        state.events.append(event)
+        self.save_state(state)
+        self._emit_event(event)
+        logger.info("[Crew %s] Repris", epic_id[:8])
+        return event
+
+    def modify_step(
+        self, epic_id: str, step_index: int,
+        new_description: str | None = None,
+        new_worker_type: str | None = None,
+    ) -> CrewEvent:
+        """Modifie une étape pending d'un crew actif."""
+        state = self.load_state(epic_id)
+        if not state:
+            return self._make_event(epic_id, "crew_blocked", f"Crew {epic_id[:8]} introuvable")
+
+        completed_set = set(state.completed_indices)
+        if step_index in completed_set:
+            return self._make_event(
+                epic_id, "crew_blocked",
+                f"Étape {step_index} déjà terminée — modification impossible",
+            )
+
+        target_step = None
+        for s in state.steps:
+            if s.index == step_index:
+                target_step = s
+                break
+
+        if not target_step:
+            return self._make_event(
+                epic_id, "crew_blocked",
+                f"Étape {step_index} introuvable dans le crew",
+            )
+
+        changes = []
+        if new_description:
+            target_step.description = new_description
+            changes.append(f"description → {new_description[:60]}")
+        if new_worker_type:
+            try:
+                target_step.worker_type = WorkerType(new_worker_type)
+                changes.append(f"worker → {new_worker_type}")
+            except ValueError:
+                pass
+
+        event = self._make_event(
+            epic_id, "step_modified",
+            f"Étape {step_index} modifiée : {', '.join(changes)}",
+            data={"step_index": step_index, "changes": changes},
+        )
+        state.events.append(event)
+        self.save_state(state)
+        self._emit_event(event)
+        logger.info("[Crew %s] Step %d modifié: %s", epic_id[:8], step_index, changes)
+        return event
+
     # ─── Synchronisation TaskRegistry ────────────────
 
     def _sync_task_registry(

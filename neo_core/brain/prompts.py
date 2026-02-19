@@ -147,7 +147,7 @@ Règles :
 @dataclass
 class BrainDecision:
     """Représente une décision prise par Brain."""
-    action: str  # "direct_response" | "delegate_worker" | "delegate_crew"
+    action: str  # "direct_response" | "delegate_worker" | "delegate_crew" | "crew_directive"
     response: Optional[str] = None
     subtasks: list[str] = field(default_factory=list)
     confidence: float = 1.0

@@ -963,39 +963,57 @@ class NeoTUI(App):
     def _render_tasks_organized(self, chat: RichLog, data: dict) -> None:
         """Rendu organisé des tâches (mode daemon, depuis API), groupé par statut."""
         tasks = data.get("tasks", [])
+        status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
         lines: list[str] = []
 
         if not tasks:
             lines.append("[dim]Aucune tâche indépendante.[/dim]")
+            lines.append("[dim]Les tâches liées à des projets sont dans /project[/dim]")
         else:
-            # Grouper par statut — les tâches API sont des strings, on parse le statut
-            in_progress = [t for t in tasks if "🔄" in t or "in_progress" in t]
-            pending = [t for t in tasks if "⏳" in t or "pending" in t]
-            done = [t for t in tasks if "✅" in t or "done" in t]
-            failed = [t for t in tasks if "❌" in t or "failed" in t]
+            def _render_task_line(t, indent="  "):
+                status = t.get("status", "pending")
+                icon = status_icons.get(status, "?")
+                sid = t.get("short_id", "")
+                sid_tag = f"[bold cyan]#{sid}[/bold cyan] " if sid else ""
+                desc = t.get("description", "")[:55]
+                wtype = t.get("worker_type", "")
+                if status == "done":
+                    desc = f"[dim]{desc}[/dim]"
+                elif status == "failed":
+                    desc = f"[red]{desc}[/red]"
+                elif status == "in_progress":
+                    desc = f"[bold yellow]{desc}[/bold yellow]"
+                return f"{indent}{icon} {sid_tag}{desc}  [dim]{wtype}[/dim]"
+
+            in_progress = [t for t in tasks if t.get("status") == "in_progress"]
+            pending = [t for t in tasks if t.get("status") == "pending"]
+            done = [t for t in tasks if t.get("status") == "done"]
+            failed = [t for t in tasks if t.get("status") == "failed"]
 
             if in_progress:
                 lines.append("[bold green]▶ En cours[/bold green]")
                 for t in in_progress:
-                    lines.append(f"  {t}")
+                    lines.append(_render_task_line(t))
                 lines.append("")
             if pending:
                 lines.append("[bold yellow]◻ À faire[/bold yellow]")
                 for t in pending[:10]:
-                    lines.append(f"  {t}")
+                    lines.append(_render_task_line(t))
                 lines.append("")
             if done:
                 lines.append("[bold dim]✓ Terminées[/bold dim]")
                 for t in done[-5:]:
-                    lines.append(f"  [dim]{t}[/dim]")
+                    lines.append(_render_task_line(t))
+                if len(done) > 5:
+                    lines.append(f"  [dim]... et {len(done) - 5} autres[/dim]")
                 lines.append("")
             if failed:
                 lines.append("[bold red]✗ Échouées[/bold red]")
                 for t in failed[-3:]:
-                    lines.append(f"  {t}")
+                    lines.append(_render_task_line(t))
                 lines.append("")
 
-            lines.append(f"[dim]{len(tasks)} tâche(s) · /tasks reset pour tout supprimer[/dim]")
+            lines.append(f"[dim]{len(tasks)} tâche(s) · /tasks reset[/dim]")
 
         chat.write(Panel("\n".join(lines), title="[bold cyan]Tâches[/bold cyan]", border_style="cyan"))
 
@@ -1086,31 +1104,141 @@ class NeoTUI(App):
                         self._render_projects_by_status(chat, epics, registry=registry)
 
     def _render_projects_by_status(self, chat: RichLog, epics, from_api=False, registry=None) -> None:
-        """Rendu des projets groupés par statut avec leurs sous-tâches."""
-        status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
+        """Rendu des projets groupés par statut avec détails complets."""
+        status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌", "paused": "⏸️"}
+        worker_icons = {
+            "researcher": "🔍", "coder": "💻", "analyst": "📊",
+            "writer": "✍️", "summarizer": "📝", "generic": "⚙️",
+            "translator": "🌐", "skipped": "⏭️",
+        }
+
+        # Model mapping for local (non-API) mode
+        _model_map = {}
+        try:
+            from neo_core.config import AGENT_MODELS
+            for key, cfg in AGENT_MODELS.items():
+                if key.startswith("worker:"):
+                    wt = key.split(":", 1)[1]
+                    name = cfg.model
+                    if "sonnet" in name:
+                        _model_map[wt] = "Sonnet"
+                    elif "haiku" in name:
+                        _model_map[wt] = "Haiku"
+                    elif "opus" in name:
+                        _model_map[wt] = "Opus"
+                    else:
+                        _model_map[wt] = name
+        except Exception:
+            pass
+
         lines: list[str] = []
+
+        # Helper: compute elapsed time string
+        def _elapsed(created_at_str, completed_at_str=""):
+            try:
+                from datetime import datetime as _dt
+                started = _dt.fromisoformat(created_at_str)
+                if completed_at_str:
+                    ended = _dt.fromisoformat(completed_at_str)
+                else:
+                    ended = _dt.now()
+                total_secs = int((ended - started).total_seconds())
+                if total_secs < 60:
+                    return f"{total_secs}s"
+                elif total_secs < 3600:
+                    return f"{total_secs // 60}m{total_secs % 60:02d}s"
+                else:
+                    h = total_secs // 3600
+                    m = (total_secs % 3600) // 60
+                    return f"{h}h{m:02d}m"
+            except Exception:
+                return ""
 
         # Grouper par statut
         if from_api:
-            active = [e for e in epics if e.get("status") == "in_progress"]
+            active = [e for e in epics if e.get("status") in ("in_progress",)]
+            paused = [e for e in epics if e.get("crew_status") == "paused"]
             pending = [e for e in epics if e.get("status") == "pending"]
             done = [e for e in epics if e.get("status") == "done"]
             failed = [e for e in epics if e.get("status") == "failed"]
+            # Remove paused from active (they may have status=in_progress but crew paused)
+            paused_ids = {e.get("id") for e in paused}
+            active = [e for e in active if e.get("id") not in paused_ids]
         else:
             active = [e for e in epics if e.status == "in_progress"]
+            paused = []  # Can't detect pause without CrewState in local mode
             pending = [e for e in epics if e.status == "pending"]
             done = [e for e in epics if e.status == "done"]
             failed = [e for e in epics if e.status == "failed"]
 
         def _render_epic(epic, icon_override=None):
             if from_api:
-                icon = icon_override or status_icons.get(epic.get("status", ""), "?")
+                status = epic.get("status", "")
+                crew_status = epic.get("crew_status", "")
+                icon = icon_override or status_icons.get(crew_status or status, "?")
                 sid = epic.get("short_id", "")
                 sid_tag = f"[bold cyan]#{sid}[/bold cyan] " if sid else ""
                 name = epic.get("name", "") or epic.get("description", "")[:50]
                 progress = epic.get("progress", "0/0")
-                lines.append(f"  {icon} {sid_tag}[bold]{name[:45]}[/bold]  {progress}")
+                elapsed = epic.get("elapsed", "")
+                elapsed_tag = f"  [dim]({elapsed})[/dim]" if elapsed else ""
+
+                # Progress bar
+                parts = progress.split("/")
+                try:
+                    d, tot = int(parts[0]), int(parts[1])
+                    pct = d * 100 // tot if tot > 0 else 0
+                    bar_len = 12
+                    filled = d * bar_len // tot if tot > 0 else 0
+                    bar = f"[green]{'█' * filled}[/green][dim]{'░' * (bar_len - filled)}[/dim]"
+                except (ValueError, IndexError):
+                    pct = 0
+                    bar = ""
+
+                lines.append(f"  {icon} {sid_tag}[bold]{name[:40]}[/bold]  {bar} {progress} ({pct}%){elapsed_tag}")
+
+                # Strategy line (if present)
+                strategy = epic.get("strategy", "")
+                if strategy:
+                    lines.append(f"    [dim italic]Stratégie : {strategy[:70]}[/dim italic]")
+
+                # Sous-tâches enrichies
+                api_tasks = epic.get("tasks", [])
+                for t in api_tasks:
+                    t_status = t.get("status", "pending")
+                    t_icon = status_icons.get(t_status, "?")
+                    t_sid = t.get("short_id", "")
+                    t_sid_tag = f"[cyan]#{t_sid}[/cyan] " if t_sid else ""
+                    desc = t.get("description", "")[:38]
+                    wtype = t.get("worker_type", "generic")
+                    model = t.get("model", _model_map.get(wtype, "?"))
+                    w_icon = worker_icons.get(wtype, "⚙️")
+                    exec_time = t.get("execution_time", "")
+                    exec_tag = f" [green]{exec_time}[/green]" if exec_time else ""
+
+                    # Style selon statut
+                    if t_status == "done":
+                        desc = f"[dim]{desc}[/dim]"
+                        agent_info = f"[dim]{w_icon} {wtype}[/dim] [dim italic]({model})[/dim italic]{exec_tag}"
+                    elif t_status == "failed":
+                        desc = f"[red]{desc}[/red]"
+                        agent_info = f"[red]{w_icon} {wtype}[/red] [dim italic]({model})[/dim italic]"
+                    elif t_status == "in_progress":
+                        desc = f"[bold yellow]{desc}[/bold yellow]"
+                        agent_info = f"[yellow]{w_icon} {wtype}[/yellow] [italic]({model})[/italic]"
+                    else:
+                        agent_info = f"[dim]{w_icon} {wtype} ({model})[/dim]"
+
+                    lines.append(f"      {t_icon} {t_sid_tag}{desc}  {agent_info}")
+
+                    # Result preview for done tasks
+                    if t_status == "done":
+                        preview = t.get("result_preview", "")
+                        if preview:
+                            lines.append(f"         [dim]→ {preview[:65]}…[/dim]")
+
             else:
+                # Local mode (non-API)
                 icon = icon_override or status_icons.get(epic.status, "?")
                 sid_tag = f"[bold cyan]#{epic.short_id}[/bold cyan] " if epic.short_id else ""
                 epic_tasks = registry.get_epic_tasks(epic.id) if registry else []
@@ -1118,36 +1246,73 @@ class NeoTUI(App):
                 d = sum(1 for t in epic_tasks if t.status == "done")
                 tot = len(epic_tasks)
                 pct = f"{d * 100 // tot}%" if tot > 0 else "—"
-                lines.append(f"  {icon} {sid_tag}[bold]{epic.display_name[:45]}[/bold]  {d}/{tot} ({pct})")
-                # Sous-tâches du projet
+                elapsed = _elapsed(epic.created_at, getattr(epic, "completed_at", ""))
+                elapsed_tag = f"  [dim]({elapsed})[/dim]" if elapsed else ""
+
+                # Progress bar
+                bar_len = 12
+                filled = d * bar_len // tot if tot > 0 else 0
+                bar = f"[green]{'█' * filled}[/green][dim]{'░' * (bar_len - filled)}[/dim]"
+
+                lines.append(f"  {icon} {sid_tag}[bold]{epic.display_name[:40]}[/bold]  {bar} {d}/{tot} ({pct}){elapsed_tag}")
+
+                # Strategy
+                if hasattr(epic, "strategy") and epic.strategy:
+                    lines.append(f"    [dim italic]Stratégie : {epic.strategy[:70]}[/dim italic]")
+
+                # Sous-tâches
                 for t in epic_tasks:
                     t_icon = status_icons.get(t.status, "?")
                     t_sid = f"[cyan]#{t.short_id}[/cyan] " if t.short_id else ""
-                    lines.append(f"      {t_icon} {t_sid}{t.description[:42]}  [dim]{t.worker_type}[/dim]")
+                    desc = t.description[:38]
+                    wtype = t.worker_type or "generic"
+                    model = _model_map.get(wtype, "?")
+                    w_icon = worker_icons.get(wtype, "⚙️")
+
+                    if t.status == "done":
+                        desc = f"[dim]{desc}[/dim]"
+                        agent_info = f"[dim]{w_icon} {wtype}[/dim] [dim italic]({model})[/dim italic]"
+                    elif t.status == "failed":
+                        desc = f"[red]{desc}[/red]"
+                        agent_info = f"[red]{w_icon} {wtype}[/red] [dim italic]({model})[/dim italic]"
+                    elif t.status == "in_progress":
+                        desc = f"[bold yellow]{desc}[/bold yellow]"
+                        agent_info = f"[yellow]{w_icon} {wtype}[/yellow] [italic]({model})[/italic]"
+                    else:
+                        agent_info = f"[dim]{w_icon} {wtype} ({model})[/dim]"
+
+                    lines.append(f"      {t_icon} {t_sid}{desc}  {agent_info}")
+
+                    # Result preview
+                    if t.status == "done" and t.result:
+                        lines.append(f"         [dim]→ {t.result[:65]}…[/dim]")
 
         # ── En cours ──
         if active:
             lines.append("[bold green]▶ En cours[/bold green]")
             for e in active:
                 _render_epic(e)
-            lines.append("")
+                lines.append("")
+
+        # ── En pause ──
+        if paused:
+            lines.append("[bold magenta]⏸ En pause[/bold magenta]")
+            for e in paused:
+                _render_epic(e, icon_override="⏸️")
+                lines.append("")
 
         # ── À faire ──
         if pending:
             lines.append("[bold yellow]◻ À faire[/bold yellow]")
             for e in pending:
                 _render_epic(e)
-            lines.append("")
+                lines.append("")
 
         # ── Terminés ──
         if done:
             lines.append("[bold dim]✓ Terminés[/bold dim]")
             for e in done[-5:]:
-                if from_api:
-                    name = e.get("name", "") or e.get("description", "")[:50]
-                    lines.append(f"  [dim]✅ {name[:50]}[/dim]")
-                else:
-                    lines.append(f"  [dim]✅ {e.display_name[:50]}[/dim]")
+                _render_epic(e)
             if len(done) > 5:
                 lines.append(f"  [dim]... et {len(done) - 5} autres[/dim]")
             lines.append("")
@@ -1156,11 +1321,7 @@ class NeoTUI(App):
         if failed:
             lines.append("[bold red]✗ Échoués[/bold red]")
             for e in failed[-3:]:
-                if from_api:
-                    name = e.get("name", "") or e.get("description", "")[:50]
-                    lines.append(f"  [dim red]❌ {name[:50]}[/dim red]")
-                else:
-                    lines.append(f"  [dim red]❌ {e.display_name[:50]}[/dim red]")
+                _render_epic(e)
             lines.append("")
 
         total = len(epics)

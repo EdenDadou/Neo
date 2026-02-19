@@ -574,11 +574,19 @@ Types d'intent :
 - "conversation" : question simple, discussion, demande d'info, question sur un projet/tâche existant (pas besoin d'outil)
 - "tool_use" : nécessite un outil externe (recherche web, exécution code, lecture/écriture fichier, scraping)
 - "project" : demande EXPLICITE de CRÉER un nouveau projet multi-étapes, une roadmap, un plan d'action
+- "crew_directive" : l'utilisateur veut DIRIGER, MODIFIER, PILOTER un projet/crew EXISTANT. Exemples : "change l'approche du P1", "mets en pause le projet", "ajoute une étape de test", "concentre-toi sur X pour P2", "arrête le projet", "reprends le projet", "modifie l'étape 3"
 
 IMPORTANT :
-- Si la requête RÉFÉRENCE un projet existant (P1, P2, T3...) sans en créer un nouveau → "conversation"
+- Si la requête RÉFÉRENCE un projet existant (P1, P2, T3...) sans en créer un nouveau → "conversation" OU "crew_directive"
+- "crew_directive" = l'utilisateur donne un ORDRE/INSTRUCTION au crew (pause, resume, modifier, rediriger, ajouter étape)
+- "conversation" = l'utilisateur POSE UNE QUESTION sur le projet (statut, avancement, info)
 - Si la requête est une confirmation ("oui", "ok", "continue") en contexte → "conversation"
 - Seule la CRÉATION explicite d'un nouveau projet → "project"
+- Si la requête demande une action (tool_use) qui CONCERNE un projet existant, indique le short_id du projet dans "target_project"
+
+Pour "crew_directive", indique aussi :
+- "directive_type" : "send_instruction|pause|resume|add_step|modify_step"
+- "target_project" : le short_id du projet concerné (P1, P2, etc.)
 
 Types de worker (si tool_use ou project) :
 - "researcher" : recherche web, collecte d'infos
@@ -589,7 +597,7 @@ Types de worker (si tool_use ou project) :
 - "generic" : tâches mixtes
 
 Réponds UNIQUEMENT avec ce JSON :
-{{"intent": "conversation|tool_use|project", "worker_type": "researcher|coder|analyst|writer|summarizer|generic", "confidence": 0.0-1.0, "reasoning": "explication courte"}}"""
+{{"intent": "conversation|tool_use|project|crew_directive", "worker_type": "researcher|coder|analyst|writer|summarizer|generic", "confidence": 0.0-1.0, "reasoning": "explication courte", "target_project": "P1|P2|...|null", "directive_type": "send_instruction|pause|resume|add_step|modify_step|null"}}"""
 
     def _build_task_registry_context(self, request: str) -> str:
         """
@@ -805,14 +813,35 @@ Réponds UNIQUEMENT avec ce JSON :
             # qui re-vérifie avec _EPIC_INTENT_RE
             return self._decide_complex_generic(request, worker_type)
 
+        if intent == "crew_directive":
+            target_project = classification.get("target_project")
+            directive_type = classification.get("directive_type", "send_instruction")
+            metadata = {
+                "crew_directive": True,
+                "directive_type": directive_type if directive_type and directive_type != "null" else "send_instruction",
+            }
+            if target_project and target_project != "null":
+                metadata["target_project"] = target_project
+            return BrainDecision(
+                action="crew_directive",
+                confidence=float(classification.get("confidence", 0.8)),
+                reasoning=f"Directive crew détectée: {directive_type} → {target_project or 'auto'}",
+                metadata=metadata,
+            )
+
         if intent == "tool_use":
             try:
                 worker_type = WorkerType(llm_worker_type)
             except ValueError:
                 worker_type = self.factory.classify_task(classification_input)
-            return self._decide_typed_worker(
+            decision = self._decide_typed_worker(
                 request, complexity, worker_type, patch_overrides
             )
+            # Propager le target_project du LLM pour rattacher la tâche à un projet
+            target_project = classification.get("target_project")
+            if target_project and target_project != "null":
+                decision.metadata["target_project"] = target_project
+            return decision
 
         # 4. Défaut → direct_response (Claude Sonnet + mémoire)
         return self._decide_direct(request, complexity)
@@ -1092,6 +1121,20 @@ Réponds UNIQUEMENT avec ce JSON :
             else ""
         )
 
+        # ── Intercept crew directives (Brain pilote le Crew) ──
+        if decision.action == "crew_directive":
+            try:
+                result = await self._execute_crew_directive(request, decision)
+                return result
+            except Exception as e:
+                logger.error("Crew directive failed: %s", e)
+                # Fallback → répondre normalement avec le contexte crew
+                decision = BrainDecision(
+                    action="direct_response",
+                    confidence=0.7,
+                    reasoning=f"Crew directive fallback: {e}",
+                )
+
         # ── Intercept crew queries (bidirectionnel Brain ↔ Crew) ──
         crew_epic_id = self._detect_crew_query(request)
         if crew_epic_id:
@@ -1215,9 +1258,22 @@ Réponds UNIQUEMENT avec ce JSON :
                     pass
         elif self.memory and self.memory.is_initialized:
             try:
+                # Résoudre le projet cible si spécifié par le LLM
+                epic_id = None
+                target_project = decision.metadata.get("target_project")
+                if target_project and self.memory.task_registry:
+                    epic = self.memory.task_registry.find_epic_by_short_id(target_project)
+                    if epic:
+                        epic_id = epic.id
+                        logger.info(
+                            "[Brain] Tâche rattachée au projet #%s (%s)",
+                            epic.short_id, epic.display_name[:30],
+                        )
+
                 task_record = self.memory.create_task(
                     description=request[:200],
                     worker_type=decision.worker_type or "generic",
+                    epic_id=epic_id,
                 )
             except Exception as e:
                 logger.debug("Impossible de créer le TaskRecord: %s", e)
@@ -1541,6 +1597,144 @@ Réponds UNIQUEMENT avec ce JSON :
                 except Exception:
                     pass
             return f"[Projet échoué — {epic_subject}] {type(e).__name__}: {str(e)[:300]}"
+
+    # ─── Pilotage interactif Brain → Crew ──────────────
+
+    async def _execute_crew_directive(self, request: str, decision: BrainDecision) -> str:
+        """
+        Exécute une directive de pilotage sur un crew actif.
+
+        Appelé quand le LLM classifie l'intent comme "crew_directive".
+        Résout le projet cible, puis dispatch selon le directive_type :
+        - send_instruction : injecte une instruction libre
+        - pause : met le crew en pause
+        - resume : reprend le crew
+        - add_step : ajoute une étape
+        - modify_step : modifie une étape existante
+        """
+        directive_type = decision.metadata.get("directive_type", "send_instruction")
+        target_project = decision.metadata.get("target_project")
+
+        # Résoudre l'epic_id depuis le short_id ou trouver le crew actif unique
+        epic_id = None
+        executor = CrewExecutor(brain=self)
+        executor.set_event_callback(self._handle_crew_event)
+
+        if target_project and self.memory and self.memory.task_registry:
+            epic = self.memory.task_registry.find_epic_by_short_id(target_project)
+            if epic:
+                epic_id = epic.id
+
+        # Si pas de target explicite, chercher le crew actif unique
+        if not epic_id:
+            active_crews = executor.list_active_crews()
+            if not active_crews:
+                return (
+                    "Aucun projet actif en cours d'exécution. "
+                    "Je ne peux pas appliquer de directive sans crew actif."
+                )
+            if len(active_crews) == 1:
+                epic_id = active_crews[0].epic_id
+            else:
+                # Plusieurs crews → essayer de matcher par sujet
+                request_lower = request.lower()
+                for crew in active_crews:
+                    subject_words = crew.epic_subject.lower().split()[:5]
+                    if any(word in request_lower for word in subject_words if len(word) > 3):
+                        epic_id = crew.epic_id
+                        break
+                if not epic_id:
+                    crew_list = "\n".join(
+                        f"  • #{c.epic_id[:8]} — {c.epic_subject[:60]}"
+                        for c in active_crews
+                    )
+                    return (
+                        f"Plusieurs projets actifs détectés. Précise lequel :\n{crew_list}"
+                    )
+
+        # Dispatch selon le type de directive
+        if directive_type == "pause":
+            event = executor.pause_crew(epic_id, reason=request[:200])
+            return f"⏸️ {event.message}"
+
+        if directive_type == "resume":
+            event = executor.resume_crew(epic_id)
+            return f"▶️ {event.message}"
+
+        if directive_type == "add_step":
+            # Extraire la description de l'étape à ajouter via LLM
+            step_info = await self._extract_step_from_directive(request)
+            if step_info:
+                desc, wtype = step_info
+                try:
+                    worker_type = WorkerType(wtype)
+                except ValueError:
+                    worker_type = WorkerType.GENERIC
+                success = executor.add_step(epic_id, desc, worker_type)
+                if success:
+                    return f"➕ Étape ajoutée au crew : {desc[:80]} ({worker_type.value})"
+                return "Impossible d'ajouter l'étape (crew inactif ou introuvable)."
+            return "Je n'ai pas compris quelle étape ajouter. Peux-tu préciser ?"
+
+        if directive_type == "modify_step":
+            # Extraire l'index et les modifications via LLM
+            mod_info = await self._extract_step_modification(request)
+            if mod_info:
+                step_idx, new_desc, new_wtype = mod_info
+                event = executor.modify_step(
+                    epic_id, step_idx,
+                    new_description=new_desc,
+                    new_worker_type=new_wtype,
+                )
+                return f"✏️ {event.message}"
+            return "Je n'ai pas compris quelle étape modifier. Peux-tu préciser l'index et les changements ?"
+
+        # Default: send_instruction (directive libre)
+        event = executor.send_directive(epic_id, request)
+        # Aussi enrichir la réponse avec le briefing actuel
+        briefing = executor.get_briefing(epic_id)
+        return f"📋 {event.message}\n\nÉtat actuel :\n{briefing}"
+
+    async def _extract_step_from_directive(self, request: str) -> Optional[tuple[str, str]]:
+        """Extrait la description et le worker_type d'une étape à ajouter."""
+        prompt = (
+            f"L'utilisateur veut ajouter une étape à un projet.\n"
+            f"Requête : {request}\n\n"
+            f"Extrais la description de l'étape et le type de worker.\n"
+            f"Réponds en JSON : {{\"description\": \"...\", \"worker_type\": \"researcher|coder|analyst|writer|summarizer|generic\"}}"
+        )
+        try:
+            response = await self._raw_llm_call(prompt)
+            data = self._parse_json_response(response)
+            return data.get("description", ""), data.get("worker_type", "generic")
+        except Exception as e:
+            logger.debug("Extraction step from directive failed: %s", e)
+            return None
+
+    async def _extract_step_modification(self, request: str) -> Optional[tuple[int, str | None, str | None]]:
+        """Extrait l'index, nouvelle description et nouveau worker_type d'une modification."""
+        prompt = (
+            f"L'utilisateur veut modifier une étape d'un projet.\n"
+            f"Requête : {request}\n\n"
+            f"Extrais l'index de l'étape (0-based), la nouvelle description (ou null), "
+            f"et le nouveau worker_type (ou null).\n"
+            f"Réponds en JSON : {{\"step_index\": 0, \"new_description\": \"...\"|null, \"new_worker_type\": \"...\"|null}}"
+        )
+        try:
+            response = await self._raw_llm_call(prompt)
+            data = self._parse_json_response(response)
+            idx = data.get("step_index")
+            if idx is not None:
+                new_desc = data.get("new_description")
+                new_wtype = data.get("new_worker_type")
+                if new_desc == "null":
+                    new_desc = None
+                if new_wtype == "null":
+                    new_wtype = None
+                return int(idx), new_desc, new_wtype
+        except Exception as e:
+            logger.debug("Extraction step modification failed: %s", e)
+        return None
 
     # ─── Communication bidirectionnelle Crew ↔ Brain ────
 
