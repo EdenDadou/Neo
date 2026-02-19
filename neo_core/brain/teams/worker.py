@@ -367,11 +367,13 @@ class Worker:
 
     def get_lifecycle_info(self) -> dict:
         """Retourne les infos complètes du cycle de vie."""
+        model = self._model_config.model if self._model_config else "unknown"
         return {
             "worker_id": self._worker_id,
             "worker_type": self.worker_type.value,
             "state": self._state.value,
             "task": self.task[:80],
+            "model": model,
             "created_at": self._created_at,
             "started_at": self._started_at,
             "finished_at": self._finished_at,

@@ -608,6 +608,7 @@ class Vox:
         brain_response = await self.brain.process(
             request=formatted_request,
             conversation_history=self.conversation_history,
+            original_request=human_message,
         )
 
         self.update_agent_status("Brain", active=False, task=None, progress=0.0)
@@ -625,6 +626,7 @@ class Vox:
             brain_response = await self.brain.process(
                 request=formatted_request,
                 conversation_history=self.conversation_history,
+                original_request=original_message,
             )
 
             self.update_agent_status("Brain", active=False, task=None, progress=0.0)

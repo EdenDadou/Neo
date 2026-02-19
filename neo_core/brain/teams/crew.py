@@ -141,6 +141,7 @@ class CrewState:
     current_step_index: int = 0
     status: str = "active"  # "active" | "paused" | "done" | "failed"
     memory_context: str = ""
+    original_request: str = ""  # Requête utilisateur ORIGINALE — jamais tronquée
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     events: list[CrewEvent] = field(default_factory=list)
@@ -173,6 +174,7 @@ class CrewState:
         return {
             "epic_id": self.epic_id,
             "epic_subject": self.epic_subject,
+            "original_request": self.original_request[:2000],  # Requête complète
             "steps": [s.to_dict() for s in self.steps],
             "results": [r.to_dict() for r in self.results],
             "current_step_index": self.current_step_index,
@@ -188,6 +190,7 @@ class CrewState:
         return cls(
             epic_id=data["epic_id"],
             epic_subject=data["epic_subject"],
+            original_request=data.get("original_request", ""),
             steps=[CrewStep.from_dict(s) for s in data.get("steps", [])],
             results=[CrewStepResult.from_dict(r) for r in data.get("results", [])],
             current_step_index=data.get("current_step_index", 0),
@@ -260,11 +263,13 @@ class CrewExecutor:
         epic_subject: str,
         steps: list[CrewStep],
         memory_context: str,
+        original_request: str = "",
     ) -> CrewState:
         """Crée et persiste un nouvel état de crew."""
         state = CrewState(
             epic_id=epic_id,
             epic_subject=epic_subject,
+            original_request=original_request,
             steps=steps,
             memory_context=memory_context,
         )
@@ -638,6 +643,11 @@ class CrewExecutor:
         """Construit le prompt enrichi depuis l'état persistant."""
         parts: list[str] = []
 
+        # TOUJOURS inclure la demande originale de l'utilisateur
+        if state.original_request:
+            parts.append("=== DEMANDE ORIGINALE DE L'UTILISATEUR ===")
+            parts.append(state.original_request)
+
         accumulated = state.get_accumulated_text()
         if accumulated:
             parts.append("=== RÉSULTATS DES ÉTAPES PRÉCÉDENTES ===")
@@ -648,11 +658,14 @@ class CrewExecutor:
             parts.append("=== CONTEXTE MÉMOIRE ===")
             parts.append(state.memory_context[:ctx_limit])
 
-        parts.append(f"=== TA MISSION (Étape {step.index + 1}) ===")
+        parts.append(f"=== TA MISSION (Étape {step.index + 1}/{len(state.steps)}) ===")
         parts.append(step.description)
         parts.append(
-            "\nIMPORTANT : Utilise les résultats des étapes précédentes comme base. "
-            "Ne répète pas ce qui a déjà été fait. Avance le projet."
+            f"\nPROJET : « {state.epic_subject} »\n"
+            "IMPORTANT : Ta mission s'inscrit dans le projet ci-dessus. "
+            "Utilise les résultats des étapes précédentes comme base. "
+            "Ne répète pas ce qui a déjà été fait. Avance le projet "
+            "en restant fidèle à la DEMANDE ORIGINALE de l'utilisateur."
         )
 
         return "\n\n".join(parts)
@@ -774,7 +787,10 @@ class CrewExecutor:
             return "[Crew] Aucun résultat produit."
 
         accumulated = state.get_accumulated_text()
-        return await self._run_synthesis(epic_subject, len(state.results), accumulated)
+        return await self._run_synthesis(
+            epic_subject, len(state.results), accumulated,
+            original_request=state.original_request,
+        )
 
     async def _synthesize_from_context(
         self, epic_subject: str, crew_ctx: CrewContext,
@@ -790,15 +806,24 @@ class CrewExecutor:
 
     async def _run_synthesis(
         self, epic_subject: str, step_count: int, accumulated: str,
+        original_request: str = "",
     ) -> str:
         """Appel LLM pour la synthèse finale."""
+        original_block = ""
+        if original_request:
+            original_block = (
+                f"=== DEMANDE ORIGINALE DE L'UTILISATEUR ===\n"
+                f"{original_request}\n\n"
+            )
         synthesis_prompt = (
             f"Tu es le synthétiseur du projet « {epic_subject} ».\n\n"
+            f"{original_block}"
             f"Une équipe de {step_count} agents spécialisés "
             f"a travaillé sur ce projet. Voici leurs résultats :\n\n"
             f"{accumulated}\n\n"
             f"Ta mission :\n"
-            f"1. Intègre les découvertes de chaque étape en un rapport COHÉRENT\n"
+            f"1. Intègre les découvertes de chaque étape en un rapport COHÉRENT "
+            f"qui répond à la DEMANDE ORIGINALE de l'utilisateur\n"
             f"2. Ne liste PAS les étapes — fusionne les résultats en un texte naturel\n"
             f"3. Mets en avant les insights clés, patterns, et recommandations\n"
             f"4. Si des étapes ont échoué, mentionne-le brièvement\n"

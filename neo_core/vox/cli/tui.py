@@ -96,6 +96,26 @@ class StatusUpdate(Message):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+def _short_model(model: str) -> str:
+    """Transforme un nom de modèle long en version courte lisible."""
+    if not model or model == "unknown":
+        return "?"
+    # "claude-sonnet-4-5-20250929" → "sonnet-4.5"
+    # "claude-haiku-4-5-20251001" → "haiku-4.5"
+    # "claude-opus-4-5-20251101" → "opus-4.5"
+    for family in ("sonnet", "haiku", "opus"):
+        if family in model.lower():
+            # Extraire version (ex: "4-5" → "4.5")
+            import re
+            ver = re.search(r"(\d+)-(\d+)", model.split(family)[-1] if family in model.lower() else "")
+            if ver:
+                return f"{family}-{ver.group(1)}.{ver.group(2)}"
+            return family
+    # Modèle non-Anthropic : garder court
+    parts = model.split("/")[-1].split(":")[-1]
+    return parts[:20] if len(parts) > 20 else parts
+
+
 class Sidebar(Static):
     """Panneau latéral : agents, heartbeat, session info."""
 
@@ -111,10 +131,28 @@ class Sidebar(Static):
     brain_pending: reactive[int] = reactive(0)
     active_tasks: reactive[list] = reactive(list, always_update=True)
     active_epics: reactive[list] = reactive(list, always_update=True)
+    active_workers: reactive[list] = reactive(list, always_update=True)
+    worker_stats: reactive[dict] = reactive(dict, always_update=True)
+    agent_models: reactive[dict] = reactive(dict, always_update=True)
 
     def render(self) -> Text:
         t = Text()
-        t.append("◆ Agents\n", style="bold cyan")
+        models = self.agent_models
+
+        # Compter les agents actifs
+        core_active = sum(1 for s in [self.brain_status, self.memory_status, self.vox_status]
+                          if s not in ("idle", "inactif"))
+        workers = self.active_workers
+        total_active = core_active + len(workers)
+        stats = self.worker_stats
+        total_created = stats.get("total_created", 0) if stats else 0
+
+        t.append(f"◆ Agents ", style="bold cyan")
+        t.append(f"({total_active} actif{'s' if total_active > 1 else ''})", style="bold green" if total_active > 0 else "dim")
+        if total_created > 0:
+            t.append(f"  Σ {total_created}", style="dim")
+        t.append("\n")
+
         # Brain
         brain_icon = "●" if self.brain_status != "idle" else "○"
         brain_style = "bold yellow" if self.brain_status != "idle" else "dim"
@@ -122,55 +160,106 @@ class Sidebar(Static):
         if self.brain_pending > 0:
             brain_label = f"⟳ {self.brain_pending} req"
             brain_style = "bold cyan"
+        brain_model = _short_model(models.get("brain", ""))
         t.append(f"  Brain   {brain_icon} ", style=brain_style)
-        t.append(f"{brain_label}\n", style=brain_style)
+        t.append(f"{brain_label}", style=brain_style)
+        if brain_model:
+            t.append(f"  {brain_model}", style="dim italic")
+        t.append("\n")
+
         # Memory
         mem_active = self.memory_status != "idle"
         mem_icon = "●" if mem_active else "○"
         mem_style = "green" if mem_active else "dim"
+        mem_model = _short_model(models.get("memory", ""))
         t.append(f"  Memory  {mem_icon} ", style=mem_style)
-        t.append(f"{self.memory_status}\n", style=mem_style)
+        t.append(f"{self.memory_status}", style=mem_style)
+        if mem_model:
+            t.append(f"  {mem_model}", style="dim italic")
+        t.append("\n")
         if self.memory_entries > 0:
             t.append(f"          {self.memory_entries} entries", style="dim")
             if self.memory_turns > 0:
                 t.append(f" · {self.memory_turns} tours", style="dim")
             t.append("\n", style="dim")
-        # Vox
-        t.append(f"  Vox     ● ", style="green")
-        t.append(f"{self.vox_status}\n\n", style="green")
 
-        # Projets en cours
+        # Vox
+        vox_model = _short_model(models.get("vox", ""))
+        t.append(f"  Vox     ● ", style="green")
+        t.append(f"{self.vox_status}", style="green")
+        if vox_model:
+            t.append(f"  {vox_model}", style="dim italic")
+        t.append("\n")
+
+        # Workers actifs
+        if workers:
+            t.append("\n")
+            t.append(f"  ◇ Workers ({len(workers)})\n", style="bold magenta")
+            for w in workers[:6]:
+                wtype = w.get("worker_type", "?")
+                wmodel = _short_model(w.get("model", ""))
+                wtask = w.get("task", "")
+                if len(wtask) > 22:
+                    wtask = wtask[:21] + "…"
+                t.append(f"    🔄 {wtype}", style="white")
+                if wmodel:
+                    t.append(f"  {wmodel}", style="dim italic")
+                t.append("\n")
+                if wtask:
+                    t.append(f"       {wtask}\n", style="dim")
+            if len(workers) > 6:
+                t.append(f"    … +{len(workers) - 6} autres\n", style="dim")
+        t.append("\n")
+
+        # Projets en cours (avec tâches groupées)
         t.append("◆ Projets\n", style="bold cyan")
         epics = self.active_epics
+        epic_ids = set()
         if epics:
             status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
             for epic in epics[:5]:
+                epic_ids.add(epic.get("id", ""))
                 icon = status_icons.get(epic.get("status", ""), "?")
-                desc = epic.get("description", "?")
-                if len(desc) > 28:
-                    desc = desc[:27] + "…"
+                # Use name (display_name) first, fallback to description
+                name = epic.get("name") or epic.get("description", "?")
+                sid = epic.get("short_id", "")
+                if len(name) > 24:
+                    name = name[:23] + "…"
                 progress = epic.get("progress", "")
-                t.append(f"  {icon} {desc}\n", style="white")
+                sid_str = f"#{sid} " if sid else ""
+                t.append(f"  {icon} {sid_str}{name}", style="white")
                 if progress:
-                    t.append(f"     {progress}\n", style="dim")
+                    t.append(f"  {progress}", style="dim")
+                t.append("\n")
+                # Show project tasks inline
+                epic_tasks = epic.get("tasks", [])
+                for et in epic_tasks[:4]:
+                    et_status = et.get("status", "")
+                    et_icon = status_icons.get(et_status, "⏳")
+                    et_desc = et.get("description", "?")
+                    if len(et_desc) > 24:
+                        et_desc = et_desc[:23] + "…"
+                    et_style = "white" if et_status == "in_progress" else "dim"
+                    t.append(f"    {et_icon} {et_desc}\n", style=et_style)
+                if len(epic_tasks) > 4:
+                    t.append(f"    … +{len(epic_tasks) - 4}\n", style="dim")
         else:
             t.append("  aucun\n", style="dim")
         t.append("\n")
 
-        # Tâches en cours
-        t.append("◆ Tâches\n", style="bold cyan")
-        tasks = self.active_tasks
-        if tasks:
-            for task in tasks[:8]:
+        # Tâches indépendantes (pas liées à un projet)
+        all_tasks = self.active_tasks
+        standalone = [t_ for t_ in all_tasks if not t_.get("epic_id")]
+        if standalone:
+            t.append("◆ Tâches\n", style="bold cyan")
+            for task in standalone[:8]:
                 status = task.get("status", "")
                 desc = task.get("description", "?")
                 if len(desc) > 30:
                     desc = desc[:29] + "…"
                 icon = "🔄" if status == "in_progress" else "⏳"
                 t.append(f"  {icon} {desc}\n", style="white" if status == "in_progress" else "dim")
-        else:
-            t.append("  aucune\n", style="dim")
-        t.append("\n")
+            t.append("\n")
 
         # Heartbeat
         t.append("◆ Heartbeat\n", style="bold cyan")
@@ -641,6 +730,12 @@ class NeoTUI(App):
                         else:
                             # Daemon actif = heartbeat actif
                             sidebar.heartbeat_active = True
+
+                        # Workers actifs + modèles
+                        workers_data = data.get("workers", {})
+                        sidebar.active_workers = workers_data.get("active", [])
+                        sidebar.worker_stats = workers_data.get("stats", {})
+                        sidebar.agent_models = data.get("agent_models", {})
                 except Exception:
                     pass
 
@@ -661,7 +756,7 @@ class NeoTUI(App):
                 except Exception:
                     pass
 
-                # Charger tâches via API
+                # Charger tâches via API (structured with epic_id)
                 try:
                     resp = await self._http_client.get(
                         f"{self.api_url}/tasks",
@@ -670,15 +765,7 @@ class NeoTUI(App):
                     )
                     if resp.status_code == 200:
                         data = resp.json()
-                        raw_tasks = data.get("tasks", [])
-                        # Convertir les strings en dicts si nécessaire
-                        task_list = []
-                        for t in raw_tasks[:10]:
-                            if isinstance(t, dict):
-                                task_list.append(t)
-                            elif isinstance(t, str):
-                                task_list.append({"description": t, "status": "pending"})
-                        sidebar.active_tasks = task_list
+                        sidebar.active_tasks = data.get("tasks", [])
                 except Exception:
                     pass
 
@@ -713,26 +800,51 @@ class NeoTUI(App):
                     sidebar.heartbeat_active = status.get("running", False)
                     sidebar.heartbeat_pulses = status.get("pulse_count", 0)
 
+                # Workers actifs + modèles (local)
+                try:
+                    if self.vox.brain and hasattr(self.vox.brain, "worker_manager"):
+                        wm = self.vox.brain.worker_manager
+                        sidebar.active_workers = wm.get_active_workers()
+                        sidebar.worker_stats = wm.get_stats()
+                    from neo_core.config import AGENT_MODELS
+                    sidebar.agent_models = {k: cfg.model for k, cfg in AGENT_MODELS.items()}
+                except Exception:
+                    pass
+
                 # Charger epics/tâches en local
                 if self.vox.memory and self.vox.memory.is_initialized:
                     try:
                         registry = self.vox.memory.task_registry
                         if registry:
                             epics = registry.get_all_epics(limit=10)
-                            sidebar.active_epics = [
-                                {"description": e.display_name, "status": e.status,
-                                 "progress": f"{sum(1 for t in registry.get_epic_tasks(e.id) if t.status == 'done')}/{len(registry.get_epic_tasks(e.id))}"}
-                                for e in epics if e.status in ("pending", "in_progress")
-                            ]
+                            epic_list = []
+                            for e in epics:
+                                if e.status not in ("pending", "in_progress"):
+                                    continue
+                                e_tasks = registry.get_epic_tasks(e.id)
+                                done = sum(1 for t in e_tasks if t.status == "done")
+                                epic_list.append({
+                                    "id": e.id, "short_id": e.short_id,
+                                    "name": e.display_name, "status": e.status,
+                                    "progress": f"{done}/{len(e_tasks)}",
+                                    "tasks": [
+                                        {"short_id": t.short_id, "description": t.description,
+                                         "status": t.status, "worker_type": t.worker_type}
+                                        for t in e_tasks
+                                    ],
+                                })
+                            sidebar.active_epics = epic_list
                     except Exception:
                         pass
                     try:
-                        report = self.vox.memory.get_tasks_report()
-                        raw = report.get("tasks", [])
-                        sidebar.active_tasks = [
-                            {"description": t, "status": "pending"} if isinstance(t, str)
-                            else t for t in raw[:10]
-                        ]
+                        registry = self.vox.memory.task_registry
+                        if registry:
+                            all_tasks = registry.get_all_tasks(limit=30)
+                            sidebar.active_tasks = [
+                                {"description": t.description, "status": t.status,
+                                 "epic_id": t.epic_id or "", "short_id": t.short_id}
+                                for t in all_tasks
+                            ]
                     except Exception:
                         pass
 

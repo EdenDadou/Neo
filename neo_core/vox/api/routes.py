@@ -280,6 +280,25 @@ async def status():
         except Exception:
             pass
 
+    # Workers actifs
+    workers_info = {"active": [], "stats": {}}
+    try:
+        if vox and vox.brain and hasattr(vox.brain, "worker_manager"):
+            wm = vox.brain.worker_manager
+            workers_info["active"] = wm.get_active_workers()
+            workers_info["stats"] = wm.get_stats()
+    except Exception:
+        pass
+
+    # Modèles assignés aux agents principaux
+    agent_models = {}
+    try:
+        from neo_core.config import AGENT_MODELS
+        for key, cfg in AGENT_MODELS.items():
+            agent_models[key] = cfg.model
+    except Exception:
+        pass
+
     # Heartbeat info
     heartbeat_info = {}
     try:
@@ -303,6 +322,8 @@ async def status():
         agents=agents,
         guardian_mode=False,
         heartbeat=heartbeat_info,
+        workers=workers_info,
+        agent_models=agent_models,
     )
 
 
@@ -381,13 +402,30 @@ async def get_persona():
 
 @router.get("/tasks")
 async def get_tasks():
-    """Get task registry report."""
+    """Get task registry — structured data with epic_id."""
     if not neo_core._initialized:
         raise HTTPException(503, "Neo Core not initialized")
     vox = neo_core.vox
     if not vox or not vox.memory or not vox.memory.is_initialized:
         raise HTTPException(503, "Memory not initialized")
-    return vox.memory.get_tasks_report()
+    registry = vox.memory.task_registry
+    if not registry:
+        return {"tasks": [], "summary": {}}
+    tasks = registry.get_all_tasks(limit=50)
+    return {
+        "tasks": [
+            {
+                "id": t.id,
+                "short_id": t.short_id,
+                "description": t.description,
+                "status": t.status,
+                "worker_type": t.worker_type,
+                "epic_id": t.epic_id or "",
+            }
+            for t in tasks
+        ],
+        "summary": registry.get_summary(),
+    }
 
 
 @router.get("/project")
@@ -416,6 +454,15 @@ async def get_epics():
             "status": epic.status,
             "strategy": getattr(epic, "strategy", ""),
             "progress": f"{done}/{total}",
+            "tasks": [
+                {
+                    "short_id": t.short_id,
+                    "description": t.description,
+                    "status": t.status,
+                    "worker_type": t.worker_type,
+                }
+                for t in tasks
+            ],
         })
     return {"epics": result}
 

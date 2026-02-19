@@ -865,7 +865,8 @@ class Brain:
     # ─── Pipeline principal ─────────────────────────────────
 
     async def process(self, request: str,
-                      conversation_history: list[BaseMessage] | None = None) -> str:
+                      conversation_history: list[BaseMessage] | None = None,
+                      original_request: str = "") -> str:
         """
         Pipeline principal de Brain.
 
@@ -927,9 +928,12 @@ class Brain:
             except Exception as e:
                 logger.debug("Injection contexte crew échouée: %s", e)
 
+        # Garder la requête originale (avant reformulation Vox)
+        _original_req = original_request or request
+
         if self._mock_mode:
             if decision.action == "delegate_crew" and decision.subtasks:
-                return await self._execute_as_epic(request, decision, memory_context)
+                return await self._execute_as_epic(request, decision, memory_context, _original_req)
 
             if decision.action == "delegate_worker" and decision.worker_type:
                 return await self._execute_with_worker(request, decision, memory_context)
@@ -946,7 +950,7 @@ class Brain:
 
         try:
             if decision.action == "delegate_crew" and decision.subtasks:
-                return await self._execute_as_epic(request, decision, memory_context)
+                return await self._execute_as_epic(request, decision, memory_context, _original_req)
 
             if decision.action == "delegate_worker" and decision.worker_type:
                 # Optimisation v0.9.1 : heuristiques SEULES, plus d'appel LLM redondant
@@ -1256,10 +1260,11 @@ class Brain:
         if len(subject) < 5:
             subject = request
 
-        return name[:100], subject[:300]
+        return name[:100], subject[:1000]
 
     async def _execute_as_epic(self, request: str, decision: BrainDecision,
-                               memory_context: str) -> str:
+                               memory_context: str,
+                               original_request: str = "") -> str:
         """
         Crée un Epic et lance un Crew persistant (v2.0).
 
@@ -1312,6 +1317,7 @@ class Brain:
                 epic_subject=epic_subject,
                 steps=crew_steps,
                 memory_context=memory_context,
+                original_request=original_request or request,
             )
 
             # 4. Exécuter la PREMIÈRE étape immédiatement (feedback rapide)

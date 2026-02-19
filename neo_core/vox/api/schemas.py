@@ -31,6 +31,8 @@ class StatusResponse(BaseModel):
     agents: dict
     guardian_mode: bool
     heartbeat: dict = {}
+    workers: dict = {}
+    agent_models: dict = {}
 
 
 class SessionInfo(BaseModel):
