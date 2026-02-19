@@ -460,6 +460,52 @@ class TaskRegistry:
 
         return deleted
 
+    def reset_all_tasks(self) -> int:
+        """Supprime TOUTES les tâches (standalone, pas celles liées aux projets)."""
+        deleted = 0
+        records = self.store.search_by_source(self.SOURCE_TASK, limit=500)
+        for record in records:
+            try:
+                data = json.loads(record.content)
+                # Ne supprimer que les tâches sans epic_id (standalone)
+                if not data.get("epic_id"):
+                    self.store.delete(record.id)
+                    deleted += 1
+            except (json.JSONDecodeError, TypeError):
+                self.store.delete(record.id)
+                deleted += 1
+        return deleted
+
+    def reset_all_epics(self) -> int:
+        """Supprime TOUS les projets (epics) et leurs tâches liées."""
+        deleted = 0
+        # 1. Supprimer toutes les tâches liées à un epic
+        records = self.store.search_by_source(self.SOURCE_TASK, limit=500)
+        for record in records:
+            try:
+                data = json.loads(record.content)
+                if data.get("epic_id"):
+                    self.store.delete(record.id)
+                    deleted += 1
+            except (json.JSONDecodeError, TypeError):
+                pass
+        # 2. Supprimer tous les epics
+        records = self.store.search_by_source(self.SOURCE_EPIC, limit=500)
+        for record in records:
+            self.store.delete(record.id)
+            deleted += 1
+        return deleted
+
+    def reset_all(self) -> int:
+        """Supprime TOUT (tâches + projets). Remet le registre à zéro."""
+        deleted = 0
+        for source in (self.SOURCE_TASK, self.SOURCE_EPIC):
+            records = self.store.search_by_source(source, limit=500)
+            for record in records:
+                self.store.delete(record.id)
+                deleted += 1
+        return deleted
+
     # ─── Méthodes internes ───────────────────────────
 
     def _persist_task(self, task: Task) -> None:

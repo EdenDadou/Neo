@@ -209,6 +209,40 @@ def print_epics(vox):
     ))
 
 
+def reset_tasks(vox):
+    """Supprime toutes les tâches standalone."""
+    if not vox.memory or not vox.memory.is_initialized:
+        console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
+        return
+    registry = vox.memory.task_registry
+    if not registry:
+        console.print("[yellow]  ⚠ TaskRegistry non disponible[/yellow]")
+        return
+    deleted = registry.reset_all_tasks()
+    console.print(f"[green]  ✅ {deleted} tâche(s) supprimée(s). Registre remis à zéro.[/green]")
+
+
+def reset_epics(vox):
+    """Supprime tous les projets et leurs tâches liées."""
+    if not vox.memory or not vox.memory.is_initialized:
+        console.print("[yellow]  ⚠ Memory non initialisé[/yellow]")
+        return
+    registry = vox.memory.task_registry
+    if not registry:
+        console.print("[yellow]  ⚠ TaskRegistry non disponible[/yellow]")
+        return
+    deleted = registry.reset_all_epics()
+    # Aussi nettoyer les CrewStates
+    try:
+        records = vox.memory._store.search_by_tags(["crew_state"], limit=100)
+        for record in records:
+            vox.memory._store.delete(record.id)
+            deleted += 1
+    except Exception:
+        pass
+    console.print(f"[green]  ✅ {deleted} entrée(s) supprimée(s). Tous les projets remis à zéro.[/green]")
+
+
 def print_heartbeat(heartbeat_manager):
     """Affiche le rapport du heartbeat."""
     if not heartbeat_manager:
@@ -719,8 +753,16 @@ async def conversation_loop(vox):
                 print_skills(vox)
                 continue
 
+            if cmd in ("/tasks reset", "tasks reset"):
+                reset_tasks(vox)
+                continue
+
             if cmd in ("/tasks", "tasks"):
                 print_tasks(vox)
+                continue
+
+            if cmd in ("/project reset", "/epics reset", "project reset"):
+                reset_epics(vox)
                 continue
 
             if cmd in ("/project", "/epics", "project", "epics"):

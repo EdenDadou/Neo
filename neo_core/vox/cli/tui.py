@@ -397,8 +397,16 @@ class NeoTUI(App):
             await self._cmd_health(chat)
             return
 
+        if cmd in ("/tasks reset", "tasks reset"):
+            await self._cmd_tasks_reset(chat)
+            return
+
         if cmd in ("/tasks", "tasks"):
             await self._cmd_tasks(chat)
+            return
+
+        if cmd in ("/project reset", "/epics reset", "project reset"):
+            await self._cmd_epics_reset(chat)
             return
 
         if cmd in ("/project", "/epics", "project", "epics"):
@@ -733,7 +741,9 @@ class NeoTUI(App):
             ("/status", "État des agents"),
             ("/health", "Rapport de santé"),
             ("/tasks", "Registre des tâches"),
+            ("/tasks reset", "Supprimer toutes les tâches"),
             ("/project", "Projets en cours"),
+            ("/project reset", "Supprimer tous les projets"),
             ("/skills", "Compétences acquises"),
             ("/heartbeat", "État du heartbeat"),
             ("/persona", "Personnalité de Neo"),
@@ -837,58 +847,67 @@ class NeoTUI(App):
         else:
             lines.append("  [dim]Aucune tâche enregistrée.[/dim]")
         if summary:
-            lines.append(f"\n[bold]Résumé[/bold]")
-            lines.append(
-                f"  Total : {summary.get('total_tasks', 0)} tâches, "
-                f"{summary.get('total_epics', 0)} projets"
-            )
+            lines.append(f"\n[dim]Total : {summary.get('total_tasks', 0)} tâches · {summary.get('total_epics', 0)} projets[/dim]")
+        lines.append("[dim]/tasks reset pour tout supprimer[/dim]")
         chat.write(Panel("\n".join(lines), title="[bold cyan]Tâches[/bold cyan]", border_style="cyan"))
 
     def _render_tasks_local(self, chat: RichLog, organized: dict) -> None:
-        """Rendu organisé des tâches (mode local), groupé par projet."""
+        """Rendu organisé des tâches (mode local), groupé par statut."""
         status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
         lines: list[str] = []
 
-        # 1. Projets avec leurs tâches
-        for entry in organized.get("epics", []):
-            epic = entry["epic"]
-            tasks = entry["tasks"]
-            progress = entry["progress"]
-            icon = status_icons.get(epic.status, "?")
-            lines.append(f"[bold cyan]{icon} {epic.description[:50]}[/bold cyan]  [dim]{epic.id[:8]}[/dim]")
-            lines.append(f"  Progrès: [bold]{progress}[/bold]")
-            if tasks:
-                for t in tasks:
-                    t_icon = status_icons.get(t.status, "?")
-                    desc = t.description[:45]
-                    lines.append(f"    {t_icon} {desc}  [dim]{t.worker_type}[/dim]")
-            lines.append("")
-
-        # 2. Tâches standalone (hors projet)
+        # Collecter toutes les tâches standalone
         standalone = organized.get("standalone_tasks", [])
-        active_standalone = [t for t in standalone if not t.is_terminal]
-        if active_standalone:
-            lines.append("[bold]Tâches indépendantes[/bold]")
-            for t in active_standalone[:10]:
-                t_icon = status_icons.get(t.status, "?")
-                desc = t.description[:50]
-                lines.append(f"  {t_icon} {desc}  [dim]{t.worker_type}[/dim]")
+
+        # Grouper par statut
+        in_progress = [t for t in standalone if t.status == "in_progress"]
+        pending = [t for t in standalone if t.status == "pending"]
+        done = [t for t in standalone if t.status == "done"]
+        failed = [t for t in standalone if t.status == "failed"]
+
+        # ── En cours ──
+        if in_progress:
+            lines.append("[bold green]▶ En cours[/bold green]")
+            for t in in_progress:
+                lines.append(f"  🔄 {t.description[:55]}  [dim]{t.worker_type}[/dim]")
             lines.append("")
 
-        # 3. Stats
-        stats = organized.get("stats", {})
-        if stats:
-            total_t = stats.get("total_tasks", 0)
-            total_e = stats.get("total_epics", 0)
-            lines.append(f"[dim]Total : {total_t} tâches · {total_e} projets[/dim]")
+        # ── À faire ──
+        if pending:
+            lines.append("[bold yellow]◻ À faire[/bold yellow]")
+            for t in pending[:10]:
+                lines.append(f"  ⏳ {t.description[:55]}  [dim]{t.worker_type}[/dim]")
+            if len(pending) > 10:
+                lines.append(f"  [dim]... et {len(pending) - 10} autres[/dim]")
+            lines.append("")
 
-        if not lines:
-            lines.append("[dim]Aucune tâche enregistrée.[/dim]")
+        # ── Terminées ──
+        if done:
+            lines.append("[bold dim]✓ Terminées[/bold dim]")
+            for t in done[-5:]:
+                lines.append(f"  [dim]✅ {t.description[:55]}  {t.worker_type}[/dim]")
+            if len(done) > 5:
+                lines.append(f"  [dim]... et {len(done) - 5} autres[/dim]")
+            lines.append("")
+
+        # ── Échouées ──
+        if failed:
+            lines.append("[bold red]✗ Échouées[/bold red]")
+            for t in failed[-3:]:
+                lines.append(f"  [dim red]❌ {t.description[:55]}  {t.worker_type}[/dim red]")
+            lines.append("")
+
+        # Stats
+        total = len(standalone)
+        if total > 0:
+            lines.append(f"[dim]{total} tâche(s) · /tasks reset pour tout supprimer[/dim]")
+        else:
+            lines.append("[dim]Aucune tâche indépendante.[/dim]")
 
         chat.write(Panel("\n".join(lines), title="[bold cyan]Tâches[/bold cyan]", border_style="cyan"))
 
     async def _cmd_epics(self, chat: RichLog) -> None:
-        """Commande /project — affiche les projets en cours."""
+        """Commande /project — affiche les projets groupés par statut."""
         if self.mode == "daemon" and self._http_client:
             try:
                 resp = await self._http_client.get(
@@ -900,53 +919,137 @@ class NeoTUI(App):
                     data = resp.json()
                     epics = data.get("epics", [])
                     if not epics:
-                        chat.write(Panel("[dim]Aucun projet actif.[/dim]", title="[bold cyan]Projets[/bold cyan]", border_style="cyan"))
+                        chat.write(Panel("[dim]Aucun projet.[/dim]\n[dim]/project reset pour tout supprimer[/dim]", title="[bold cyan]Projets[/bold cyan]", border_style="cyan"))
                     else:
-                        self._render_projects_table(chat, epics, from_api=True)
+                        self._render_projects_by_status(chat, epics, from_api=True)
             except Exception as e:
                 chat.write(Text(f"  Erreur: {e}", style="red"))
         elif self.vox:
             if self.vox.memory and self.vox.memory.is_initialized:
                 registry = self.vox.memory.task_registry
                 if registry:
-                    epics = registry.get_all_epics(limit=15)
-                    active = [e for e in epics if e.status in ("pending", "in_progress")]
-                    if not active:
-                        chat.write(Panel("[dim]Aucun projet actif.[/dim]", title="[bold cyan]Projets[/bold cyan]", border_style="cyan"))
+                    epics = registry.get_all_epics(limit=20)
+                    if not epics:
+                        chat.write(Panel("[dim]Aucun projet.[/dim]", title="[bold cyan]Projets[/bold cyan]", border_style="cyan"))
                     else:
-                        self._render_projects_table(chat, active, registry=registry)
+                        self._render_projects_by_status(chat, epics, registry=registry)
 
-    def _render_projects_table(self, chat: RichLog, epics, from_api=False, registry=None) -> None:
-        """Rendu table des projets."""
+    def _render_projects_by_status(self, chat: RichLog, epics, from_api=False, registry=None) -> None:
+        """Rendu des projets groupés par statut avec leurs sous-tâches."""
         status_icons = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}
-        table = Table(
-            title="Projets", title_style="bold cyan",
-            border_style="cyan", show_header=True,
-            header_style="bold white", padding=(0, 1),
-        )
-        table.add_column("", justify="center", width=3)
-        table.add_column("ID", style="dim", width=10)
-        table.add_column("Projet", min_width=25)
-        table.add_column("Progrès", justify="center", width=12)
+        lines: list[str] = []
 
-        for epic in epics:
+        # Grouper par statut
+        if from_api:
+            active = [e for e in epics if e.get("status") == "in_progress"]
+            pending = [e for e in epics if e.get("status") == "pending"]
+            done = [e for e in epics if e.get("status") == "done"]
+            failed = [e for e in epics if e.get("status") == "failed"]
+        else:
+            active = [e for e in epics if e.status == "in_progress"]
+            pending = [e for e in epics if e.status == "pending"]
+            done = [e for e in epics if e.status == "done"]
+            failed = [e for e in epics if e.status == "failed"]
+
+        def _render_epic(epic, icon_override=None):
             if from_api:
-                icon = status_icons.get(epic.get("status", ""), "?")
-                table.add_row(
-                    icon,
-                    epic.get("id", "")[:8],
-                    epic.get("description", "")[:45],
-                    epic.get("progress", "0/0"),
-                )
+                icon = icon_override or status_icons.get(epic.get("status", ""), "?")
+                desc = epic.get("description", "")[:50]
+                eid = epic.get("id", "")[:8]
+                progress = epic.get("progress", "0/0")
+                lines.append(f"  {icon} [bold]{desc}[/bold]  [dim]{eid}[/dim]  {progress}")
             else:
-                icon = status_icons.get(epic.status, "?")
+                icon = icon_override or status_icons.get(epic.status, "?")
                 epic_tasks = registry.get_epic_tasks(epic.id) if registry else []
-                done = sum(1 for t in epic_tasks if t.status == "done")
-                total = len(epic_tasks)
-                pct = f"{done * 100 // total}%" if total > 0 else "—"
-                table.add_row(icon, epic.id[:8], epic.description[:45], f"{done}/{total} ({pct})")
+                epic_tasks.sort(key=lambda t: t.created_at)
+                d = sum(1 for t in epic_tasks if t.status == "done")
+                tot = len(epic_tasks)
+                pct = f"{d * 100 // tot}%" if tot > 0 else "—"
+                lines.append(f"  {icon} [bold]{epic.description[:50]}[/bold]  [dim]{epic.id[:8]}[/dim]  {d}/{tot} ({pct})")
+                # Sous-tâches du projet
+                for t in epic_tasks:
+                    t_icon = status_icons.get(t.status, "?")
+                    lines.append(f"      {t_icon} {t.description[:48]}  [dim]{t.worker_type}[/dim]")
 
-        chat.write(table)
+        # ── En cours ──
+        if active:
+            lines.append("[bold green]▶ En cours[/bold green]")
+            for e in active:
+                _render_epic(e)
+            lines.append("")
+
+        # ── À faire ──
+        if pending:
+            lines.append("[bold yellow]◻ À faire[/bold yellow]")
+            for e in pending:
+                _render_epic(e)
+            lines.append("")
+
+        # ── Terminés ──
+        if done:
+            lines.append("[bold dim]✓ Terminés[/bold dim]")
+            for e in done[-5:]:
+                if from_api:
+                    desc = e.get("description", "")[:50]
+                    lines.append(f"  [dim]✅ {desc}[/dim]")
+                else:
+                    lines.append(f"  [dim]✅ {e.description[:50]}[/dim]")
+            if len(done) > 5:
+                lines.append(f"  [dim]... et {len(done) - 5} autres[/dim]")
+            lines.append("")
+
+        # ── Échoués ──
+        if failed:
+            lines.append("[bold red]✗ Échoués[/bold red]")
+            for e in failed[-3:]:
+                if from_api:
+                    desc = e.get("description", "")[:50]
+                    lines.append(f"  [dim red]❌ {desc}[/dim red]")
+                else:
+                    lines.append(f"  [dim red]❌ {e.description[:50]}[/dim red]")
+            lines.append("")
+
+        total = len(epics)
+        lines.append(f"[dim]{total} projet(s) · /project reset pour tout supprimer[/dim]")
+
+        chat.write(Panel("\n".join(lines), title="[bold cyan]Projets[/bold cyan]", border_style="cyan"))
+
+    async def _cmd_tasks_reset(self, chat: RichLog) -> None:
+        """Commande /tasks reset — supprime toutes les tâches standalone."""
+        if self.vox and self.vox.memory and self.vox.memory.is_initialized:
+            registry = self.vox.memory.task_registry
+            if registry:
+                deleted = registry.reset_all_tasks()
+                chat.write(Panel(
+                    f"[green]✅ {deleted} tâche(s) supprimée(s).[/green]\nLe registre de tâches est remis à zéro.",
+                    title="[bold cyan]Tasks Reset[/bold cyan]",
+                    border_style="cyan",
+                ))
+                return
+        chat.write(Text("  ⚠ Memory non disponible", style="yellow"))
+
+    async def _cmd_epics_reset(self, chat: RichLog) -> None:
+        """Commande /project reset — supprime tous les projets et leurs tâches."""
+        if self.vox and self.vox.memory and self.vox.memory.is_initialized:
+            registry = self.vox.memory.task_registry
+            if registry:
+                deleted = registry.reset_all_epics()
+                # Aussi nettoyer les CrewStates en mémoire
+                try:
+                    from neo_core.brain.teams.crew import _CREW_STATE_SOURCE_PREFIX
+                    records = self.vox.memory._store.search_by_tags(["crew_state"], limit=100)
+                    for record in records:
+                        self.vox.memory._store.delete(record.id)
+                        deleted += 1
+                except Exception:
+                    pass
+                chat.write(Panel(
+                    f"[green]✅ {deleted} entrée(s) supprimée(s).[/green]\nTous les projets sont remis à zéro.",
+                    title="[bold cyan]Projects Reset[/bold cyan]",
+                    border_style="cyan",
+                ))
+                return
+        chat.write(Text("  ⚠ Memory non disponible", style="yellow"))
 
     def _cmd_heartbeat(self, chat: RichLog) -> None:
         if self._heartbeat_manager:
