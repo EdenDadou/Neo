@@ -534,17 +534,35 @@ class Brain:
             return "moderate"
         return "simple"
 
+    # Patterns de requêtes qui sont clairement des conversations/questions simples
+    # → JAMAIS de worker/task pour ces patterns
+    _SIMPLE_CONVERSATION_RE = re.compile(
+        r"^(bonjour|salut|hello|hi|hey|coucou|yo|bonsoir|merci|thanks|"
+        r"ok|oui|non|d[''']accord|bien reçu|cool|top|parfait|super|"
+        r"comment (ça va|vas[- ]tu)|how are you|ça va|quoi de neuf|"
+        r"qu[''']est[- ]ce que tu (peux|sais)|"
+        r"/\w+)\s*[\.\!\?]*$",
+        re.IGNORECASE,
+    )
+    _SHORT_QUESTION_RE = re.compile(
+        r"^[^\.]{0,80}\??\s*$",
+    )
+
     def make_decision(self, request: str, working_context: str = "") -> BrainDecision:
         """
         Prend une décision stratégique sur la manière de traiter la requête.
 
-        Philosophie v0.9.8 — "Direct by default" :
+        Philosophie v0.9.9 — "Direct by default, task only when needed" :
         Brain répond DIRECTEMENT via Claude Sonnet (avec mémoire + contexte)
         pour la grande majorité des requêtes. Un Worker n'est spawné QUE
-        quand un outil externe est explicitement nécessaire (web search,
+        quand un outil externe est EXPLICITEMENT nécessaire (web search,
         exécution de code, accès fichier).
 
+        IMPORTANT: Les conversations simples, questions courtes, salutations,
+        et commandes slash ne créent JAMAIS de tâche dans le registre.
+
         Pipeline :
+        0. Conversation simple ? → direct_response (FAST PATH)
         1. Epic explicite ? → delegate_crew
         2. Outil externe nécessaire ? → delegate_worker
         3. Sinon → direct_response (Claude Sonnet répond avec intelligence)
@@ -552,6 +570,10 @@ class Brain:
         Le working_context (mémoire de travail) permet de comprendre les requêtes
         courtes qui font référence à une conversation en cours ("continue", "fais pareil").
         """
+        # 0. FAST PATH : conversations simples → JAMAIS de worker/task
+        if self._is_simple_conversation(request):
+            return self._decide_direct(request, "simple")
+
         # Enrichir la requête pour la classification si contexte de travail disponible.
         classification_input = request
         if working_context and self._CONTEXT_DEPENDENT_RE.search(request):
@@ -584,6 +606,40 @@ class Brain:
 
         # 4. Défaut → direct_response (Claude Sonnet + mémoire)
         return self._decide_direct(request, complexity)
+
+    def _is_simple_conversation(self, request: str) -> bool:
+        """
+        Détecte les requêtes qui sont de simples conversations/questions
+        et ne nécessitent JAMAIS un worker ou une task.
+
+        Critères :
+        - Salutations, remerciements, acquiescements
+        - Commandes slash (/status, /tasks, etc.)
+        - Questions très courtes (< 60 chars, pas de verbe d'action fort)
+        - Messages de moins de 4 mots
+        """
+        stripped = request.strip()
+
+        # Commandes slash → toujours direct
+        if stripped.startswith("/"):
+            return True
+
+        # Conversations simples connues
+        if self._SIMPLE_CONVERSATION_RE.match(stripped):
+            return True
+
+        # Messages très courts sans verbe d'action → direct
+        word_count = len(stripped.split())
+        if word_count <= 4 and not self._EPIC_INTENT_RE.search(stripped):
+            return True
+
+        # Questions courtes (< 60 chars) sans marqueur d'outil
+        if (len(stripped) < 60 and
+                stripped.endswith("?") and
+                not self._NEEDS_TOOL_RE.search(stripped)):
+            return True
+
+        return False
 
     def _apply_behavior_patches(self, request: str, worker_type: WorkerType) -> dict:
         """Applique les patches comportementaux du SelfPatcher (Level 3)."""
@@ -936,10 +992,15 @@ class Brain:
 
     async def _execute_with_worker(self, request: str, decision: BrainDecision,
                                     memory_context: str,
-                                    analysis: TaskAnalysis | None = None) -> str:
+                                    analysis: TaskAnalysis | None = None,
+                                    existing_task_id: str | None = None) -> str:
         """
         Crée, exécute et détruit un Worker pour une tâche.
         Avec retry persistant (max 3 tentatives) guidé par Memory.
+
+        Args:
+            existing_task_id: Si fourni, utilise cette tâche existante dans le
+                registre au lieu d'en créer une nouvelle (ex: appelé par heartbeat).
 
         Cycle de vie garanti par tentative :
         1. Factory crée le Worker
@@ -952,9 +1013,16 @@ class Brain:
         max_attempts = 3
         errors_so_far = []
 
-        # Enregistrer la tâche dans le TaskRegistry
+        # Enregistrer la tâche dans le TaskRegistry (sauf si déjà existante)
         task_record = None
-        if self.memory and self.memory.is_initialized:
+        if existing_task_id:
+            # Tâche déjà dans le registre (appel depuis heartbeat)
+            if self.memory and self.memory.is_initialized:
+                try:
+                    task_record = self.memory.task_registry.get_task(existing_task_id)
+                except Exception:
+                    pass
+        elif self.memory and self.memory.is_initialized:
             try:
                 task_record = self.memory.create_task(
                     description=request[:200],

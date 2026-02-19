@@ -203,6 +203,15 @@ class HeartbeatManager:
         # 2. Détecter les tâches stale
         self._detect_stale_tasks(registry)
 
+        # 2b. Nettoyage des tâches anciennes terminées (toutes les 5 pulses)
+        if self._pulse_count > 0 and self._pulse_count % 5 == 0:
+            try:
+                deleted = registry.cleanup_completed(max_age_hours=48.0)
+                if deleted > 0:
+                    logger.info("[Heartbeat] Nettoyage: %d tâches anciennes supprimées", deleted)
+            except Exception as e:
+                logger.debug("[Heartbeat] Cleanup échoué: %s", e)
+
         # 3. Consolidation Memory périodique
         if (self.config.auto_consolidation and
                 self._pulse_count > 0 and
@@ -376,6 +385,7 @@ class HeartbeatManager:
                     request=task.description,
                     decision=decision,
                     memory_context=memory_context,
+                    existing_task_id=task.id,
                 ),
                 timeout=300.0,
             )

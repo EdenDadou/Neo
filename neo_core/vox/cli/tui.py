@@ -103,6 +103,8 @@ class Sidebar(Static):
     session_id: reactive[str] = reactive("—")
     brain_status: reactive[str] = reactive("idle")
     memory_status: reactive[str] = reactive("idle")
+    memory_entries: reactive[int] = reactive(0)
+    memory_turns: reactive[int] = reactive(0)
     vox_status: reactive[str] = reactive("actif")
     heartbeat_active: reactive[bool] = reactive(False)
     heartbeat_pulses: reactive[int] = reactive(0)
@@ -123,10 +125,16 @@ class Sidebar(Static):
         t.append(f"  Brain   {brain_icon} ", style=brain_style)
         t.append(f"{brain_label}\n", style=brain_style)
         # Memory
-        mem_icon = "●" if self.memory_status != "idle" else "○"
-        mem_style = "green" if self.memory_status != "idle" else "dim"
+        mem_active = self.memory_status != "idle"
+        mem_icon = "●" if mem_active else "○"
+        mem_style = "green" if mem_active else "dim"
         t.append(f"  Memory  {mem_icon} ", style=mem_style)
         t.append(f"{self.memory_status}\n", style=mem_style)
+        if self.memory_entries > 0:
+            t.append(f"          {self.memory_entries} entries", style="dim")
+            if self.memory_turns > 0:
+                t.append(f" · {self.memory_turns} tours", style="dim")
+            t.append("\n", style="dim")
         # Vox
         t.append(f"  Vox     ● ", style="green")
         t.append(f"{self.vox_status}\n\n", style="green")
@@ -583,10 +591,30 @@ class NeoTUI(App):
                     if resp.status_code == 200:
                         data = resp.json()
                         agents = data.get("agents", {})
-                        if "Brain" in agents:
-                            sidebar.brain_status = str(agents["Brain"])
-                        if "Memory" in agents:
-                            sidebar.memory_status = str(agents["Memory"])
+
+                        # Brain status (clé "Brain" majuscule depuis les _agent_statuses)
+                        brain_info = agents.get("Brain", agents.get("brain", {}))
+                        if isinstance(brain_info, dict):
+                            if brain_info.get("active"):
+                                sidebar.brain_status = brain_info.get("task") or "travaille..."
+                            elif sidebar.brain_status not in ("idle",):
+                                sidebar.brain_status = "idle"
+
+                        # Memory status + stats
+                        mem_info = agents.get("Memory", agents.get("memory", {}))
+                        if isinstance(mem_info, dict):
+                            if mem_info.get("active"):
+                                sidebar.memory_status = mem_info.get("task") or "actif"
+                            elif mem_info.get("initialized"):
+                                sidebar.memory_status = "prêt"
+                            else:
+                                sidebar.memory_status = "idle"
+                            # Stats Memory
+                            mem_stats = mem_info.get("stats", {})
+                            if mem_stats:
+                                sidebar.memory_entries = mem_stats.get("total_entries", 0)
+                                sidebar.memory_turns = mem_stats.get("turn_count", 0)
+
                         # Heartbeat info from status if available
                         hb = data.get("heartbeat", {})
                         if hb:
@@ -641,6 +669,26 @@ class NeoTUI(App):
                     sidebar.brain_status = "travaille..."
                 elif self._brain_pending == 0:
                     sidebar.brain_status = "idle"
+
+                # Memory status — lire depuis Vox._agent_statuses
+                if hasattr(self.vox, "_agent_statuses"):
+                    mem_agent = self.vox._agent_statuses.get("Memory")
+                    if mem_agent:
+                        if mem_agent.active:
+                            sidebar.memory_status = mem_agent.current_task or "actif"
+                        elif self.vox.memory and self.vox.memory.is_initialized:
+                            sidebar.memory_status = "prêt"
+                        else:
+                            sidebar.memory_status = "idle"
+
+                # Memory stats
+                if self.vox.memory and self.vox.memory.is_initialized:
+                    try:
+                        mem_stats = self.vox.memory.get_stats()
+                        sidebar.memory_entries = mem_stats.get("total_entries", 0)
+                        sidebar.memory_turns = mem_stats.get("turn_count", 0)
+                    except Exception:
+                        pass
 
                 if self._heartbeat_manager:
                     status = self._heartbeat_manager.get_status()

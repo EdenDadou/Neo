@@ -246,6 +246,9 @@ async def status():
         raise HTTPException(503, "Neo Core not initialized")
 
     vox = neo_core.vox
+
+    # Agent statuses — expose les statuts vivants de Vox (_agent_statuses)
+    # + infos structurelles (connected, initialized)
     agents = {
         "vox": {"connected": vox is not None},
         "brain": {"connected": vox.brain is not None if vox else False},
@@ -254,6 +257,28 @@ async def status():
             "initialized": vox.memory.is_initialized if vox and vox.memory else False,
         },
     }
+
+    # Injecter les statuts temps-réel depuis Vox._agent_statuses
+    if vox and hasattr(vox, "_agent_statuses"):
+        for name, status in vox._agent_statuses.items():
+            key = name  # "Vox", "Brain", "Memory" — majuscule
+            agents[key] = {
+                **agents.get(key.lower(), {}),  # Conserver connected/initialized
+                "active": status.active,
+                "task": status.current_task,
+                "progress": status.progress,
+            }
+
+    # Ajouter les stats Memory (entries, turn_count, etc.)
+    if vox and vox.memory and vox.memory.is_initialized:
+        try:
+            mem_stats = vox.memory.get_stats()
+            agents["Memory"]["stats"] = {
+                "total_entries": mem_stats.get("total_entries", 0),
+                "turn_count": mem_stats.get("turn_count", 0),
+            }
+        except Exception:
+            pass
 
     # Heartbeat info
     heartbeat_info = {}

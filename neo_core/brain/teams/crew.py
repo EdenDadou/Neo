@@ -445,6 +445,9 @@ class CrewExecutor:
         self.save_state(state)
         self._emit_event(event)
 
+        # 7. Synchroniser avec le TaskRegistry (epic tasks)
+        self._sync_task_registry(epic_id, step.index, success, step_output)
+
         logger.info(
             "[Crew %s] Étape %d/%d %s — %.1fs",
             epic_id[:8], step_num, total,
@@ -532,6 +535,56 @@ class CrewExecutor:
             epic_id[:8], description[:50], worker_type.value,
         )
         return True
+
+    # ─── Synchronisation TaskRegistry ────────────────
+
+    def _sync_task_registry(
+        self, epic_id: str, step_index: int,
+        success: bool, output: str,
+    ) -> None:
+        """
+        Synchronise l'avancement du CrewState avec le TaskRegistry.
+
+        Quand une étape crew avance, la Task correspondante dans le
+        registre est mise à jour (pending → done/failed).
+        Cela permet à l'affichage (/tasks, TUI sidebar) de refléter
+        le vrai progrès de l'epic.
+        """
+        if not self.memory or not self.memory.is_initialized:
+            return
+
+        try:
+            registry = self.memory.task_registry
+            if not registry:
+                return
+
+            epic_tasks = registry.get_epic_tasks(epic_id)
+            if not epic_tasks:
+                return
+
+            # Les tasks sont dans l'ordre de création = l'ordre des steps
+            # On trie par created_at pour s'assurer de l'ordre
+            epic_tasks.sort(key=lambda t: t.created_at)
+
+            if step_index < len(epic_tasks):
+                task = epic_tasks[step_index]
+                new_status = "done" if success else "failed"
+                registry.update_task_status(
+                    task.id, new_status,
+                    result=output[:500],
+                )
+                logger.debug(
+                    "[Crew] TaskRegistry sync: task %s → %s",
+                    task.id[:8], new_status,
+                )
+
+                # Marquer la prochaine task comme in_progress si elle existe
+                next_idx = step_index + 1
+                if next_idx < len(epic_tasks):
+                    registry.update_task_status(epic_tasks[next_idx].id, "in_progress")
+
+        except Exception as e:
+            logger.debug("[Crew] Sync TaskRegistry échouée: %s", e)
 
     # ─── Pipeline one-shot (compat v1) ──────────────
 

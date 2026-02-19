@@ -355,6 +355,111 @@ class TaskRegistry:
             "epics_by_status": epic_by_status,
         }
 
+    def get_organized_summary(self) -> dict:
+        """
+        Retourne un résumé ORGANISÉ du registre, groupé par Epic.
+
+        Structure :
+        {
+            "epics": [
+                {
+                    "epic": Epic,
+                    "tasks": [Task, ...],
+                    "progress": "3/5",
+                },
+            ],
+            "standalone_tasks": [Task, ...],  # Tâches hors epic
+            "stats": {...},
+        }
+        """
+        tasks = self.get_all_tasks(limit=100)
+        epics = self.get_all_epics(limit=20)
+
+        # Grouper les tâches par epic
+        epic_tasks_map: dict[str, list[Task]] = {}
+        standalone: list[Task] = []
+
+        for t in tasks:
+            if t.epic_id:
+                epic_tasks_map.setdefault(t.epic_id, []).append(t)
+            else:
+                standalone.append(t)
+
+        # Construire le résumé par epic
+        epic_summaries = []
+        for epic in epics:
+            etasks = epic_tasks_map.get(epic.id, [])
+            etasks.sort(key=lambda t: t.created_at)
+            done_count = sum(1 for t in etasks if t.status == "done")
+            total = len(etasks)
+            epic_summaries.append({
+                "epic": epic,
+                "tasks": etasks,
+                "progress": f"{done_count}/{total}",
+                "done_count": done_count,
+                "total": total,
+            })
+
+        return {
+            "epics": epic_summaries,
+            "standalone_tasks": standalone,
+            "stats": self.get_summary(),
+        }
+
+    def cleanup_completed(self, max_age_hours: float = 48.0) -> int:
+        """
+        Supprime les tâches terminées (done/failed) plus anciennes que max_age_hours.
+        Garde les tâches des Epics actifs intactes.
+
+        Retourne le nombre de tâches supprimées.
+        """
+        from datetime import datetime, timedelta
+        cutoff = datetime.now() - timedelta(hours=max_age_hours)
+        deleted = 0
+
+        # Identifier les epics actifs
+        active_epic_ids = set()
+        for epic in self.get_all_epics():
+            if epic.status in ("pending", "in_progress"):
+                active_epic_ids.add(epic.id)
+
+        tasks = self.get_all_tasks(limit=200)
+        for task in tasks:
+            if not task.is_terminal:
+                continue
+            # Ne pas supprimer les tâches d'Epics actifs
+            if task.epic_id and task.epic_id in active_epic_ids:
+                continue
+            try:
+                completed = datetime.fromisoformat(task.completed_at) if task.completed_at else None
+                created = datetime.fromisoformat(task.created_at)
+                ref_time = completed or created
+                if ref_time < cutoff:
+                    _, record_id = self._find_task_with_id(task.id)
+                    if record_id:
+                        self.store.delete(record_id)
+                        deleted += 1
+            except (ValueError, TypeError):
+                pass
+
+        # Nettoyer aussi les Epics terminés
+        for epic in self.get_all_epics():
+            if not epic.is_terminal:
+                continue
+            try:
+                completed = datetime.fromisoformat(epic.completed_at) if epic.completed_at else None
+                created = datetime.fromisoformat(epic.created_at)
+                ref_time = completed or created
+                if ref_time < cutoff:
+                    _, record_id = self._find_epic_with_id(epic.id)
+                    if record_id:
+                        self.store.delete(record_id)
+                        deleted += 1
+            except (ValueError, TypeError):
+                pass
+
+        return deleted
+
     # ─── Méthodes internes ───────────────────────────
 
     def _persist_task(self, task: Task) -> None:

@@ -215,50 +215,29 @@ class WorkerFactory:
         """
         Décomposition basique d'une tâche en sous-tâches.
 
-        Heuristique simple — la version LLM est dans Brain.
+        Retourne UNE SEULE sous-tâche descriptive.
+        Les décompositions fines sont gérées par le Worker lui-même
+        ou par la décomposition LLM (Brain._decompose_crew_with_llm).
+
+        Principe : une Task dans le registre = une action concrète,
+        pas 3 étapes génériques qui polluent l'affichage.
         """
-        subtasks = []
-
+        # Une seule sous-tâche descriptive par type
+        desc = request[:150]
         if worker_type == WorkerType.RESEARCHER:
-            subtasks = [
-                f"Rechercher des informations sur: {request[:100]}",
-                "Synthétiser les résultats trouvés",
-                "Vérifier la fiabilité des sources",
-            ]
+            return [f"Rechercher: {desc}"]
         elif worker_type == WorkerType.CODER:
-            subtasks = [
-                f"Comprendre les spécifications: {request[:100]}",
-                "Écrire le code",
-                "Tester le code",
-            ]
+            return [f"Coder: {desc}"]
         elif worker_type == WorkerType.SUMMARIZER:
-            subtasks = [
-                f"Lire le contenu à résumer",
-                "Identifier les points clés",
-                "Rédiger le résumé",
-            ]
+            return [f"Résumer: {desc}"]
         elif worker_type == WorkerType.ANALYST:
-            subtasks = [
-                f"Collecter les données pertinentes",
-                "Analyser les tendances et patterns",
-                "Formuler les conclusions",
-            ]
+            return [f"Analyser: {desc}"]
         elif worker_type == WorkerType.WRITER:
-            subtasks = [
-                f"Planifier la structure du contenu",
-                "Rédiger le premier jet",
-                "Relire et améliorer",
-            ]
+            return [f"Rédiger: {desc}"]
         elif worker_type == WorkerType.TRANSLATOR:
-            subtasks = [
-                "Identifier les langues source et cible",
-                "Traduire le contenu",
-                "Vérifier la qualité de la traduction",
-            ]
+            return [f"Traduire: {desc}"]
         else:
-            subtasks = [f"Traiter: {request[:100]}"]
-
-        return subtasks
+            return [f"Traiter: {desc}"]
 
     def create_worker(self, analysis: TaskAnalysis) -> Worker:
         """
