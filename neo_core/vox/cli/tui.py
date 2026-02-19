@@ -406,7 +406,7 @@ class NeoTUI(App):
         if self._api_key:
             self._api_headers = {"X-Neo-Key": self._api_key}
 
-        self._http_client = httpx.AsyncClient(timeout=130.0)
+        self._http_client = httpx.AsyncClient(timeout=310.0)
 
         chat.write(Text(f"\n  Bienvenue {self.config.user_name} — {self.config.core_name} est prêt.", style="bold"))
         chat.write(Text(f"  ✓ Connecté au daemon ({self.api_url})", style="dim green"))
@@ -532,7 +532,7 @@ class NeoTUI(App):
             return
 
         if cmd in ("/heartbeat", "heartbeat"):
-            self._cmd_heartbeat(chat)
+            await self._cmd_heartbeat(chat)
             return
 
         if cmd in ("/skills", "skills"):
@@ -540,19 +540,19 @@ class NeoTUI(App):
             return
 
         if cmd in ("/persona", "persona"):
-            self._cmd_persona(chat)
+            await self._cmd_persona(chat)
             return
 
         if cmd in ("/profile", "profile"):
-            self._cmd_profile(chat)
+            await self._cmd_profile(chat)
             return
 
         if cmd in ("/history", "history"):
-            self._cmd_history(chat)
+            await self._cmd_history(chat)
             return
 
         if cmd in ("/sessions", "sessions"):
-            self._cmd_sessions(chat)
+            await self._cmd_sessions(chat)
             return
 
         if cmd in ("/restart", "restart"):
@@ -586,7 +586,7 @@ class NeoTUI(App):
                 f"{self.api_url}/chat/stream",
                 json={"message": message},
                 headers=self._api_headers,
-                timeout=130.0,
+                timeout=310.0,
             ) as resp:
                 if resp.status_code == 401:
                     self.post_message(ErrorOccurred("Accès refusé — clé API invalide."))
@@ -917,18 +917,203 @@ class NeoTUI(App):
                 )
                 if resp.status_code == 200:
                     data = resp.json()
+
+                    # ── Uptime formaté ──
+                    uptime_secs = int(data.get("uptime_seconds", 0))
+                    if uptime_secs < 60:
+                        uptime_str = f"{uptime_secs}s"
+                    elif uptime_secs < 3600:
+                        uptime_str = f"{uptime_secs // 60}m{uptime_secs % 60:02d}s"
+                    else:
+                        h = uptime_secs // 3600
+                        m = (uptime_secs % 3600) // 60
+                        uptime_str = f"{h}h{m:02d}m"
+
                     lines = [
-                        f"  Core    : {data.get('core_name', '?')}",
-                        f"  Status  : {data.get('status', '?')}",
-                        f"  Uptime  : {data.get('uptime_seconds', 0):.0f}s",
-                        f"  Guardian: {'oui' if data.get('guardian_mode') else 'non'}",
+                        f"  Core    : [bold]{data.get('core_name', '?')}[/bold]",
+                        f"  Status  : [green]{data.get('status', '?')}[/green]",
+                        f"  Uptime  : {uptime_str}",
+                        f"  Guardian: {'[green]oui[/green]' if data.get('guardian_mode') else '[dim]non[/dim]'}",
                     ]
-                    if self._brain_pending > 0:
-                        lines.append(f"  Brain   : [bold cyan]⟳ {self._brain_pending} requête(s)[/bold cyan]")
+
+                    # ── Agents détaillés ──
                     agents = data.get("agents", {})
-                    for agent_name, info in agents.items():
-                        lines.append(f"  {agent_name:10}: {info}")
+                    agent_models = data.get("agent_models", {})
+                    lines.append("")
+                    lines.append("  [bold cyan]◆ Agents[/bold cyan]")
+
+                    # Brain
+                    brain_info = agents.get("Brain", agents.get("brain", {}))
+                    if isinstance(brain_info, dict):
+                        active = brain_info.get("active", False)
+                        connected = brain_info.get("connected", False)
+                        task = brain_info.get("task", "")
+                        if self._brain_pending > 0:
+                            brain_label = f"[bold cyan]⟳ {self._brain_pending} requête(s)[/bold cyan]"
+                            brain_icon = "●"
+                        elif active and task:
+                            brain_label = f"[yellow]{task}[/yellow]"
+                            brain_icon = "●"
+                        elif connected:
+                            brain_label = "[dim]idle[/dim]"
+                            brain_icon = "○"
+                        else:
+                            brain_label = "[red]déconnecté[/red]"
+                            brain_icon = "✗"
+                        brain_model = _short_model(agent_models.get("brain", ""))
+                        model_tag = f"  [dim italic]{brain_model}[/dim italic]" if brain_model else ""
+                        lines.append(f"    {brain_icon} Brain     {brain_label}{model_tag}")
+                    else:
+                        lines.append(f"    ○ Brain     [dim]{brain_info}[/dim]")
+
+                    # Memory
+                    mem_info = agents.get("Memory", agents.get("memory", {}))
+                    if isinstance(mem_info, dict):
+                        active = mem_info.get("active", False)
+                        initialized = mem_info.get("initialized", False)
+                        connected = mem_info.get("connected", False)
+                        mem_stats = mem_info.get("stats", {})
+                        entries = mem_stats.get("total_entries", 0)
+                        turns = mem_stats.get("turn_count", 0)
+                        if active:
+                            mem_label = f"[green]{mem_info.get('task', 'actif')}[/green]"
+                            mem_icon = "●"
+                        elif initialized:
+                            mem_label = "[green]prêt[/green]"
+                            mem_icon = "●"
+                        elif connected:
+                            mem_label = "[dim]connecté[/dim]"
+                            mem_icon = "○"
+                        else:
+                            mem_label = "[red]non initialisé[/red]"
+                            mem_icon = "✗"
+                        mem_model = _short_model(agent_models.get("memory", ""))
+                        model_tag = f"  [dim italic]{mem_model}[/dim italic]" if mem_model else ""
+                        stats_tag = ""
+                        if entries > 0 or turns > 0:
+                            parts = []
+                            if entries:
+                                parts.append(f"{entries} entries")
+                            if turns:
+                                parts.append(f"{turns} tours")
+                            stats_tag = f"  [dim]({' · '.join(parts)})[/dim]"
+                        lines.append(f"    {mem_icon} Memory    {mem_label}{model_tag}{stats_tag}")
+                    else:
+                        lines.append(f"    ○ Memory    [dim]{mem_info}[/dim]")
+
+                    # Vox
+                    vox_info = agents.get("Vox", agents.get("vox", {}))
+                    if isinstance(vox_info, dict):
+                        connected = vox_info.get("connected", False)
+                        if connected:
+                            vox_label = "[green]actif[/green]"
+                            vox_icon = "●"
+                        else:
+                            vox_label = "[red]déconnecté[/red]"
+                            vox_icon = "✗"
+                        vox_model = _short_model(agent_models.get("vox", ""))
+                        model_tag = f"  [dim italic]{vox_model}[/dim italic]" if vox_model else ""
+                        lines.append(f"    {vox_icon} Vox       {vox_label}{model_tag}")
+                    else:
+                        lines.append(f"    ○ Vox       [dim]{vox_info}[/dim]")
+
+                    # ── Workers actifs ──
+                    workers = data.get("workers", {})
+                    active_workers = workers.get("active", [])
+                    worker_stats = workers.get("stats", {})
+                    total_created = worker_stats.get("total_created", 0)
+                    if active_workers:
+                        lines.append("")
+                        lines.append(f"  [bold magenta]◇ Workers ({len(active_workers)})[/bold magenta]")
+                        for w in active_workers[:6]:
+                            wtype = w.get("worker_type", "?")
+                            wmodel = _short_model(w.get("model", ""))
+                            wtask = w.get("task", "")
+                            if len(wtask) > 30:
+                                wtask = wtask[:29] + "…"
+                            model_tag = f"  [dim italic]{wmodel}[/dim italic]" if wmodel else ""
+                            lines.append(f"    🔄 {wtype}{model_tag}")
+                            if wtask:
+                                lines.append(f"       [dim]{wtask}[/dim]")
+                        if len(active_workers) > 6:
+                            lines.append(f"    [dim]… +{len(active_workers) - 6} autres[/dim]")
+                    if total_created > 0:
+                        lines.append(f"  [dim]Σ {total_created} workers créés au total[/dim]")
+
+                    # ── Heartbeat ──
+                    hb = data.get("heartbeat", {})
+                    if hb:
+                        hb_running = hb.get("running", False)
+                        hb_pulses = hb.get("pulse_count", 0)
+                        hb_icon = "♥" if hb_running else "♡"
+                        hb_style = "[green]actif[/green]" if hb_running else "[dim red]inactif[/dim red]"
+                        lines.append("")
+                        lines.append(f"  [bold cyan]◆ Heartbeat[/bold cyan]")
+                        lines.append(f"    {hb_icon} {hb_style}  [dim]Pulse: {hb_pulses}[/dim]")
+
                     chat.write(Panel("\n".join(lines), title="[bold]État du système[/bold]", border_style="dim"))
+
+                    # --- Projets actifs ---
+                    projects = data.get("projects", {})
+                    active_proj = projects.get("active", [])
+                    done_count = projects.get("done_count", 0)
+                    failed_count = projects.get("failed_count", 0)
+                    standalone = projects.get("standalone_tasks", 0)
+
+                    if active_proj or done_count or failed_count or standalone:
+                        plines = []
+                        if active_proj:
+                            for p in active_proj:
+                                sid = p.get("short_id", "?")
+                                name = p.get("name", "?")
+                                progress = p.get("progress", "0/0")
+                                elapsed = p.get("elapsed", "")
+                                crew_st = p.get("crew_status", "")
+                                # Progress bar
+                                parts = progress.split("/")
+                                try:
+                                    done_n = int(parts[0])
+                                    total_n = int(parts[1])
+                                    pct = (done_n / total_n * 100) if total_n > 0 else 0
+                                    filled = int(pct / 10)
+                                    bar = "█" * filled + "░" * (10 - filled)
+                                except (ValueError, IndexError, ZeroDivisionError):
+                                    bar = "░" * 10
+                                    pct = 0
+                                # Status icon
+                                if crew_st == "paused":
+                                    icon = "⏸"
+                                elif crew_st == "active":
+                                    icon = "▶"
+                                else:
+                                    icon = "●"
+                                elapsed_str = f" ({elapsed})" if elapsed else ""
+                                plines.append(
+                                    f"  {icon} [bold cyan]{sid}[/bold cyan] {name}"
+                                    f"  [dim]{bar}[/dim] {progress} ({pct:.0f}%){elapsed_str}"
+                                )
+                                if crew_st == "paused":
+                                    plines.append(f"       [yellow italic]⏸ en pause[/yellow italic]")
+
+                        # Résumé bas
+                        summary_parts = []
+                        if done_count:
+                            summary_parts.append(f"[green]{done_count} terminé(s)[/green]")
+                        if failed_count:
+                            summary_parts.append(f"[red]{failed_count} échoué(s)[/red]")
+                        if standalone:
+                            summary_parts.append(f"{standalone} tâche(s) indépendante(s)")
+                        if summary_parts:
+                            plines.append(f"  [dim]{'  ·  '.join(summary_parts)}[/dim]")
+
+                        if plines:
+                            chat.write(Panel(
+                                "\n".join(plines),
+                                title="[bold]Projets[/bold]",
+                                border_style="cyan",
+                            ))
+                    else:
+                        chat.write(Panel("[dim]Aucun projet actif.[/dim]", title="[bold]Projets[/bold]", border_style="dim"))
                 else:
                     chat.write(Text(f"  ⚠ API error: {resp.status_code}", style="yellow"))
             except Exception as e:
@@ -1498,11 +1683,10 @@ class NeoTUI(App):
         else:
             chat.write(Text("  ⚠ Memory non disponible", style="yellow"))
 
-    def _cmd_heartbeat(self, chat: RichLog) -> None:
+    async def _cmd_heartbeat(self, chat: RichLog) -> None:
         if self._heartbeat_manager:
             status = self._heartbeat_manager.get_status()
             report = self._heartbeat_manager.get_progress_report()
-            hb_state = "actif" if status["running"] else "inactif"
             lines = [
                 f"[bold]Heartbeat[/bold] — {'[green]actif[/green]' if status['running'] else '[red]inactif[/red]'}",
                 f"  Pulses: {status['pulse_count']} | Intervalle: {status['interval']:.0f}s",
@@ -1511,10 +1695,36 @@ class NeoTUI(App):
                 report,
             ]
             chat.write(Panel("\n".join(lines), title="[bold cyan]Heartbeat[/bold cyan]", border_style="cyan"))
+        elif self.mode == "daemon" and self._http_client:
+            # Récupérer les infos heartbeat depuis /status
+            try:
+                resp = await self._http_client.get(
+                    f"{self.api_url}/status",
+                    headers=self._api_headers,
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    hb = data.get("heartbeat", {})
+                    if hb:
+                        running = hb.get("running", False)
+                        lines = [
+                            f"[bold]Heartbeat[/bold] — {'[green]actif[/green]' if running else '[red]inactif[/red]'}",
+                            f"  Pulses: {hb.get('pulse_count', 0)} | Intervalle: {hb.get('interval', 0):.0f}s",
+                            f"  Dernier événement: {hb.get('last_event', '—')}",
+                        ]
+                        chat.write(Panel("\n".join(lines), title="[bold cyan]Heartbeat[/bold cyan]", border_style="cyan"))
+                    else:
+                        chat.write(Text("  ⚠ Heartbeat info non disponible", style="yellow"))
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
         else:
-            chat.write(Text("  ⚠ Heartbeat non disponible en mode daemon", style="yellow"))
+            chat.write(Text("  ⚠ Heartbeat non disponible", style="yellow"))
 
     def _cmd_skills(self, chat: RichLog) -> None:
+        if self.mode == "daemon":
+            chat.write(Text("  ⚠ /skills non disponible en mode daemon — utilisez le mode local", style="yellow"))
+            return
         if not self.vox or not self.vox.memory or not self.vox.memory.is_initialized:
             chat.write(Text("  ⚠ Non disponible", style="yellow"))
             return
@@ -1527,11 +1737,27 @@ class NeoTUI(App):
             lines.append("  [dim]Aucune compétence acquise.[/dim]")
         chat.write(Panel("\n".join(lines), title="[bold cyan]Skills[/bold cyan]", border_style="cyan"))
 
-    def _cmd_persona(self, chat: RichLog) -> None:
-        if not self.vox or not self.vox.memory or not self.vox.memory.persona_engine:
+    async def _cmd_persona(self, chat: RichLog) -> None:
+        persona = None
+        if self.mode == "daemon" and self._http_client:
+            try:
+                resp = await self._http_client.get(
+                    f"{self.api_url}/persona",
+                    headers=self._api_headers,
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    persona = data.get("persona")
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
+                return
+        elif self.vox and self.vox.memory and hasattr(self.vox.memory, "persona_engine") and self.vox.memory.persona_engine:
+            persona = self.vox.memory.get_neo_persona()
+        else:
             chat.write(Text("  ⚠ Non disponible", style="yellow"))
             return
-        persona = self.vox.memory.get_neo_persona()
+
         if not persona:
             chat.write(Text("  ⚠ Persona non initialisée", style="yellow"))
             return
@@ -1549,11 +1775,27 @@ class NeoTUI(App):
                 lines.append(f"  {name:20} [{bar}] {trait['value']:.2f}")
         chat.write(Panel("\n".join(lines), title="[bold cyan]Neo Persona[/bold cyan]", border_style="cyan"))
 
-    def _cmd_profile(self, chat: RichLog) -> None:
-        if not self.vox or not self.vox.memory or not self.vox.memory.persona_engine:
+    async def _cmd_profile(self, chat: RichLog) -> None:
+        profile = None
+        if self.mode == "daemon" and self._http_client:
+            try:
+                resp = await self._http_client.get(
+                    f"{self.api_url}/persona",
+                    headers=self._api_headers,
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    profile = data.get("user_profile")
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
+                return
+        elif self.vox and self.vox.memory and hasattr(self.vox.memory, "persona_engine") and self.vox.memory.persona_engine:
+            profile = self.vox.memory.get_user_profile()
+        else:
             chat.write(Text("  ⚠ Non disponible", style="yellow"))
             return
-        profile = self.vox.memory.get_user_profile()
+
         if not profile:
             chat.write(Text("  ⚠ Profil non initialisé", style="yellow"))
             return
@@ -1567,42 +1809,102 @@ class NeoTUI(App):
         ]
         chat.write(Panel("\n".join(lines), title="[bold cyan]User Profile[/bold cyan]", border_style="cyan"))
 
-    def _cmd_history(self, chat: RichLog) -> None:
-        if not self.vox:
-            chat.write(Text("  ⚠ Non disponible", style="yellow"))
-            return
-        info = self.vox.get_session_info()
-        if not info:
-            chat.write(Text("  ⚠ Pas de session active", style="yellow"))
-            return
-        lines = [f"[bold]Session active[/bold]\n"]
-        lines.append(f"  ID       : {info.get('session_id', '?')}")
-        lines.append(f"  Début    : {info.get('started_at', '?')}")
-        lines.append(f"  Messages : {info.get('message_count', 0)}")
-        chat.write(Panel("\n".join(lines), title="[bold cyan]Historique[/bold cyan]", border_style="cyan"))
-
-    def _cmd_sessions(self, chat: RichLog) -> None:
-        if not self.vox:
-            chat.write(Text("  ⚠ Non disponible", style="yellow"))
-            return
-        try:
-            sessions = self.vox.get_recent_sessions(limit=10)
-            if not sessions:
-                chat.write(Text("  Aucune session précédente.", style="dim"))
-                return
-            table = Table(title="Sessions récentes", title_style="bold cyan", border_style="cyan")
-            table.add_column("ID", style="dim", width=12)
-            table.add_column("Début", width=19)
-            table.add_column("Msgs", justify="center", width=5)
-            for s in sessions:
-                table.add_row(
-                    s.get("session_id", "?")[:10],
-                    s.get("started_at", "?")[:19],
-                    str(s.get("message_count", 0)),
+    async def _cmd_history(self, chat: RichLog) -> None:
+        if self.mode == "daemon" and self._http_client:
+            # En daemon, afficher les infos de session depuis /sessions
+            try:
+                resp = await self._http_client.get(
+                    f"{self.api_url}/sessions",
+                    headers=self._api_headers,
+                    params={"limit": 1},
+                    timeout=5.0,
                 )
-            chat.write(table)
-        except Exception as e:
-            chat.write(Text(f"  Erreur: {e}", style="red"))
+                if resp.status_code == 200:
+                    sessions = resp.json()
+                    if sessions:
+                        s = sessions[0]
+                        lines = [f"[bold]Session active[/bold]\n"]
+                        lines.append(f"  ID       : {s.get('session_id', '?')}")
+                        lines.append(f"  Début    : {s.get('created_at', '?')[:19]}")
+                        lines.append(f"  Messages : {s.get('message_count', 0)}")
+                        chat.write(Panel("\n".join(lines), title="[bold cyan]Historique[/bold cyan]", border_style="cyan"))
+                    else:
+                        chat.write(Text("  ⚠ Pas de session active", style="yellow"))
+                else:
+                    chat.write(Text(f"  ⚠ API error: {resp.status_code}", style="yellow"))
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
+        elif self.vox:
+            info = self.vox.get_session_info()
+            if not info:
+                chat.write(Text("  ⚠ Pas de session active", style="yellow"))
+                return
+            lines = [f"[bold]Session active[/bold]\n"]
+            lines.append(f"  ID       : {info.get('session_id', '?')}")
+            lines.append(f"  Début    : {info.get('started_at', '?')}")
+            lines.append(f"  Messages : {info.get('message_count', 0)}")
+            chat.write(Panel("\n".join(lines), title="[bold cyan]Historique[/bold cyan]", border_style="cyan"))
+        else:
+            chat.write(Text("  ⚠ Non disponible", style="yellow"))
+
+    async def _cmd_sessions(self, chat: RichLog) -> None:
+        if self.mode == "daemon" and self._http_client:
+            try:
+                resp = await self._http_client.get(
+                    f"{self.api_url}/sessions",
+                    headers=self._api_headers,
+                    timeout=5.0,
+                )
+                if resp.status_code == 200:
+                    sessions = resp.json()
+                    if not sessions:
+                        chat.write(Text("  Aucune session précédente.", style="dim"))
+                        return
+                    table = Table(title="Sessions récentes", title_style="bold cyan", border_style="cyan")
+                    table.add_column("ID", style="dim", width=12)
+                    table.add_column("Utilisateur", width=15)
+                    table.add_column("Mise à jour", width=19)
+                    table.add_column("Msgs", justify="center", width=5)
+                    for s in sessions:
+                        table.add_row(
+                            s.get("session_id", "?")[:10],
+                            s.get("user_name", "?"),
+                            s.get("updated_at", "?")[:19],
+                            str(s.get("message_count", 0)),
+                        )
+                    chat.write(table)
+                else:
+                    chat.write(Text(f"  ⚠ API error: {resp.status_code}", style="yellow"))
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
+        elif self.vox:
+            try:
+                # Accès direct au conversation store
+                store = getattr(self.vox, "_conversation_store", None)
+                if not store:
+                    chat.write(Text("  ⚠ Pas de store de conversations", style="yellow"))
+                    return
+                sessions = store.get_sessions(limit=10)
+                if not sessions:
+                    chat.write(Text("  Aucune session précédente.", style="dim"))
+                    return
+                table = Table(title="Sessions récentes", title_style="bold cyan", border_style="cyan")
+                table.add_column("ID", style="dim", width=12)
+                table.add_column("Utilisateur", width=15)
+                table.add_column("Mise à jour", width=19)
+                table.add_column("Msgs", justify="center", width=5)
+                for s in sessions:
+                    table.add_row(
+                        s.session_id[:10],
+                        s.user_name,
+                        s.updated_at[:19],
+                        str(s.message_count),
+                    )
+                chat.write(table)
+            except Exception as e:
+                chat.write(Text(f"  Erreur: {e}", style="red"))
+        else:
+            chat.write(Text("  ⚠ Non disponible", style="yellow"))
 
     async def _cmd_restart(self) -> None:
         from neo_core.infra.guardian import EXIT_CODE_RESTART

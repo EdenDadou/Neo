@@ -1588,18 +1588,18 @@ Réponds UNIQUEMENT avec ce JSON :
                                memory_context: str,
                                original_request: str = "") -> str:
         """
-        Crée un Epic et lance un Crew persistant (v2.0).
+        Crée un Epic et lance un Chef de Projet (v3.0).
 
         Pipeline :
         1. Extraction du sujet réel
         2. Décomposition intelligente avec worker_type par étape (JSON LLM)
         3. Création de l'Epic dans le registre
-        4. Création du CrewState persistant en Memory
-        5. Exécution IMMÉDIATE de la première étape (feedback rapide)
-        6. Les étapes suivantes seront avancées par le heartbeat
+        4. Spawn du ProjectManagerWorker (Chef de Projet)
+        5. Le PM exécute TOUTES les étapes en parallèle
+        6. Retourne la synthèse complète
 
-        L'utilisateur reçoit un briefing immédiat + la première étape.
-        Le heartbeat avance ensuite le crew d'une étape par pulse.
+        Le PM gère les dépendances entre étapes et spawn les workers
+        par batch parallèle. Plus besoin du heartbeat pour avancer.
         """
         # 0. Extraire le nom et le sujet (préférer le message original pour les quotes)
         source_for_name = original_request if original_request else request
@@ -1611,7 +1611,6 @@ Réponds UNIQUEMENT avec ce JSON :
                 epic_subject = alt_subject
 
         # 1. Décomposer en étapes crew avec worker_types
-        # Utiliser le message original car il est plus riche en détails
         decompose_input = original_request if original_request else request
         crew_steps = await self._decompose_crew_with_llm(decompose_input, memory_context)
 
@@ -1632,49 +1631,49 @@ Réponds UNIQUEMENT avec ce JSON :
                 )
                 epic_id = epic.id
                 logger.info(
-                    "Crew Epic créé: %s (%s) avec %d étapes",
+                    "Epic créé: %s (%s) avec %d étapes",
                     epic_id[:8], epic_subject[:50], len(crew_steps),
                 )
             except Exception as e:
                 logger.debug("Impossible de créer l'Epic: %s", e)
 
-        # 3. Créer le CrewState persistant
+        # 3. Mettre à jour le statut → in_progress
+        if epic and self.memory and self.memory.is_initialized:
+            try:
+                self.memory.update_epic_status(epic_id, "in_progress")
+            except Exception:
+                pass
+
+        # 4. Spawn le Chef de Projet (ProjectManagerWorker)
         try:
-            executor = CrewExecutor(brain=self)
-            executor.set_event_callback(self._handle_crew_event)
-            executor.create_crew_state(
+            from neo_core.brain.teams.project_manager import ProjectManagerWorker
+
+            pm = ProjectManagerWorker(
+                brain=self,
                 epic_id=epic_id,
                 epic_subject=epic_subject,
                 steps=crew_steps,
                 memory_context=memory_context,
                 original_request=original_request or request,
+                event_callback=self._handle_crew_event,
             )
 
-            # 4. Exécuter la PREMIÈRE étape immédiatement (feedback rapide)
-            first_event = await executor.advance_one_step(epic_id)
+            # 5. Le PM exécute tout — workers en parallèle
+            pm_result = await pm.execute()
 
-            # 5. Mettre à jour le statut de l'Epic → in_progress
-            if epic and self.memory and self.memory.is_initialized:
+            # 6. Mettre à jour le statut de l'Epic
+            if self.memory and self.memory.is_initialized:
                 try:
-                    self.memory.update_epic_status(epic_id, "in_progress")
-                except Exception as e:
-                    logger.debug("Impossible de mettre à jour l'Epic: %s", e)
+                    final_status = "done" if pm_result.success else "failed"
+                    self.memory.update_epic_status(epic_id, final_status)
+                except Exception:
+                    pass
 
-            # 6. Retourner le briefing avec le résultat de la première étape
-            briefing = executor.get_briefing(epic_id)
-
-            # Si le crew est déjà terminé (1 seule étape), retourner directement
-            if first_event.event_type == "crew_done":
-                return first_event.data.get("synthesis", first_event.message)
-
-            return (
-                f"{first_event.message}\n\n"
-                f"Le crew est en marche. Les prochaines étapes seront "
-                f"exécutées automatiquement par le heartbeat.\n\n{briefing}"
-            )
+            # 7. Retourner la synthèse
+            return pm_result.synthesis
 
         except Exception as e:
-            logger.error("Crew creation/execution failed: %s", e)
+            logger.error("ProjectManager execution failed: %s", e)
             if epic and self.memory and self.memory.is_initialized:
                 try:
                     self.memory.update_epic_status(epic_id, "failed")

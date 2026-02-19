@@ -33,6 +33,7 @@ class StatusResponse(BaseModel):
     heartbeat: dict = {}
     workers: dict = {}
     agent_models: dict = {}
+    projects: dict = {}
 
 
 class SessionInfo(BaseModel):

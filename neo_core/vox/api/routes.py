@@ -71,6 +71,11 @@ async def chat_stream(request: ChatRequest):
     Chat avec streaming SSE — envoie un accusé de réception immédiat
     puis la réponse finale quand Brain termine.
 
+    Architecture v2 — Mode synchrone avec ack isolé :
+    Chaque requête SSE est autonome (pas de callbacks globaux partagés).
+    L'ack est généré directement, puis Brain est appelé synchroniquement.
+    Cela élimine la race condition entre requêtes concurrentes.
+
     Events SSE :
       event: ack     → {"text": "Je réfléchis..."}
       event: response → {"text": "...", "session_id": "...", "turn_number": N}
@@ -86,73 +91,58 @@ async def chat_stream(request: ChatRequest):
     message = request.message
 
     async def event_generator():
-        # Queue pour recevoir ack et résultat depuis les callbacks Vox
-        result_queue: asyncio.Queue = asyncio.Queue()
+        vox = neo_core.vox
 
-        # Sauvegarder les callbacks existants
-        old_thinking_cb = neo_core.vox._on_thinking_callback
-        old_brain_done_cb = neo_core.vox._on_brain_done_callback
+        # ── Phase 1 : Ack rapide (hors lock, sans toucher Brain) ──
+        try:
+            ack_text = await asyncio.wait_for(
+                vox._generate_ack(message),
+                timeout=4.0,
+            )
+        except Exception:
+            import random
+            ack_text = random.choice([
+                "🧠 Brain analyse la situation et revient vers toi très vite.",
+                "Je traite ta demande...",
+                "C'est noté, je m'en occupe.",
+            ])
 
-        def on_ack(ack_text: str):
-            """Callback ack — Vox envoie l'accusé de réception."""
-            result_queue.put_nowait(("ack", ack_text))
+        yield f"event: ack\ndata: {json.dumps({'text': ack_text})}\n\n"
 
-        def on_brain_done(brain_response: str):
-            """Callback quand Brain termine en arrière-plan."""
-            result_queue.put_nowait(("response", brain_response))
-
-        # Installer les callbacks pour le streaming
-        neo_core.vox.set_thinking_callback(on_ack)
-        neo_core.vox.set_brain_done_callback(on_brain_done)
+        # ── Phase 2 : Traitement synchrone complet (sous lock) ──
+        # On désactive temporairement les callbacks async pour forcer
+        # process_message à retourner la réponse complète (pas un ack).
+        old_brain_done_cb = vox._on_brain_done_callback
+        old_thinking_cb = vox._on_thinking_callback
 
         try:
+            # Forcer le mode synchrone : pas de callback → process_message
+            # attend Brain et retourne la réponse complète.
+            vox._on_brain_done_callback = None
+            vox._on_thinking_callback = None
+
             async with neo_core._lock:
-                # Lancer process_message — en mode async, retourne immédiatement l'ack
                 try:
-                    ack_or_response = await asyncio.wait_for(
-                        neo_core.vox.process_message(message),
-                        timeout=120.0,
+                    full_response = await asyncio.wait_for(
+                        vox.process_message(message),
+                        timeout=300.0,  # 5 min pour les projets longs
                     )
                 except asyncio.TimeoutError:
-                    timeout_msg = json.dumps({"text": "Timeout — Brain n'a pas répondu"})
+                    timeout_msg = json.dumps({"text": "Timeout — Brain n'a pas répondu dans le délai imparti."})
                     yield f"event: error\ndata: {timeout_msg}\n\n"
                     return
 
-            # Drainer tous les events de la queue (ack envoyé pendant process_message)
-            while not result_queue.empty():
-                try:
-                    event_type, text = result_queue.get_nowait()
-                    yield f"event: {event_type}\ndata: {json.dumps({'text': text})}\n\n"
-                except asyncio.QueueEmpty:
-                    break
+            session = vox._current_session
+            yield f"event: response\ndata: {json.dumps({'text': full_response, 'session_id': session.session_id if session else '', 'turn_number': session.message_count if session else 0})}\n\n"
 
-            # Si brain_done_callback est actif, process_message a retourné l'ack
-            # et Brain tourne en arrière-plan → attendre la réponse
-            if neo_core.vox._brain_busy:
-                # Envoyer l'ack retourné par process_message
-                yield f"event: ack\ndata: {json.dumps({'text': ack_or_response})}\n\n"
-
-                # Attendre le résultat Brain via la queue
-                try:
-                    event_type, brain_response = await asyncio.wait_for(
-                        result_queue.get(), timeout=120.0,
-                    )
-                except asyncio.TimeoutError:
-                    timeout_msg = json.dumps({"text": "Timeout — Brain n'a pas répondu"})
-                    yield f"event: error\ndata: {timeout_msg}\n\n"
-                    return
-
-                session = neo_core.vox._current_session
-                yield f"event: response\ndata: {json.dumps({'text': brain_response, 'session_id': session.session_id if session else '', 'turn_number': session.message_count if session else 0})}\n\n"
-            else:
-                # Mode synchrone — process_message a retourné la réponse complète
-                session = neo_core.vox._current_session
-                yield f"event: response\ndata: {json.dumps({'text': ack_or_response, 'session_id': session.session_id if session else '', 'turn_number': session.message_count if session else 0})}\n\n"
+        except Exception as e:
+            error_msg = json.dumps({"text": f"{type(e).__name__}: {str(e)[:300]}"})
+            yield f"event: error\ndata: {error_msg}\n\n"
 
         finally:
             # Restaurer les callbacks
-            neo_core.vox._on_thinking_callback = old_thinking_cb
-            neo_core.vox._on_brain_done_callback = old_brain_done_cb
+            vox._on_brain_done_callback = old_brain_done_cb
+            vox._on_thinking_callback = old_thinking_cb
 
     return StreamingResponse(
         event_generator(),
@@ -315,6 +305,72 @@ async def status():
     except Exception:
         pass
 
+    # Projets actifs (résumé compact pour /status)
+    projects_summary = {}
+    try:
+        registry = vox.memory.task_registry if vox and vox.memory and vox.memory.is_initialized else None
+        if registry:
+            all_epics = registry.get_all_epics(limit=10)
+            active_epics = [e for e in all_epics if e.status in ("pending", "in_progress")]
+            done_epics = [e for e in all_epics if e.status == "done"]
+            failed_epics = [e for e in all_epics if e.status == "failed"]
+
+            projects_list = []
+            for e in active_epics:
+                tasks = registry.get_epic_tasks(e.id)
+                done_t = sum(1 for t in tasks if t.status == "done")
+                total_t = len(tasks)
+                # Crew status
+                crew_status = None
+                try:
+                    if vox.brain:
+                        from neo_core.brain.teams.crew import CrewExecutor
+                        executor = CrewExecutor(brain=vox.brain)
+                        cs = executor.load_state(e.id)
+                        if cs:
+                            crew_status = cs.status
+                except Exception:
+                    pass
+                # Elapsed
+                elapsed = ""
+                try:
+                    from datetime import datetime as _dt
+                    started = _dt.fromisoformat(e.created_at)
+                    delta = _dt.now() - started
+                    total_secs = int(delta.total_seconds())
+                    if total_secs < 60:
+                        elapsed = f"{total_secs}s"
+                    elif total_secs < 3600:
+                        elapsed = f"{total_secs // 60}m{total_secs % 60:02d}s"
+                    else:
+                        h = total_secs // 3600
+                        m = (total_secs % 3600) // 60
+                        elapsed = f"{h}h{m:02d}m"
+                except Exception:
+                    pass
+
+                projects_list.append({
+                    "short_id": e.short_id,
+                    "name": e.display_name,
+                    "status": e.status,
+                    "crew_status": crew_status,
+                    "progress": f"{done_t}/{total_t}",
+                    "elapsed": elapsed,
+                })
+
+            all_tasks = registry.get_all_tasks(limit=50)
+            standalone = [t for t in all_tasks if not t.epic_id]
+            standalone_active = [t for t in standalone if t.status in ("pending", "in_progress")]
+
+            projects_summary = {
+                "active": projects_list,
+                "done_count": len(done_epics),
+                "failed_count": len(failed_epics),
+                "standalone_tasks": len(standalone_active),
+            }
+    except Exception:
+        pass
+
     return StatusResponse(
         status="ready",
         core_name=neo_core.config.core_name,
@@ -324,6 +380,7 @@ async def status():
         heartbeat=heartbeat_info,
         workers=workers_info,
         agent_models=agent_models,
+        projects=projects_summary,
     )
 
 
