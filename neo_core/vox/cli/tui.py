@@ -91,6 +91,14 @@ class StatusUpdate(Message):
     pass
 
 
+class ProactiveMessage(Message):
+    """Brain parle spontanément — message proactif."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Sidebar Widget
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -414,7 +422,11 @@ class NeoTUI(App):
         if self.vox:
             # Callbacks Brain → Message TUI
             def on_brain_done(result: str):
-                self.post_message(BrainResult(result))
+                # Détecter les messages proactifs (préfixe 🧠)
+                if result.startswith("🧠"):
+                    self.post_message(ProactiveMessage(result[2:].strip()))
+                else:
+                    self.post_message(BrainResult(result))
 
             def on_thinking(ack_text: str):
                 self.post_message(AckReceived(ack_text))
@@ -427,6 +439,11 @@ class NeoTUI(App):
                 from neo_core.infra.heartbeat import HeartbeatManager, HeartbeatConfig
 
                 def on_heartbeat_event(event):
+                    # Messages proactifs de Brain → affichage distinct
+                    if event.event_type == "brain_proactive":
+                        msg = event.data.get("message", event.message) if event.data else event.message
+                        self.post_message(ProactiveMessage(msg))
+                        return
                     important = {"task_completed", "task_failed", "epic_done", "task_stale",
                                  "persona_reflection", "crew_step_advanced", "orchestrator_replan"}
                     if event.event_type in important:
@@ -437,6 +454,7 @@ class NeoTUI(App):
                     memory=self.vox.memory,
                     config=HeartbeatConfig(interval_seconds=300.0),  # 5 minutes
                     on_event=on_heartbeat_event,
+                    vox=self.vox,  # Pour push_message() proactif
                 )
                 self._heartbeat_manager.start()
                 sidebar.heartbeat_active = True
@@ -663,6 +681,14 @@ class NeoTUI(App):
         chat.write(Text(f"  ♥ {event.text}", style="dim magenta"))
         sidebar = self.query_one("#sidebar", Sidebar)
         sidebar.heartbeat_pulses += 1
+
+    def on_proactive_message(self, event: ProactiveMessage) -> None:
+        chat = self.query_one("#chat-area", RichLog)
+        proactive_text = Text()
+        proactive_text.append("\n  🧠 ", style="bold cyan")
+        proactive_text.append(event.text, style="cyan italic")
+        proactive_text.append("\n", style="")
+        chat.write(proactive_text)
 
     def on_error_occurred(self, event: ErrorOccurred) -> None:
         chat = self.query_one("#chat-area", RichLog)

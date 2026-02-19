@@ -79,11 +79,13 @@ class HeartbeatManager:
         memory: MemoryAgent,
         config: HeartbeatConfig | None = None,
         on_event: Callable[[HeartbeatEvent], None] | None = None,
+        vox: object | None = None,
     ):
         self.brain = brain
         self.memory = memory
         self.config = config or HeartbeatConfig()
         self._on_event = on_event
+        self._vox = vox  # Référence Vox pour push_message() proactif
 
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -94,6 +96,8 @@ class HeartbeatManager:
         self._tool_generator = None  # Level 4 — lazy init
         self._consecutive_failures: int = 0  # Compteur d'échecs consécutifs
         self._last_error: Optional[str] = None  # Dernier message d'erreur
+        self._last_proactive_at: float = 0.0  # Timestamp du dernier message proactif
+        self._proactive_cooldown: float = 3600.0  # 1 heure entre chaque message proactif
 
     # ─── Lifecycle ────────────────────────────────────
 
@@ -218,27 +222,30 @@ class HeartbeatManager:
                 self._pulse_count % self.config.consolidation_interval_pulses == 0):
             self._consolidate_memory()
 
-        # 4. Auto-réflexion de la personnalité (Stage 9)
+        # 4. Pensée proactive — Brain parle de lui-même
+        await self._brain_proactive_think(registry)
+
+        # 5. Auto-réflexion de la personnalité (Stage 9)
         await self._perform_personality_reflection()
 
-        # 5. State snapshot périodique pour Guardian (Stage 10)
+        # 6. State snapshot périodique pour Guardian (Stage 10)
         if self._pulse_count > 0 and self._pulse_count % 10 == 0:
             self._save_guardian_state()
 
-        # 6. Auto-tuning périodique (Level 1 self-improvement)
+        # 7. Auto-tuning périodique (Level 1 self-improvement)
         from neo_core.features import feature_enabled
         if (self.config.auto_tuning and feature_enabled("auto_tuning") and
                 self._pulse_count > 0 and
                 self._pulse_count % self.config.auto_tuning_interval_pulses == 0):
             self._run_auto_tuning()
 
-        # 7. Self-patching périodique (Level 3 — auto-correction)
+        # 8. Self-patching périodique (Level 3 — auto-correction)
         if (self.config.self_patching and feature_enabled("self_patching") and
                 self._pulse_count > 0 and
                 self._pulse_count % self.config.self_patching_interval_pulses == 0):
             self._run_self_patching()
 
-        # 8. Tool generation périodique (Level 4 — création d'outils)
+        # 9. Tool generation périodique (Level 4 — création d'outils)
         if (self.config.tool_generation and feature_enabled("tool_generation") and
                 self._pulse_count > 0 and
                 self._pulse_count % self.config.tool_generation_interval_pulses == 0):
@@ -607,6 +614,201 @@ class HeartbeatManager:
                 logger.debug("[Heartbeat] Tool generation: aucun changement")
         except Exception as e:
             logger.error("[Heartbeat] Erreur tool generation: %s", e)
+
+    # ─── Pensée proactive Brain ────────────────────────
+
+    _PROACTIVE_PROMPT = """Tu es le cerveau autonome de Neo, un système IA multi-agents.
+Tu observes en continu les projets et l'activité de l'utilisateur.
+
+Heure actuelle : {current_time}
+Dernier échange avec l'utilisateur : {last_interaction}
+
+=== PROJETS ACTIFS ===
+{projects_context}
+
+=== ÉVÉNEMENTS RÉCENTS ===
+{recent_events}
+
+=== DERNIERS MESSAGES PROACTIFS ===
+{recent_proactive}
+
+Ta mission : décider si tu dois PARLER SPONTANÉMENT à l'utilisateur.
+
+PARLE si :
+- Un projet a bien avancé et mérite un update
+- Tu as une idée, suggestion ou insight utile sur un projet en cours
+- Un problème est détecté (tâche bloquée, erreur, incohérence)
+- Tu as une réflexion pertinente sur le travail en cours
+- Le silence dure depuis longtemps et un check-in serait bienvenu
+- Tu veux encourager, féliciter, ou simplement discuter
+
+NE PARLE PAS si :
+- Rien de nouveau depuis la dernière fois
+- Tu as déjà envoyé un message récemment sur le même sujet
+- L'info est triviale ou évidente
+- L'utilisateur est probablement occupé (dernière interaction < 10 min)
+
+STYLE : Sois naturel, direct, comme un collègue intelligent. Pas de formalité.
+Tutoie l'utilisateur. Sois concis (1-3 phrases max).
+
+Réponds en JSON strict :
+{{"should_speak": true, "message": "ton message naturel ici", "reason": "pourquoi tu parles"}}
+ou
+{{"should_speak": false, "reason": "pourquoi tu ne parles pas"}}"""
+
+    async def _brain_proactive_think(self, registry) -> None:
+        """
+        Moteur de pensées autonomes — Brain décide s'il veut parler.
+
+        Appelé à chaque pulse du heartbeat. Vérifie le cooldown (1h),
+        construit un contexte compact, et demande à Haiku si Brain
+        a quelque chose à dire. Si oui, diffuse via Vox.push_message().
+        """
+        import time as _time
+
+        # Cooldown : pas plus d'1 message par heure
+        now = _time.time()
+        if now - self._last_proactive_at < self._proactive_cooldown:
+            return
+
+        # Pas de pensée proactive si Brain n'est pas dispo
+        if not self.brain:
+            return
+
+        try:
+            # 1. Contexte projets actifs
+            projects_lines = []
+            try:
+                epics = registry.get_all_epics(limit=5)
+                for e in epics:
+                    if e.status in ("pending", "in_progress"):
+                        tasks = registry.get_epic_tasks(e.id)
+                        done = sum(1 for t in tasks if t.status == "done")
+                        total = len(tasks)
+                        projects_lines.append(
+                            f"- #{e.short_id} {e.display_name[:50]} "
+                            f"({e.status}) — {done}/{total} tâches"
+                        )
+                        # Dernière tâche terminée
+                        done_tasks = [t for t in tasks if t.status == "done"]
+                        if done_tasks:
+                            last = done_tasks[-1]
+                            projects_lines.append(
+                                f"  Dernière: {last.description[:60]} → {(last.result or '')[:80]}"
+                            )
+                        # Tâches bloquées/failed
+                        failed = [t for t in tasks if t.status == "failed"]
+                        if failed:
+                            projects_lines.append(
+                                f"  ⚠ {len(failed)} tâche(s) en échec"
+                            )
+            except Exception:
+                pass
+
+            if not projects_lines:
+                projects_lines.append("Aucun projet actif.")
+
+            # 2. Événements récents
+            recent_events = self._events[-5:] if self._events else []
+            events_lines = [
+                f"- [{e.event_type}] {e.message[:80]}"
+                for e in recent_events
+            ] or ["Aucun événement récent."]
+
+            # 3. Dernière interaction utilisateur
+            last_interaction = "inconnue"
+            try:
+                if self.memory and self.memory.is_initialized:
+                    wm = self.memory.get_working_context()
+                    if wm:
+                        last_interaction = wm[:100]
+                    else:
+                        last_interaction = "pas de contexte récent"
+            except Exception:
+                pass
+
+            # 4. Derniers messages proactifs (éviter les répétitions)
+            recent_proactive = "Aucun message proactif récent."
+            try:
+                if self.memory and self.memory.is_initialized:
+                    proactive_records = self.memory._store.search_by_tags(
+                        ["proactive"], limit=3,
+                    )
+                    if proactive_records:
+                        recent_proactive = "\n".join(
+                            f"- {r.content[:100]}" for r in proactive_records
+                        )
+            except Exception:
+                pass
+
+            # 5. Construire le prompt
+            prompt = self._PROACTIVE_PROMPT.format(
+                current_time=datetime.now().strftime("%H:%M (%A)"),
+                last_interaction=last_interaction,
+                projects_context="\n".join(projects_lines),
+                recent_events="\n".join(events_lines),
+                recent_proactive=recent_proactive,
+            )
+
+            # 6. Appel LLM (Haiku, rapide)
+            from neo_core.brain.providers.router import route_chat
+            response = await asyncio.wait_for(
+                route_chat(
+                    agent_name="vox",  # Haiku — rapide et économique
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=250,
+                    temperature=0.7,
+                ),
+                timeout=5.0,
+            )
+
+            if not response.text or response.text.startswith("[Erreur"):
+                return
+
+            # 7. Parser la réponse JSON
+            data = self.brain._parse_json_response(response.text)
+            should_speak = data.get("should_speak", False)
+
+            if not should_speak:
+                logger.debug(
+                    "[Heartbeat Proactif] Brain ne parle pas: %s",
+                    data.get("reason", "?")[:60],
+                )
+                return
+
+            message = data.get("message", "")
+            reason = data.get("reason", "")
+
+            if not message:
+                return
+
+            # 8. Diffuser le message
+            self._last_proactive_at = now
+
+            # Via Vox.push_message() si disponible
+            if self._vox and hasattr(self._vox, "push_message"):
+                self._vox.push_message(message, source="proactive_think")
+            else:
+                # Fallback : Telegram direct + event
+                from neo_core.infra.registry import core_registry
+                core_registry.send_telegram(f"🧠 {message}")
+
+            # Émettre un event heartbeat
+            self._emit(HeartbeatEvent(
+                event_type="brain_proactive",
+                message=f"[Proactif] {message[:120]}",
+                data={"message": message, "reason": reason},
+            ))
+
+            logger.info(
+                "[Heartbeat] Brain parle: %s (raison: %s)",
+                message[:80], reason[:40],
+            )
+
+        except asyncio.TimeoutError:
+            logger.debug("[Heartbeat Proactif] LLM timeout (>5s)")
+        except Exception as e:
+            logger.debug("[Heartbeat Proactif] Erreur: %s", e)
 
     # ─── Auto-réflexion personnalité (Stage 9) ────────
 

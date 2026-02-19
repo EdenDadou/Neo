@@ -659,6 +659,90 @@ Réponds UNIQUEMENT avec ce JSON :
             logger.debug("Failed to build task registry context: %s", e)
             return ""
 
+    def _build_full_projects_context(self) -> str:
+        """
+        Construit un contexte COMPLET des projets pour injection dans le system prompt.
+
+        Plus riche que _build_task_registry_context() (qui est pour le classify prompt).
+        Celui-ci est injecté en haut du system prompt pour que Brain
+        connaisse TOUJOURS ses projets, même après un redémarrage.
+        """
+        if not self.memory or not self.memory.task_registry:
+            return "Aucun projet en cours."
+
+        try:
+            registry = self.memory.task_registry
+            epics = registry.get_all_epics(limit=10)
+
+            if not epics:
+                return "Aucun projet en cours."
+
+            lines = []
+            active = [e for e in epics if e.status in ("pending", "in_progress")]
+            done = [e for e in epics if e.status == "done"]
+            failed = [e for e in epics if e.status == "failed"]
+
+            if active:
+                for e in active:
+                    tasks = registry.get_epic_tasks(e.id)
+                    tasks.sort(key=lambda t: t.created_at)
+                    done_count = sum(1 for t in tasks if t.status == "done")
+                    total = len(tasks)
+                    pct = f"{done_count * 100 // total}%" if total > 0 else "0%"
+
+                    # Essayer de charger le CrewState pour le statut crew (paused, etc.)
+                    crew_status = ""
+                    try:
+                        executor = CrewExecutor(brain=self)
+                        cs = executor.load_state(e.id)
+                        if cs and cs.status == "paused":
+                            crew_status = " [EN PAUSE]"
+                    except Exception:
+                        pass
+
+                    lines.append(
+                        f"#{e.short_id} « {e.display_name} » — {e.status}{crew_status} "
+                        f"— {done_count}/{total} tâches ({pct})"
+                    )
+                    if e.strategy:
+                        lines.append(f"  Stratégie : {e.strategy[:100]}")
+
+                    for t in tasks:
+                        status_icon = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "failed": "❌"}.get(t.status, "?")
+                        result_preview = ""
+                        if t.status == "done" and t.result:
+                            result_preview = f" → {t.result[:80]}"
+                        lines.append(
+                            f"  {status_icon} #{t.short_id} [{t.worker_type}] {t.description[:60]}{result_preview}"
+                        )
+                    lines.append("")
+
+            if done:
+                lines.append(f"Projets terminés : {len(done)}")
+                for e in done[-3:]:
+                    lines.append(f"  ✅ #{e.short_id} {e.display_name[:50]}")
+
+            if failed:
+                lines.append(f"Projets échoués : {len(failed)}")
+                for e in failed[-2:]:
+                    lines.append(f"  ❌ #{e.short_id} {e.display_name[:50]}")
+
+            # Tâches standalone (non rattachées à un projet)
+            standalone = [
+                t for t in registry.get_all_tasks(limit=10)
+                if not t.epic_id and t.status in ("pending", "in_progress")
+            ]
+            if standalone:
+                lines.append(f"\nTâches indépendantes : {len(standalone)}")
+                for t in standalone[:5]:
+                    lines.append(f"  #{t.short_id} [{t.worker_type}] {t.description[:60]} ({t.status})")
+
+            return "\n".join(lines) if lines else "Aucun projet en cours."
+
+        except Exception as e:
+            logger.debug("Failed to build full projects context: %s", e)
+            return "Aucun projet en cours."
+
     async def _classify_intent(self, request: str, original_request: str = "",
                                 context: str = "") -> dict:
         """
@@ -2001,8 +2085,12 @@ Réponds UNIQUEMENT avec ce JSON :
             except Exception as e:
                 logger.debug("Impossible de récupérer le contexte utilisateur: %s", e)
 
+        # Injection proéminente des projets actifs (séparée du memory_context)
+        projects_context = self._build_full_projects_context()
+
         system_prompt = BRAIN_SYSTEM_PROMPT.format(
             memory_context=memory_context,
+            projects_context=projects_context,
             current_date=now.strftime("%A %d %B %Y"),
             current_time=now.strftime("%H:%M"),
             user_context=user_context,
@@ -2049,6 +2137,8 @@ Réponds UNIQUEMENT avec ce JSON :
             except Exception as e:
                 logger.debug("Impossible de récupérer le contexte utilisateur: %s", e)
 
+        projects_context = self._build_full_projects_context()
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", BRAIN_SYSTEM_PROMPT),
             MessagesPlaceholder("conversation_history", optional=True),
@@ -2057,6 +2147,7 @@ Réponds UNIQUEMENT avec ce JSON :
         chain = prompt | self._llm
         result = await chain.ainvoke({
             "memory_context": memory_context,
+            "projects_context": projects_context,
             "user_context": user_context,
             "current_date": now.strftime("%A %d %B %Y"),
             "current_time": now.strftime("%H:%M"),

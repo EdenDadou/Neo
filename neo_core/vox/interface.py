@@ -317,6 +317,44 @@ class Vox:
         """
         self._on_brain_done_callback = callback
 
+    def push_message(self, message: str, source: str = "brain") -> None:
+        """
+        Envoie un message proactif à l'utilisateur sur tous les canaux.
+
+        Appelé par le heartbeat quand Brain décide de parler spontanément.
+        Route vers : TUI (callback), Telegram, et stockage mémoire.
+        """
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+
+        # 1. TUI / frontend via callback
+        if self._on_brain_done_callback:
+            try:
+                self._on_brain_done_callback(f"🧠 {message}")
+            except Exception as e:
+                _logger.debug("push_message callback failed: %s", e)
+
+        # 2. Telegram
+        try:
+            from neo_core.infra.registry import core_registry
+            core_registry.send_telegram(f"🧠 {message}")
+        except Exception as e:
+            _logger.debug("push_message telegram failed: %s", e)
+
+        # 3. Stockage mémoire (Brain se souvient de ce qu'il a dit)
+        if self.memory and self.memory.is_initialized:
+            try:
+                self.memory.store_memory(
+                    content=f"[Proactif — {source}] {message}",
+                    source="brain_proactive",
+                    tags=["proactive", source],
+                    importance=0.6,
+                )
+            except Exception as e:
+                _logger.debug("push_message memory store failed: %s", e)
+
+        _logger.info("[Vox] Message proactif envoyé: %s", message[:80])
+
     @property
     def is_brain_busy(self) -> bool:
         """Indique si Brain travaille en arrière-plan."""
