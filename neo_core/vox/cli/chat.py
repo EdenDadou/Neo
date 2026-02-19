@@ -190,7 +190,7 @@ def print_epics(vox):
         total = len(epic_tasks)
         pct = f"{done * 100 // total}%" if total > 0 else "—"
 
-        lines.append(f"{icon} [bold]{epic.description[:60]}[/bold]  [dim]{epic.id[:8]}[/dim]")
+        lines.append(f"{icon} [bold]{epic.display_name[:60]}[/bold]  [dim]{epic.id[:8]}[/dim]")
         lines.append(f"  Progrès: [bold green]{done}[/bold green]/{total} ({pct})")
         if epic.strategy:
             lines.append(f"  [dim italic]{epic.strategy[:60]}[/dim italic]")

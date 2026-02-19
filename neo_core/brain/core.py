@@ -1139,22 +1139,29 @@ class Brain:
             ]
 
         decompose_prompt = (
-            f"L'utilisateur veut créer un projet sur ce sujet :\n"
+            f"L'utilisateur veut créer un projet :\n"
             f"\"{request}\"\n\n"
             f"Contexte mémoire :\n{memory_context[:500]}\n\n"
-            f"Décompose ce projet en 3 à 6 étapes CONCRÈTES avec le type de worker optimal.\n"
-            f"Types disponibles : researcher, coder, analyst, writer, summarizer, translator, generic\n\n"
+            f"Décompose ce projet en 3 à 6 étapes CONCRÈTES et OPÉRATIONNELLES.\n"
+            f"Chaque étape doit être une ACTION PRÉCISE qui fait avancer le projet vers son objectif.\n\n"
+            f"Types de worker disponibles :\n"
+            f"- researcher : collecte d'infos web, veille, recherche de données\n"
+            f"- analyst : analyse de données, calculs, modélisation, stratégie\n"
+            f"- coder : écriture de code, scripts, automatisation\n"
+            f"- writer : rédaction de documents, rapports, synthèses\n"
+            f"- summarizer : résumés, briefings\n"
+            f"- generic : tâches mixtes\n\n"
             f"Réponds en JSON strict (array) :\n"
             f"[\n"
-            f'  {{"description": "Action concrète...", "worker_type": "researcher"}},\n'
-            f'  {{"description": "Analyser les résultats...", "worker_type": "analyst"}},\n'
-            f'  {{"description": "Rédiger le rapport...", "worker_type": "writer"}}\n'
+            f'  {{"description": "Action concrète et spécifique...", "worker_type": "researcher"}},\n'
+            f'  {{"description": "Analyser X pour déterminer Y...", "worker_type": "analyst"}}\n'
             f"]\n\n"
-            f"Règles :\n"
-            f"- Chaque étape bâtit sur les précédentes (recherche → analyse → synthèse)\n"
-            f"- researcher pour la collecte d'info web, coder pour du code, analyst pour l'analyse\n"
-            f"- writer pour la rédaction, summarizer pour résumer\n"
-            f"- Descriptions précises et actionnables, PAS de reformulation de la demande\n"
+            f"RÈGLES CRUCIALES :\n"
+            f"- Les descriptions doivent être SPÉCIFIQUES au projet, pas génériques\n"
+            f"- VARIE les worker_type selon l'étape — PAS que des researcher\n"
+            f"- Chaque étape bâtit sur les résultats de la précédente\n"
+            f"- Adapte les étapes à l'OBJECTIF RÉEL du projet (ex: si c'est du trading → analyse cotes, "
+            f"modèle de mise, simulation bankroll... PAS juste 'rechercher sur le trading')\n"
             f"- Réponds UNIQUEMENT avec le JSON, rien d'autre."
         )
 
@@ -1192,18 +1199,39 @@ class Brain:
             for i, st in enumerate(subtasks)
         ]
 
-    def _extract_epic_subject(self, request: str) -> str:
+    def _extract_epic_name_and_subject(self, request: str) -> tuple[str, str]:
         """
-        Extrait le SUJET réel d'une requête epic, en retirant les mots
-        d'intention comme 'crée un epic', 'fais un projet', etc.
+        Extrait le NOM du projet et le SUJET/DESCRIPTION.
+
+        Le nom est extrait des guillemets, quotes, ou après "appelé/nommé".
+        Le sujet est le reste de la requête nettoyée.
 
         Exemples :
-        - "crée un epic pour faire de la recherche sur le tennis"
-          → "recherche sur le tennis"
+        - "crée un projet 'Smash Gang', objectif : devenir rentable"
+          → name="Smash Gang", subject="devenir rentable en pariant..."
         - "lance un projet roadmap pour la refonte du site"
-          → "refonte du site"
+          → name="", subject="refonte du site"
+
+        Returns:
+            (name, subject) — name peut être vide si non détecté
         """
-        # Retirer les préfixes d'intention epic
+        name = ""
+
+        # 1. Chercher un nom entre guillemets/quotes : 'Smash Gang' ou "Smash Gang"
+        name_match = re.search(r"""['"'«]([^'"'»]+)['"'»]""", request)
+        if name_match:
+            name = name_match.group(1).strip()
+
+        # 2. Sinon chercher après "appelé/nommé/intitulé"
+        if not name:
+            name_match = re.search(
+                r"(?:appel[ée]|nomm[ée]|intitul[ée])\s+(.+?)(?:[,.\n]|$)",
+                request, re.IGNORECASE,
+            )
+            if name_match:
+                name = name_match.group(1).strip()[:60]
+
+        # 3. Extraire le sujet (description) — retirer les préfixes d'intention
         subject = re.sub(
             r"^(?:crée|créer|lance|lancer|fais|faire|monte|prépare)\s+"
             r"(?:un|une|le|la|mon|ma|moi\s+un|moi\s+une)\s+"
@@ -1212,11 +1240,15 @@ class Brain:
             "", request, flags=re.IGNORECASE,
         ).strip()
 
+        # Retirer le nom entre quotes du sujet pour ne garder que la description
+        if name and name_match:
+            subject = subject.replace(name_match.group(0), "").strip(" ,;:-")
+
         # Si le nettoyage a tout supprimé, garder la requête originale
         if len(subject) < 5:
             subject = request
 
-        return subject[:200]
+        return name[:100], subject[:300]
 
     async def _execute_as_epic(self, request: str, decision: BrainDecision,
                                memory_context: str) -> str:
@@ -1234,8 +1266,8 @@ class Brain:
         L'utilisateur reçoit un briefing immédiat + la première étape.
         Le heartbeat avance ensuite le crew d'une étape par pulse.
         """
-        # 0. Extraire le vrai sujet
-        epic_subject = self._extract_epic_subject(request)
+        # 0. Extraire le nom et le sujet
+        epic_name, epic_subject = self._extract_epic_name_and_subject(request)
 
         # 1. Décomposer en étapes crew avec worker_types
         crew_steps = await self._decompose_crew_with_llm(request, memory_context)
@@ -1253,6 +1285,7 @@ class Brain:
                     description=epic_subject,
                     subtask_descriptions=subtask_tuples,
                     strategy=decision.reasoning,
+                    name=epic_name,
                 )
                 epic_id = epic.id
                 logger.info(

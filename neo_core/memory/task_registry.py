@@ -79,6 +79,7 @@ class Epic:
     """Un projet complexe nécessitant une équipe d'agents coordonnés (Crew)."""
     id: str
     description: str
+    name: str = ""  # Nom court du projet (donné par l'utilisateur)
     task_ids: list[str] = field(default_factory=list)
     status: str = "pending"  # pending | in_progress | done | failed
     strategy: str = ""  # Stratégie de coordination
@@ -86,10 +87,16 @@ class Epic:
     completed_at: str = ""
     context_notes: list[str] = field(default_factory=list)  # Notes de contexte ajoutées par Memory
 
+    @property
+    def display_name(self) -> str:
+        """Retourne le nom affiché : name si dispo, sinon description tronquée."""
+        return self.name if self.name else self.description[:60]
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "description": self.description,
+            "name": self.name,
             "task_ids": self.task_ids,
             "status": self.status,
             "strategy": self.strategy,
@@ -115,7 +122,7 @@ class Epic:
         }
         icon = status_icons.get(self.status, "?")
         n_tasks = len(self.task_ids)
-        return f"{icon} [{self.id[:8]}] {self.description[:60]} — {n_tasks} tâche(s)"
+        return f"{icon} [{self.id[:8]}] {self.display_name} — {n_tasks} tâche(s)"
 
 
 # ─── Task Registry ──────────────────────────────────────
@@ -158,6 +165,7 @@ class TaskRegistry:
         description: str,
         subtask_descriptions: list[tuple[str, str]],
         strategy: str = "",
+        name: str = "",
     ) -> Epic:
         """
         Crée un Epic avec ses sous-tâches.
@@ -166,10 +174,12 @@ class TaskRegistry:
             description: Description globale de l'epic
             subtask_descriptions: Liste de (description, worker_type) pour chaque sous-tâche
             strategy: Stratégie de coordination des agents
+            name: Nom court du projet (donné par l'utilisateur)
         """
         epic = Epic(
             id=str(uuid.uuid4()),
             description=description,
+            name=name,
             strategy=strategy,
         )
 

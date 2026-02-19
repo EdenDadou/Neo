@@ -410,6 +410,7 @@ async def get_epics():
         total = len(tasks)
         result.append({
             "id": epic.id,
+            "name": epic.display_name,
             "description": epic.description,
             "status": epic.status,
             "strategy": getattr(epic, "strategy", ""),

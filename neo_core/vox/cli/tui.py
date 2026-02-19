@@ -710,7 +710,7 @@ class NeoTUI(App):
                         if registry:
                             epics = registry.get_all_epics(limit=10)
                             sidebar.active_epics = [
-                                {"description": e.description, "status": e.status,
+                                {"description": e.display_name, "status": e.status,
                                  "progress": f"{sum(1 for t in registry.get_epic_tasks(e.id) if t.status == 'done')}/{len(registry.get_epic_tasks(e.id))}"}
                                 for e in epics if e.status in ("pending", "in_progress")
                             ]
@@ -979,10 +979,10 @@ class NeoTUI(App):
         def _render_epic(epic, icon_override=None):
             if from_api:
                 icon = icon_override or status_icons.get(epic.get("status", ""), "?")
-                desc = epic.get("description", "")[:50]
+                name = epic.get("name", "") or epic.get("description", "")[:50]
                 eid = epic.get("id", "")[:8]
                 progress = epic.get("progress", "0/0")
-                lines.append(f"  {icon} [bold]{desc}[/bold]  [dim]{eid}[/dim]  {progress}")
+                lines.append(f"  {icon} [bold]{name[:50]}[/bold]  [dim]{eid}[/dim]  {progress}")
             else:
                 icon = icon_override or status_icons.get(epic.status, "?")
                 epic_tasks = registry.get_epic_tasks(epic.id) if registry else []
@@ -990,7 +990,7 @@ class NeoTUI(App):
                 d = sum(1 for t in epic_tasks if t.status == "done")
                 tot = len(epic_tasks)
                 pct = f"{d * 100 // tot}%" if tot > 0 else "—"
-                lines.append(f"  {icon} [bold]{epic.description[:50]}[/bold]  [dim]{epic.id[:8]}[/dim]  {d}/{tot} ({pct})")
+                lines.append(f"  {icon} [bold]{epic.display_name[:50]}[/bold]  [dim]{epic.id[:8]}[/dim]  {d}/{tot} ({pct})")
                 # Sous-tâches du projet
                 for t in epic_tasks:
                     t_icon = status_icons.get(t.status, "?")
@@ -1015,10 +1015,10 @@ class NeoTUI(App):
             lines.append("[bold dim]✓ Terminés[/bold dim]")
             for e in done[-5:]:
                 if from_api:
-                    desc = e.get("description", "")[:50]
-                    lines.append(f"  [dim]✅ {desc}[/dim]")
+                    name = e.get("name", "") or e.get("description", "")[:50]
+                    lines.append(f"  [dim]✅ {name[:50]}[/dim]")
                 else:
-                    lines.append(f"  [dim]✅ {e.description[:50]}[/dim]")
+                    lines.append(f"  [dim]✅ {e.display_name[:50]}[/dim]")
             if len(done) > 5:
                 lines.append(f"  [dim]... et {len(done) - 5} autres[/dim]")
             lines.append("")
@@ -1028,10 +1028,10 @@ class NeoTUI(App):
             lines.append("[bold red]✗ Échoués[/bold red]")
             for e in failed[-3:]:
                 if from_api:
-                    desc = e.get("description", "")[:50]
-                    lines.append(f"  [dim red]❌ {desc}[/dim red]")
+                    name = e.get("name", "") or e.get("description", "")[:50]
+                    lines.append(f"  [dim red]❌ {name[:50]}[/dim red]")
                 else:
-                    lines.append(f"  [dim red]❌ {e.description[:50]}[/dim red]")
+                    lines.append(f"  [dim red]❌ {e.display_name[:50]}[/dim red]")
             lines.append("")
 
         total = len(epics)

@@ -461,7 +461,7 @@ class TelegramBot:
                                 bar_filled = d * 5 // tot if tot > 0 else 0
                                 bar = "█" * bar_filled + "░" * (5 - bar_filled)
                                 lines.append(
-                                    f"{icon} *{epic.description[:50]}*\n"
+                                    f"{icon} *{epic.display_name[:50]}*\n"
                                     f"   `[{bar}]` {d}/{tot} ({pct})  ID: `{epic.id[:8]}`"
                                 )
                                 for t in epic_tasks:
@@ -478,11 +478,11 @@ class TelegramBot:
                             if done:
                                 lines.append(f"\n✓ *Terminés* ({len(done)})")
                                 for e in done[-5:]:
-                                    lines.append(f"  ✅ {e.description[:50]}")
+                                    lines.append(f"  ✅ {e.display_name[:50]}")
                             if failed:
                                 lines.append(f"\n✗ *Échoués* ({len(failed)})")
                                 for e in failed[-3:]:
-                                    lines.append(f"  ❌ {e.description[:50]}")
+                                    lines.append(f"  ❌ {e.display_name[:50]}")
                             lines.append(f"\n{len(epics)} projet(s) · /project reset pour supprimer")
                             await message.reply_text("\n".join(lines), parse_mode="Markdown")
                     else:

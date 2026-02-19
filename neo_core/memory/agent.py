@@ -639,11 +639,12 @@ class MemoryAgent:
 
     def create_epic(self, description: str,
                     subtask_descriptions: list[tuple[str, str]],
-                    strategy: str = "") -> Epic | None:
+                    strategy: str = "",
+                    name: str = "") -> Epic | None:
         """Crée un Projet (Epic) avec ses étapes."""
         if not self._initialized or not self._task_registry:
             return None
-        return self._task_registry.create_epic(description, subtask_descriptions, strategy)
+        return self._task_registry.create_epic(description, subtask_descriptions, strategy, name=name)
 
     def update_task_status(self, task_id: str, status: str,
                            result: str = "") -> Task | None:
