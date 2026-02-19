@@ -99,7 +99,7 @@ def _get_secret(vault_name: str, env_name: str) -> Optional[str]:
 @dataclass
 class AgentModelConfig:
     """Configuration du modèle pour un agent spécifique."""
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = "claude-sonnet-4-6"
     temperature: float = 0.7
     max_tokens: int = 4096
     # ── Champs multi-provider (remplis par le ModelRegistry) ──
@@ -123,9 +123,9 @@ AGENT_MODELS = {
     ),
     # Brain : orchestrateur — besoin de raisonnement, planification, décision
     "brain": AgentModelConfig(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-6",
         temperature=0.7,
-        max_tokens=4096,
+        max_tokens=2048,
     ),
     # Memory : consolidation intelligente — tâches courtes, besoin d'efficacité
     "memory": AgentModelConfig(
@@ -135,17 +135,17 @@ AGENT_MODELS = {
     ),
     # Workers par type — les tâches complexes méritent Sonnet
     "worker:researcher": AgentModelConfig(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-6",
         temperature=0.5,
         max_tokens=4096,
     ),
     "worker:coder": AgentModelConfig(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-6",
         temperature=0.3,
         max_tokens=4096,
     ),
     "worker:analyst": AgentModelConfig(
-        model="claude-sonnet-4-5-20250929",
+        model="claude-sonnet-4-6",
         temperature=0.5,
         max_tokens=4096,
     ),
@@ -269,7 +269,7 @@ def get_agent_model(agent_name: str) -> AgentModelConfig:
 class LLMConfig:
     """Configuration du modèle de langage (legacy — utilisée pour l'auth globale)."""
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = "claude-sonnet-4-6"
     api_key: Optional[str] = field(default=None, repr=False)
     temperature: float = 0.7
     max_tokens: int = 4096

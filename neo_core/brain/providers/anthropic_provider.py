@@ -48,13 +48,13 @@ class AnthropicProvider(LLMProvider):
     def list_models(self) -> list[ModelInfo]:
         return [
             ModelInfo(
-                model_id="anthropic:claude-sonnet-4-5-20250929",
+                model_id="anthropic:claude-sonnet-4-6",
                 provider="anthropic",
-                model_name="claude-sonnet-4-5-20250929",
-                display_name="Claude Sonnet 4.5",
+                model_name="claude-sonnet-4-6",
+                display_name="Claude Sonnet 4.6",
                 capability=ModelCapability.ADVANCED,
                 context_window=200_000,
-                max_output_tokens=8192,
+                max_output_tokens=64_000,
                 is_free=False,
                 is_local=False,
                 supports_tools=True,
