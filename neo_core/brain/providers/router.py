@@ -74,6 +74,9 @@ async def route_chat(
                 )
 
                 # Vérifier que la réponse est valide (pas une erreur)
+                # Une réponse tool_use sans texte est valide (le LLM veut appeler un outil)
+                if response.tool_calls:
+                    return response
                 if response.text and not response.text.startswith("[Erreur"):
                     return response
 
