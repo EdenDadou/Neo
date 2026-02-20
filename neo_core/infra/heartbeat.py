@@ -204,6 +204,9 @@ class HeartbeatManager:
         # 1. Avancer les Epics actifs
         await self._advance_epics(registry)
 
+        # 1b. Déclencher les cycles des projets récurrents
+        await self._trigger_recurring_cycles(registry)
+
         # 2. Détecter les tâches stale
         self._detect_stale_tasks(registry)
 
@@ -425,6 +428,150 @@ class HeartbeatManager:
                 )
             except Exception as e:
                 logger.warning("Failed to update task status after execution error: %s", e)
+
+    # ─── Projets récurrents (cycliques) ────────────────
+
+    async def _trigger_recurring_cycles(self, registry) -> None:
+        """
+        Vérifie les projets récurrents et déclenche un nouveau cycle si dû.
+
+        Pour chaque projet récurrent dont le next_cycle_at est dépassé :
+        1. Crée de nouvelles tâches à partir du template
+        2. Lance le ProjectManager pour exécuter le cycle
+        3. Stocke le résumé du cycle et calcule le prochain
+        """
+        try:
+            due_epics = registry.get_recurring_epics_due()
+        except Exception as e:
+            logger.debug("[Heartbeat] get_recurring_epics_due failed: %s", e)
+            return
+
+        for epic in due_epics:
+            logger.info(
+                "[Heartbeat] Projet récurrent dû: %s (%s) — cycle %d",
+                epic.short_id, epic.display_name[:40], epic.cycle_count + 1,
+            )
+
+            self._emit(HeartbeatEvent(
+                event_type="recurring_cycle_started",
+                message=f"🔁 Cycle {epic.cycle_count + 1} lancé: {epic.display_name[:50]}",
+                data={"epic_id": epic.id, "cycle": epic.cycle_count + 1},
+            ))
+
+            try:
+                await self._execute_recurring_cycle(epic, registry)
+            except Exception as e:
+                logger.error(
+                    "[Heartbeat] Recurring cycle failed for %s: %s",
+                    epic.short_id, e,
+                )
+                self._emit(HeartbeatEvent(
+                    event_type="recurring_cycle_failed",
+                    message=f"❌ Cycle {epic.cycle_count + 1} échoué: {epic.display_name[:50]}",
+                    data={"epic_id": epic.id, "error": str(e)[:200]},
+                ))
+
+    async def _execute_recurring_cycle(self, epic, registry) -> None:
+        """Exécute un cycle complet d'un projet récurrent."""
+        from neo_core.brain.teams.project_manager import ProjectManagerWorker
+        from neo_core.brain.teams.worker import WorkerType
+
+        # Préparer le cycle : créer les tâches à partir du template
+        advanced_epic = registry.advance_recurring_cycle(
+            epic.id,
+            cycle_summary="(cycle en cours)",  # placeholder, mis à jour après
+        )
+        if not advanced_epic:
+            logger.warning("[Heartbeat] advance_recurring_cycle returned None for %s", epic.id)
+            return
+
+        # Construire les étapes Crew à partir du template
+        from neo_core.brain.teams.crew import CrewStep
+        crew_steps = []
+        for i, step_tmpl in enumerate(epic.cycle_template):
+            try:
+                wt = WorkerType(step_tmpl.get("worker_type", "generic"))
+            except ValueError:
+                wt = WorkerType.GENERIC
+            depends = step_tmpl.get("depends_on", [])
+            crew_steps.append(CrewStep(
+                description=step_tmpl.get("description", f"Étape {i+1}"),
+                worker_type=wt,
+                depends_on=depends,
+            ))
+
+        if not crew_steps:
+            logger.warning("[Heartbeat] No crew_steps for recurring epic %s", epic.short_id)
+            return
+
+        # Construire le contexte mémoire enrichi avec les résultats des cycles précédents
+        memory_context = ""
+        if self.brain:
+            memory_context = self.brain.get_memory_context(epic.description)
+
+        # Injecter les résultats des cycles précédents dans le contexte
+        if advanced_epic.accumulated_results:
+            prev_results = "\n---\n".join(advanced_epic.accumulated_results[-5:])
+            memory_context += (
+                f"\n\n=== RÉSULTATS DES CYCLES PRÉCÉDENTS (projet récurrent) ===\n"
+                f"Objectif: {epic.goal}\n"
+                f"Cycle actuel: {advanced_epic.cycle_count}\n"
+                f"Résultats précédents:\n{prev_results}\n"
+                f"=== ADAPTE ta stratégie en fonction de ces résultats ===\n"
+            )
+
+        # Mettre l'epic en in_progress
+        registry.update_epic_status(epic.id, "in_progress")
+
+        # Lancer le ProjectManager
+        pm = ProjectManagerWorker(
+            brain=self.brain,
+            epic_id=epic.id,
+            epic_subject=epic.description,
+            steps=crew_steps,
+            memory_context=memory_context,
+            original_request=epic.description,
+            event_callback=self.brain._handle_crew_event if self.brain else None,
+        )
+
+        try:
+            pm_result = await asyncio.wait_for(pm.execute(), timeout=600.0)  # 10 min max par cycle
+
+            # Stocker le vrai résumé du cycle
+            cycle_summary = pm_result.synthesis[:500] if pm_result.synthesis else "(pas de synthèse)"
+            # Mettre à jour le résumé (remplacer le placeholder)
+            epic_data, record_id = registry._find_epic_with_id(epic.id)
+            if epic_data and record_id:
+                updated_epic = Epic.from_dict(epic_data)
+                if updated_epic.accumulated_results:
+                    updated_epic.accumulated_results[-1] = cycle_summary
+                updated_epic.status = "pending"  # Prêt pour le prochain cycle
+                import json
+                registry.store.update(record_id, content=json.dumps(updated_epic.to_dict()))
+
+            # Notifier le résultat
+            self._emit(HeartbeatEvent(
+                event_type="recurring_cycle_done",
+                message=f"✅ Cycle {advanced_epic.cycle_count} terminé: {epic.display_name[:50]}",
+                data={
+                    "epic_id": epic.id,
+                    "cycle": advanced_epic.cycle_count,
+                    "synthesis": cycle_summary[:200],
+                },
+            ))
+
+            # Délivrer le résultat dans le chat si callback disponible
+            if self.brain and hasattr(self.brain, '_action_result_callback') and self.brain._action_result_callback:
+                self.brain._deliver_action_result(
+                    f"🔁 **Cycle {advanced_epic.cycle_count} — {epic.display_name}**\n\n{pm_result.synthesis[:800]}"
+                )
+
+        except asyncio.TimeoutError:
+            logger.error("[Heartbeat] Recurring cycle timeout for %s", epic.short_id)
+            registry.update_epic_status(epic.id, "pending")  # Retry au prochain pulse
+        except Exception as e:
+            logger.error("[Heartbeat] Recurring cycle execution failed: %s", e)
+            registry.update_epic_status(epic.id, "pending")
 
     # ─── Détection des tâches stale ───────────────────
 

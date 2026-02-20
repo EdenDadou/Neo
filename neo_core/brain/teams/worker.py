@@ -266,6 +266,7 @@ class Worker:
     subtasks: list[str] = field(default_factory=list)
     tools: list = field(default_factory=list)
     memory: Optional[MemoryAgent] = None
+    conversation_context: str = ""  # Derniers échanges user↔Neo pour donner du contexte au Worker
     system_prompt: str = ""
     health_monitor: Optional[HealthMonitor] = None
     _mock_mode: bool = False
@@ -460,8 +461,11 @@ class Worker:
             current_time=time_str,
         )
 
-        # Message initial
-        user_message = self.task
+        # Message initial — inclut le contexte conversation si disponible
+        user_message = ""
+        if self.conversation_context:
+            user_message += f"[Contexte de la conversation en cours]\n{self.conversation_context}\n\n"
+        user_message += self.task
         if self.subtasks:
             user_message += "\n\nSous-tâches :\n" + "\n".join(
                 f"- {st}" for st in self.subtasks

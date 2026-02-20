@@ -90,6 +90,18 @@ class Epic:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     completed_at: str = ""
     context_notes: list[str] = field(default_factory=list)  # Notes de contexte ajoutées par Memory
+    # ── Projet cyclique (récurrent) ──
+    recurring: bool = False  # True = projet récurrent (relancé automatiquement)
+    schedule_cron: str = ""  # Cron expression ("0 10 * * *" = chaque jour 10h)
+    schedule_interval_minutes: int = 0  # Alternative au cron : intervalle en minutes
+    cycle_count: int = 0  # Nombre de cycles exécutés
+    max_cycles: int = 0  # 0 = illimité, sinon s'arrête après N cycles
+    last_cycle_at: str = ""  # ISO timestamp du dernier cycle
+    next_cycle_at: str = ""  # ISO timestamp du prochain cycle prévu
+    cycle_template: list[dict] = field(default_factory=list)  # Template des étapes à reproduire
+    goal: str = ""  # Objectif mesurable ("doubler 300€ en simulation")
+    goal_reached: bool = False  # True quand l'objectif est atteint
+    accumulated_results: list[str] = field(default_factory=list)  # Résumés des cycles précédents (derniers 10)
 
     @property
     def display_name(self) -> str:
@@ -97,7 +109,7 @@ class Epic:
         return self.name if self.name else self.description[:60]
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "id": self.id,
             "description": self.description,
             "name": self.name,
@@ -109,6 +121,22 @@ class Epic:
             "completed_at": self.completed_at,
             "context_notes": self.context_notes,
         }
+        # Champs récurrents (seulement si activé, pour ne pas polluer les projets classiques)
+        if self.recurring:
+            d.update({
+                "recurring": self.recurring,
+                "schedule_cron": self.schedule_cron,
+                "schedule_interval_minutes": self.schedule_interval_minutes,
+                "cycle_count": self.cycle_count,
+                "max_cycles": self.max_cycles,
+                "last_cycle_at": self.last_cycle_at,
+                "next_cycle_at": self.next_cycle_at,
+                "cycle_template": self.cycle_template,
+                "goal": self.goal,
+                "goal_reached": self.goal_reached,
+                "accumulated_results": self.accumulated_results,
+            })
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> Epic:
@@ -128,7 +156,9 @@ class Epic:
         icon = status_icons.get(self.status, "?")
         sid = f"#{self.short_id}" if self.short_id else f"[{self.id[:8]}]"
         n_tasks = len(self.task_ids)
-        return f"{icon} {sid} {self.display_name} — {n_tasks} tâche(s)"
+        recurring_tag = f" 🔁 cycle {self.cycle_count}" if self.recurring else ""
+        goal_tag = f" 🎯 {self.goal[:30]}" if self.goal else ""
+        return f"{icon} {sid} {self.display_name} — {n_tasks} tâche(s){recurring_tag}{goal_tag}"
 
 
 # ─── Task Registry ──────────────────────────────────────
@@ -693,3 +723,134 @@ class TaskRegistry:
             self.update_epic_status(epic_id, "done")
         elif any_failed and all(t.is_terminal for t in epic_tasks):
             self.update_epic_status(epic_id, "failed")
+
+    # ─── Projets récurrents ─────────────────────────────
+
+    def get_recurring_epics_due(self) -> list[Epic]:
+        """Retourne les projets récurrents dont le prochain cycle est dû."""
+        now = datetime.now()
+        due = []
+        for epic in self.get_all_epics(limit=50):
+            if not epic.recurring:
+                continue
+            if epic.goal_reached:
+                continue
+            if epic.max_cycles > 0 and epic.cycle_count >= epic.max_cycles:
+                continue
+            # Vérifier si le cycle est dû
+            if epic.next_cycle_at:
+                try:
+                    next_at = datetime.fromisoformat(epic.next_cycle_at)
+                    if now >= next_at:
+                        due.append(epic)
+                except (ValueError, TypeError):
+                    due.append(epic)  # Date invalide → relancer
+            elif not epic.last_cycle_at:
+                # Jamais exécuté → dû immédiatement
+                due.append(epic)
+        return due
+
+    def advance_recurring_cycle(self, epic_id: str, cycle_summary: str) -> Epic | None:
+        """
+        Avance un projet récurrent au cycle suivant.
+        - Stocke le résumé du cycle terminé
+        - Calcule le prochain cycle
+        - Remet le status à 'pending' pour le prochain cycle
+        - Crée de nouvelles tâches à partir du template
+        """
+        epic_data, record_id = self._find_epic_with_id(epic_id)
+        if not epic_data or not record_id:
+            return None
+
+        epic = Epic.from_dict(epic_data)
+
+        # Stocker le résumé du cycle (garder les 10 derniers)
+        epic.accumulated_results.append(cycle_summary[:500])
+        if len(epic.accumulated_results) > 10:
+            epic.accumulated_results = epic.accumulated_results[-10:]
+
+        # Avancer le compteur
+        epic.cycle_count += 1
+        epic.last_cycle_at = datetime.now().isoformat()
+
+        # Calculer le prochain cycle
+        if epic.schedule_interval_minutes > 0:
+            from datetime import timedelta
+            next_dt = datetime.now() + timedelta(minutes=epic.schedule_interval_minutes)
+            epic.next_cycle_at = next_dt.isoformat()
+        elif epic.schedule_cron:
+            epic.next_cycle_at = self._next_cron_time(epic.schedule_cron)
+        else:
+            # Pas de schedule → un cycle par jour par défaut
+            from datetime import timedelta
+            next_dt = datetime.now() + timedelta(hours=24)
+            epic.next_cycle_at = next_dt.isoformat()
+
+        # Remettre le status à pending pour le prochain cycle
+        epic.status = "pending"
+        epic.completed_at = ""
+
+        # Supprimer les anciennes tâches (elles sont dans accumulated_results)
+        for task in self.get_epic_tasks(epic.id):
+            _, task_record_id = self._find_task_with_id(task.id)
+            if task_record_id:
+                self.store.delete(task_record_id)
+        epic.task_ids = []
+
+        # Créer de nouvelles tâches à partir du template
+        if epic.cycle_template:
+            for step in epic.cycle_template:
+                task = Task(
+                    id=str(uuid.uuid4()),
+                    description=step.get("description", ""),
+                    worker_type=step.get("worker_type", "generic"),
+                    short_id=f"T{self._next_task_counter()}",
+                    epic_id=epic.id,
+                )
+                epic.task_ids.append(task.id)
+                self.store.add(
+                    content=json.dumps(task.to_dict()),
+                    source="task_registry:task",
+                    tags=["task", f"epic:{epic.id}"],
+                )
+
+        # Persister l'epic mis à jour
+        self.store.update(record_id, content=json.dumps(epic.to_dict()))
+
+        return epic
+
+    def _next_cron_time(self, cron_expr: str) -> str:
+        """Calcule le prochain déclenchement cron (simplifié : heure quotidienne)."""
+        # Format supporté simplifié : "HH:MM" ou "0 HH * * *"
+        try:
+            parts = cron_expr.strip().split()
+            if len(parts) == 5:
+                minute, hour = int(parts[0]), int(parts[1])
+            elif ":" in cron_expr:
+                hour, minute = map(int, cron_expr.strip().split(":"))
+            else:
+                return (datetime.now() + __import__('datetime').timedelta(hours=24)).isoformat()
+
+            from datetime import timedelta
+            now = datetime.now()
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            return target.isoformat()
+        except Exception:
+            from datetime import timedelta
+            return (datetime.now() + timedelta(hours=24)).isoformat()
+
+    def _next_task_counter(self) -> int:
+        """Retourne le prochain numéro de tâche disponible."""
+        all_tasks = self.get_all_tasks(limit=500)
+        max_n = 0
+        for t in all_tasks:
+            if t.short_id and t.short_id.startswith("T"):
+                try:
+                    n = int(t.short_id[1:])
+                    if n > max_n:
+                        max_n = n
+                except ValueError:
+                    pass
+        return max_n + 1

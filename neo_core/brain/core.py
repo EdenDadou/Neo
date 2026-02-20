@@ -1358,6 +1358,85 @@ Réponds UNIQUEMENT avec ce JSON :
                 result = await self._execute_as_epic(request, decision, memory_context, _orig)
                 self._deliver_action_result(f"🏁 Projet terminé : {result[:1000]}")
 
+            elif action_type == "create_recurring_project":
+                # Créer un projet récurrent (cyclique)
+                name = action.get("name", "Projet récurrent")
+                steps = action.get("steps", [request])
+                goal = action.get("goal", "")
+                schedule = action.get("schedule", "")
+
+                # D'abord, exécuter le premier cycle comme un projet normal
+                decision = BrainDecision(
+                    action="delegate_crew",
+                    subtasks=steps if steps else [request],
+                    confidence=0.8,
+                    worker_type="generic",
+                    reasoning=f"Smart action → Projet récurrent '{name}'",
+                    metadata={"epic_intent": True, "llm_classified": True},
+                )
+                _orig = original_request or request
+
+                # Décomposer en crew steps pour avoir le template
+                crew_steps = await self._decompose_crew_with_llm(_orig, memory_context)
+                cycle_template = [
+                    {"description": s.description, "worker_type": s.worker_type.value,
+                     "depends_on": s.depends_on}
+                    for s in crew_steps
+                ]
+
+                # Exécuter le premier cycle
+                result = await self._execute_as_epic(request, decision, memory_context, _orig)
+
+                # Rendre le projet récurrent
+                if self.memory and self.memory.is_initialized and self.memory.task_registry:
+                    # Trouver l'epic le plus récent
+                    epics = self.memory.task_registry.get_all_epics(limit=1)
+                    if epics:
+                        epic = epics[0]
+                        epic_data, record_id = self.memory.task_registry._find_epic_with_id(epic.id)
+                        if epic_data and record_id:
+                            import json as _json
+                            from neo_core.memory.task_registry import Epic
+                            updated = Epic.from_dict(epic_data)
+                            updated.recurring = True
+                            updated.goal = goal
+                            updated.cycle_template = cycle_template
+                            updated.cycle_count = 1
+                            updated.last_cycle_at = __import__('datetime').datetime.now().isoformat()
+                            updated.accumulated_results = [result[:500]]
+                            # Parser le schedule
+                            if isinstance(schedule, (int, float)):
+                                updated.schedule_interval_minutes = int(schedule)
+                            elif isinstance(schedule, str) and schedule.replace(":", "").isdigit() and ":" in schedule:
+                                updated.schedule_cron = schedule
+                            elif isinstance(schedule, str) and schedule.isdigit():
+                                updated.schedule_interval_minutes = int(schedule)
+                            else:
+                                updated.schedule_interval_minutes = 1440  # 24h par défaut
+                            # Calculer le prochain cycle
+                            updated.next_cycle_at = self.memory.task_registry._next_cron_time(
+                                updated.schedule_cron
+                            ) if updated.schedule_cron else (
+                                __import__('datetime').datetime.now() +
+                                __import__('datetime').timedelta(minutes=updated.schedule_interval_minutes)
+                            ).isoformat()
+                            updated.status = "pending"
+                            self.memory.task_registry.store.update(
+                                record_id, content=_json.dumps(updated.to_dict())
+                            )
+                            logger.info(
+                                "[Brain] Projet récurrent activé: %s (schedule=%s, goal=%s)",
+                                updated.short_id, schedule, goal[:50],
+                            )
+
+                schedule_desc = f"toutes les {schedule} minutes" if str(schedule).isdigit() else f"chaque jour à {schedule}"
+                self._deliver_action_result(
+                    f"🔁 Projet récurrent créé : **{name}**\n"
+                    f"🎯 Objectif : {goal}\n"
+                    f"⏰ Schedule : {schedule_desc}\n"
+                    f"📊 Premier cycle terminé :\n{result[:800]}"
+                )
+
             elif action_type == "crew_directive":
                 # Diriger un crew existant
                 project_id = action.get("project", "")
@@ -1419,6 +1498,9 @@ Réponds UNIQUEMENT avec ce JSON :
                 "[Brain] Le système est temporairement indisponible "
                 "(trop d'erreurs consécutives). Réessayez dans quelques instants."
             )
+
+        # Stocker l'historique conversation pour les Workers (contexte partagé)
+        self._current_conversation = conversation_history or []
 
         # ── Charger le contexte ──
         working_context = ""
@@ -1669,6 +1751,14 @@ Réponds UNIQUEMENT avec ce JSON :
                     subtasks=decision.subtasks,
                 )
 
+            # Passer le contexte conversation au Worker (derniers échanges)
+            if hasattr(self, '_current_conversation') and self._current_conversation:
+                conv_parts = []
+                for msg in self._current_conversation[-10:]:  # 5 derniers échanges
+                    role = "User" if hasattr(msg, 'content') and type(msg).__name__ == 'HumanMessage' else "Neo"
+                    conv_parts.append(f"{role}: {msg.content[:300]}")
+                worker.conversation_context = "\n".join(conv_parts)
+
             # Stage 5 : Passer le health monitor au Worker
             worker.health_monitor = self._health
 
@@ -1755,7 +1845,8 @@ Réponds UNIQUEMENT avec ce JSON :
             f"L'utilisateur veut créer un projet :\n"
             f"\"{request}\"\n\n"
             f"Contexte mémoire :\n{memory_context[:500]}\n\n"
-            f"Décompose ce projet en 3 à 6 étapes CONCRÈTES et OPÉRATIONNELLES.\n"
+            f"Décompose ce projet en autant d'étapes que nécessaire (minimum 3, pas de maximum artificiel).\n"
+            f"Un projet simple peut avoir 3-4 étapes, un projet complexe peut en avoir 10-15.\n"
             f"Chaque étape doit être une ACTION PRÉCISE qui fait avancer le projet vers son objectif.\n\n"
             f"Types de worker disponibles :\n"
             f"- researcher : collecte d'infos web, veille, recherche de données\n"
@@ -2521,18 +2612,20 @@ Réponds UNIQUEMENT avec ce JSON :
             except Exception as e:
                 logger.debug("Impossible de récupérer le contexte utilisateur: %s", e)
 
-        # Injection proéminente des projets actifs (séparée du memory_context)
+        # Enrichir memory_context avec projets et sessions (dans le contexte, pas le system prompt)
         projects_context = self._build_full_projects_context()
+        if projects_context and projects_context != "Aucun projet en cours.":
+            memory_context += f"\n\n=== PROJETS ACTIFS ===\n{projects_context}"
 
         recent_sessions = self._build_recent_sessions_context()
+        if recent_sessions and recent_sessions != "(aucune session précédente)":
+            memory_context += f"\n\n=== SESSIONS RÉCENTES ===\n{recent_sessions}"
 
         system_prompt = BRAIN_SYSTEM_PROMPT.format(
             memory_context=memory_context,
-            projects_context=projects_context,
             current_date=now.strftime("%A %d %B %Y"),
             current_time=now.strftime("%H:%M"),
             user_context=user_context,
-            recent_sessions=recent_sessions,
         )
 
         try:
@@ -2576,9 +2669,14 @@ Réponds UNIQUEMENT avec ce JSON :
             except Exception as e:
                 logger.debug("Impossible de récupérer le contexte utilisateur: %s", e)
 
+        # Enrichir memory_context avec projets et sessions
         projects_context = self._build_full_projects_context()
+        if projects_context and projects_context != "Aucun projet en cours.":
+            memory_context += f"\n\n=== PROJETS ACTIFS ===\n{projects_context}"
 
         recent_sessions = self._build_recent_sessions_context()
+        if recent_sessions and recent_sessions != "(aucune session précédente)":
+            memory_context += f"\n\n=== SESSIONS RÉCENTES ===\n{recent_sessions}"
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", BRAIN_SYSTEM_PROMPT),
@@ -2588,9 +2686,7 @@ Réponds UNIQUEMENT avec ce JSON :
         chain = prompt | self._llm
         result = await chain.ainvoke({
             "memory_context": memory_context,
-            "projects_context": projects_context,
             "user_context": user_context,
-            "recent_sessions": recent_sessions,
             "current_date": now.strftime("%A %d %B %Y"),
             "current_time": now.strftime("%H:%M"),
             "conversation_history": conversation_history or [],

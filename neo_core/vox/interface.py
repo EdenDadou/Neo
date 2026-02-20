@@ -453,6 +453,65 @@ class Vox:
             self._agent_statuses[name].current_task = task
             self._agent_statuses[name].progress = progress
 
+    # ── Gestion intelligente de l'historique ──────────────────────
+    _MAX_HISTORY_TOKENS = 12_000   # budget tokens pour l'historique conversation
+    _SUMMARY_TRIGGER = 14_000      # seuil pour déclencher la compression
+    _CHARS_PER_TOKEN = 4           # estimation fr/en (conservateur)
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimation rapide du nombre de tokens (~4 chars/token)."""
+        return len(text) // self._CHARS_PER_TOKEN
+
+    def _history_token_count(self) -> int:
+        """Compte les tokens estimés dans l'historique conversation."""
+        return sum(self._estimate_tokens(m.content) for m in self.conversation_history)
+
+    def _trim_history_by_tokens(self) -> None:
+        """
+        Gestion intelligente de l'historique basée sur un budget tokens.
+        Au lieu de couper brutalement à 50 messages :
+        1. Si < _MAX_HISTORY_TOKENS → on garde tout
+        2. Si > _SUMMARY_TRIGGER → on résume les vieux messages et on ne garde
+           que le résumé + les messages récents
+        """
+        total = self._history_token_count()
+        if total <= self._MAX_HISTORY_TOKENS:
+            return  # tout tient dans le budget
+
+        # Stratégie : garder les 20 derniers messages intacts,
+        # résumer tout ce qui précède en un seul message "contexte"
+        keep_recent = 20
+        if len(self.conversation_history) <= keep_recent:
+            return  # pas assez de messages pour compresser
+
+        old_messages = self.conversation_history[:-keep_recent]
+        recent_messages = self.conversation_history[-keep_recent:]
+
+        # Construire un résumé condensé des vieux messages
+        summary_parts = []
+        for msg in old_messages:
+            role = "User" if isinstance(msg, HumanMessage) else "Neo"
+            # Garder les 200 premiers chars de chaque message
+            content = msg.content[:200]
+            if len(msg.content) > 200:
+                content += "..."
+            summary_parts.append(f"{role}: {content}")
+
+        summary_text = (
+            "[Résumé des échanges précédents]\n"
+            + "\n".join(summary_parts[-30:])  # max 30 entrées dans le résumé
+        )
+
+        # Remplacer l'historique : résumé + messages récents
+        self.conversation_history = [
+            AIMessage(content=summary_text),
+            *recent_messages,
+        ]
+        logger.info(
+            "[VOX] History compressed: %d messages → summary + %d recent (was %d tokens, now ~%d)",
+            len(old_messages), len(recent_messages), total, self._history_token_count()
+        )
+
     def format_request(self, human_message: str) -> str:
         """
         Reformule et structure la demande humaine.
@@ -532,34 +591,19 @@ class Vox:
         if not self.brain:
             return "[Erreur] Brain n'est pas connecté à Vox."
 
-        # Enregistre le message dans l'historique (borné à 50 messages max)
+        # Enregistre le message dans l'historique (budget tokens, pas message count)
         self.conversation_history.append(HumanMessage(content=human_message))
-        if len(self.conversation_history) > 50:
-            self.conversation_history = self.conversation_history[-50:]
+        self._trim_history_by_tokens()
 
-        # ── Message simple → Vox répond seul (instantané) ──
-        if self._is_simple_message(human_message):
-            reply = await self._vox_quick_reply(human_message)
-            self.conversation_history.append(AIMessage(content=reply))
-            self._save_conversation_turn(human_message, reply)
-            return reply
+        # ── Slash commands → routage structurel sans Brain ──
+        if human_message.strip().startswith("/"):
+            # Les commandes slash sont gérées par le legacy pipeline de Brain
+            pass  # Tombe dans le flux normal ci-dessous
 
-        # ── Message complexe → Brain nécessaire ──
-        self.update_agent_status("Vox", active=True, task="reformulation", progress=0.3)
-
-        # Skip reformulation sauf pour les messages très courts ET ambigus
-        # La reformulation dilue l'intention → Brain reçoit le message original
-        msg_lower = human_message.lower()
-        _truly_ambiguous = (
-            len(human_message.split()) < 5
-            and any(p in msg_lower for p in ("ça", "cela", "pareil", "même chose", "continue", "la suite", "fais-le", "fais le"))
-        )
-        if _truly_ambiguous and self.conversation_history:
-            formatted_request = await self.format_request_async(human_message)
-            logger.info("[VOX] Reformulation applied (short ambiguous: '%s')", human_message[:40])
-        else:
-            logger.info("[VOX] Reformulation skipped — message passed directly to Brain (%d chars)", len(human_message))
-            formatted_request = human_message
+        # ── TOUT passe à Brain — plus de reformulation, plus de Vox LLM ──
+        # Brain (Sonnet) a l'historique complet, il comprend "ça", "pareil", "salut"
+        # Zéro intermédiaire = zéro perte d'intelligence
+        formatted_request = human_message
 
         # Mode asynchrone : lancer Brain en arrière-plan
         if self._on_brain_done_callback:
