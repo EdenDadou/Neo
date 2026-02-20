@@ -788,8 +788,13 @@ Réponds UNIQUEMENT avec ce JSON :
 
             if failed:
                 lines.append(f"Projets échoués : {len(failed)}")
-                for e in failed[-2:]:
+                for e in failed[-3:]:
+                    tasks = registry.get_epic_tasks(e.id)
+                    failed_tasks = [t for t in tasks if t.status == "failed"]
                     lines.append(f"  ❌ #{e.short_id} {e.display_name[:50]}")
+                    for ft in failed_tasks[:2]:
+                        err = ft.result[:80] if ft.result else "erreur inconnue"
+                        lines.append(f"    Cause : {err}")
 
             # Tâches standalone (non rattachées à un projet)
             standalone = [
@@ -806,6 +811,137 @@ Réponds UNIQUEMENT avec ce JSON :
         except Exception as e:
             logger.debug("Failed to build full projects context: %s", e)
             return "Aucun projet en cours."
+
+    def _check_duplicate_project(self, name: str) -> str | None:
+        """
+        Vérifie si un projet similaire existe déjà (actif, récemment terminé, ou échoué).
+
+        Retourne un message explicatif si doublon détecté, None sinon.
+        """
+        if not self.memory or not self.memory.task_registry:
+            return None
+
+        try:
+            from difflib import SequenceMatcher
+            epics = self.memory.task_registry.get_all_epics(limit=20)
+            name_lower = name.lower().strip()
+
+            for epic in epics:
+                epic_name = (epic.display_name or epic.description or "").lower().strip()
+                # Match exact ou similarité > 70%
+                ratio = SequenceMatcher(None, name_lower, epic_name).ratio()
+                if ratio < 0.6:
+                    continue
+
+                # Projet similaire trouvé — vérifier son statut
+                tasks = self.memory.task_registry.get_epic_tasks(epic.id)
+                done_count = sum(1 for t in tasks if t.status == "done")
+                failed_count = sum(1 for t in tasks if t.status == "failed")
+                total = len(tasks)
+
+                if epic.status == "in_progress":
+                    return (
+                        f"⚠️ Un projet similaire est **déjà en cours** : « {epic.display_name} » "
+                        f"({done_count}/{total} tâches terminées). "
+                        f"Je ne le relance pas. Voici son statut actuel."
+                    )
+                elif epic.status == "pending":
+                    return (
+                        f"⚠️ Un projet similaire est **en attente** : « {epic.display_name} ». "
+                        f"Il sera exécuté par le heartbeat. Pas besoin de le recréer."
+                    )
+                elif epic.status == "failed":
+                    # Collecter les erreurs des tâches échouées
+                    errors = []
+                    for t in tasks:
+                        if t.status == "failed" and t.result:
+                            errors.append(f"- {t.description[:60]} : {t.result[:100]}")
+                    error_detail = "\n".join(errors[:3]) if errors else "Raison inconnue"
+                    return (
+                        f"⚠️ Un projet similaire a **échoué** : « {epic.display_name} » "
+                        f"({failed_count}/{total} tâches en erreur).\n"
+                        f"Détail des échecs :\n{error_detail}\n\n"
+                        f"Je vais diagnostiquer le problème au lieu de relancer à l'aveugle."
+                    )
+                elif epic.status == "done":
+                    # Vérifier si c'est récent (moins de 30 min)
+                    try:
+                        from datetime import datetime, timedelta
+                        last_task = max(
+                            (t for t in tasks if t.completed_at),
+                            key=lambda t: t.completed_at,
+                            default=None,
+                        )
+                        if last_task and last_task.completed_at:
+                            completed = datetime.fromisoformat(last_task.completed_at)
+                            if datetime.now() - completed < timedelta(minutes=30):
+                                return (
+                                    f"✅ Ce projet a **déjà été terminé** il y a moins de 30 min : "
+                                    f"« {epic.display_name} » ({done_count}/{total} tâches). "
+                                    f"Voici les résultats."
+                                )
+                    except Exception:
+                        pass  # Pas grave, on laisse passer
+
+            return None  # Pas de doublon
+
+        except Exception as e:
+            logger.debug("Duplicate project check failed: %s", e)
+            return None  # En cas d'erreur, laisser passer
+
+    def _check_duplicate_task(self, task_desc: str) -> str | None:
+        """
+        Vérifie si une tâche identique a été exécutée récemment (< 10 min).
+
+        Empêche Brain de relancer la même recherche/délégation en boucle.
+        """
+        if not self.memory or not self.memory.task_registry:
+            return None
+
+        try:
+            from difflib import SequenceMatcher
+            from datetime import datetime, timedelta
+
+            cutoff = (datetime.now() - timedelta(minutes=10)).isoformat()
+            recent_tasks = self.memory.task_registry.get_all_tasks(limit=20)
+            task_lower = task_desc.lower().strip()
+
+            for t in recent_tasks:
+                # Ne vérifier que les tâches récentes
+                if t.created_at and t.created_at < cutoff:
+                    continue
+
+                desc_lower = (t.description or "").lower().strip()
+                ratio = SequenceMatcher(None, task_lower[:100], desc_lower[:100]).ratio()
+                if ratio < 0.65:
+                    continue
+
+                # Tâche similaire récente trouvée
+                if t.status == "done" and t.result:
+                    return (
+                        f"✅ Cette tâche a **déjà été exécutée** il y a peu :\n"
+                        f"« {t.description[:80]} »\n\n"
+                        f"Résultat : {t.result[:500]}"
+                    )
+                elif t.status == "in_progress":
+                    return (
+                        f"🔄 Cette tâche est **déjà en cours** :\n"
+                        f"« {t.description[:80]} »\n"
+                        f"J'attends le résultat au lieu de la relancer."
+                    )
+                elif t.status == "failed":
+                    return (
+                        f"❌ Cette tâche a **échoué** récemment :\n"
+                        f"« {t.description[:80]} »\n"
+                        f"Erreur : {t.result[:200] if t.result else 'inconnue'}\n\n"
+                        f"Je dois diagnostiquer le problème avant de retenter."
+                    )
+
+            return None
+
+        except Exception as e:
+            logger.debug("Duplicate task check failed: %s", e)
+            return None
 
     async def _classify_intent(self, request: str, original_request: str = "",
                                 context: str = "") -> dict:
@@ -1316,6 +1452,12 @@ Réponds UNIQUEMENT avec ce JSON :
                 except ValueError:
                     wt = WorkerType.RESEARCHER if action_type == "search" else WorkerType.GENERIC
 
+                # ── ANTI-DOUBLON : vérifier les tâches récentes identiques ──
+                dup_task = self._check_duplicate_task(task_desc)
+                if dup_task:
+                    self._deliver_action_result(dup_task)
+                    return
+
                 decision = BrainDecision(
                     action="delegate_worker",
                     subtasks=[task_desc],
@@ -1346,6 +1488,13 @@ Réponds UNIQUEMENT avec ce JSON :
                 # Créer un projet (Crew)
                 name = action.get("name", "Projet")
                 steps = action.get("steps", [request])
+
+                # ── ANTI-DOUBLON : vérifier si un projet similaire existe déjà ──
+                duplicate_msg = self._check_duplicate_project(name)
+                if duplicate_msg:
+                    self._deliver_action_result(duplicate_msg)
+                    return
+
                 decision = BrainDecision(
                     action="delegate_crew",
                     subtasks=steps if steps else [request],
@@ -1364,6 +1513,12 @@ Réponds UNIQUEMENT avec ce JSON :
                 steps = action.get("steps", [request])
                 goal = action.get("goal", "")
                 schedule = action.get("schedule", "")
+
+                # ── ANTI-DOUBLON : vérifier si un projet similaire existe déjà ──
+                duplicate_msg = self._check_duplicate_project(name)
+                if duplicate_msg:
+                    self._deliver_action_result(duplicate_msg)
+                    return
 
                 # D'abord, exécuter le premier cycle comme un projet normal
                 decision = BrainDecision(
@@ -1825,6 +1980,36 @@ Réponds UNIQUEMENT avec ce JSON :
             f"Dernière erreur: {last_error}"
         )
 
+    @staticmethod
+    def _dedup_crew_steps(steps: list[CrewStep]) -> list[CrewStep]:
+        """
+        Supprime les étapes quasi-identiques dans une décomposition de projet.
+        Garde la première occurrence, supprime les doublons (similarité > 60%).
+        """
+        from difflib import SequenceMatcher
+        unique = []
+        for step in steps:
+            is_dup = False
+            for existing in unique:
+                ratio = SequenceMatcher(
+                    None,
+                    step.description.lower()[:80],
+                    existing.description.lower()[:80],
+                ).ratio()
+                if ratio > 0.6:
+                    is_dup = True
+                    logger.info(
+                        "[Brain] Étape dupliquée supprimée : « %s » (%.0f%% similaire à « %s »)",
+                        step.description[:40], ratio * 100, existing.description[:40],
+                    )
+                    break
+            if not is_dup:
+                unique.append(step)
+        # Réindexer
+        for i, s in enumerate(unique):
+            s.index = i
+        return unique
+
     async def _decompose_crew_with_llm(
         self, request: str, memory_context: str,
     ) -> list[CrewStep]:
@@ -1870,6 +2055,7 @@ Réponds UNIQUEMENT avec ce JSON :
             f"- La première étape a toujours depends_on: []\n"
             f"- L'étape finale dépend de toutes les étapes précédentes nécessaires\n"
             f"- Adapte les étapes à l'OBJECTIF RÉEL du projet\n"
+            f"- Chaque étape doit être UNIQUE — JAMAIS 2 étapes identiques ou quasi-identiques\n"
             f"- Réponds UNIQUEMENT avec le JSON, rien d'autre."
         )
 
@@ -1894,6 +2080,8 @@ Réponds UNIQUEMENT avec ce JSON :
                             depends_on=depends_on,
                         ))
                 if len(steps) >= 2:
+                    # Déduplication : supprimer les étapes quasi-identiques
+                    steps = self._dedup_crew_steps(steps)
                     return steps
         except Exception as e:
             logger.debug("Décomposition crew JSON échouée: %s", e)

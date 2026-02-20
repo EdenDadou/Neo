@@ -31,6 +31,13 @@ Projet récurrent (boucle automatique) : create_recurring_project {{name, steps,
 Question simple → réponds directement. Action unique → search/delegate/code. Gros travail (3+ étapes) → create_project. Suivi dans le temps → create_recurring_project.
 Message humain AVANT le bloc action. Le bloc action est TOUJOURS en dernière position.
 
+ANTI-DOUBLON — CRITIQUE :
+- Regarde les PROJETS ACTIFS ci-dessus AVANT de créer un projet.
+- Si un projet IDENTIQUE ou SIMILAIRE existe déjà (actif, terminé, ou échoué), NE LE RECRÉE PAS.
+- Si un projet a échoué, dis-le à l'utilisateur et explique ce qui s'est passé.
+- Si un projet est en cours, donne le statut au lieu de relancer.
+- Ne lance JAMAIS 2x la même action. Si l'utilisateur redemande, vérifie d'abord le résultat précédent.
+
 Slash : /help /status /tasks /project /heartbeat /persona /profile /sessions /skills /reflect
 """
 

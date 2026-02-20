@@ -6,9 +6,9 @@
 
 Neo Core repose sur trois agents principaux qui collaborent :
 
-- **Vox** — Interface utilisateur. Reçoit les messages, détecte les intentions, délègue au Brain.
-- **Brain** — Orchestrateur. Planifie, raisonne, gère les workers spécialisés (researcher, coder, analyst, etc.).
-- **Memory** — Mémoire persistante. Double stockage ChromaDB (sémantique) + SQLite (métadonnées structurées).
+- **Vox** — Routeur et gestionnaire de sessions. Reçoit les messages, gère l'historique (budget tokens), passe le message brut à Brain. Aucun appel LLM dans le pipeline principal.
+- **Brain** — Orchestrateur. Comprend, décide, agit, délègue aux workers spécialisés (researcher, coder, analyst, writer, summarizer, translator). System prompt compact (~600 tokens).
+- **Memory** — Mémoire persistante. Double stockage FAISS (vectoriel, 384 dim) + SQLite (métadonnées structurées).
 
 Les agents communiquent via un système de providers LLM interchangeables (Anthropic, Groq, Gemini, Ollama) avec routing intelligent et fallback automatique.
 
@@ -69,6 +69,18 @@ neo providers
 | `neo chat` | Chat interactif avec Neo |
 | `neo status` | Dashboard de santé du système |
 | `neo providers` | Providers LLM et routing |
+| `neo start` | Lancer le daemon (API + Heartbeat + Telegram) |
+| `neo stop` | Arrêter le daemon |
+| `neo restart` | Redémarrer |
+| `neo history` | Sessions précédentes |
+| `neo health` | Vérification santé |
+| `neo plugins` | Plugins chargés |
+| `neo guardian` | Mode supervision (auto-restart) |
+| `neo api` | Serveur REST FastAPI seul |
+| `neo install-service` | Générer le service systemd |
+| `neo update` | Mise à jour (git pull + restart) |
+| `neo version` | Version actuelle |
+| `neo logs` | Logs du daemon |
 
 ## Tests
 
@@ -87,17 +99,34 @@ pytest tests/test_stage14_providers.py -v
 
 ```
 neo_core/
-├── api/              # API REST FastAPI (routes, middleware, websocket)
-├── cli/              # Interface CLI (chat, status, setup)
-├── core/             # Agents principaux (vox, brain, memory_agent, workers)
-├── memory/           # Stockage persistant (store, consolidation)
-├── providers/        # LLM providers (anthropic, groq, gemini, ollama, registry)
-├── tools/            # Outils des agents (web search, etc.)
-├── config.py         # Configuration centralisée
-└── oauth.py          # Authentification OAuth
+├── brain/                 # Orchestrateur (core.py, prompts.py, teams/, tools/, providers/)
+│   ├── core.py            # Brain main class
+│   ├── prompts.py         # System prompt compact + BrainDecision
+│   ├── teams/             # Workers spécialisés (worker.py, factory.py, crew.py)
+│   ├── tools/             # Outils intégrés + plugins + génération auto
+│   └── providers/         # Multi-provider LLM (anthropic, groq, gemini, ollama)
+├── vox/                   # Interface humaine
+│   ├── interface.py       # Vox agent (routage, sessions, historique token-based)
+│   ├── cli/               # CLI (chat TUI, setup wizard, status dashboard)
+│   ├── api/               # REST API FastAPI (routes, middleware, websocket)
+│   └── integrations/      # Telegram bot
+├── memory/                # Mémoire persistante
+│   ├── store.py           # FAISS + SQLite
+│   ├── task_registry.py   # Tasks, Epics, projets récurrents
+│   ├── learning.py        # Apprentissage boucle fermée
+│   └── persona.py         # Identité évolutive
+├── infra/                 # Infrastructure
+│   ├── daemon.py          # Daemon lifecycle + systemd
+│   ├── guardian.py        # Auto-restart crash recovery
+│   ├── heartbeat.py       # Pouls autonome + projets récurrents
+│   ├── resilience.py      # Retry, circuit breaker, health
+│   └── security/          # Sanitizer + Vault chiffré
+├── config.py              # Configuration centralisée
+└── oauth.py               # Authentification OAuth Anthropic
 tests/
-├── conftest.py       # Fixtures partagées
-├── test_stage*.py    # Tests par stage (1-15+)
+├── conftest.py            # Fixtures partagées
+├── test_stage*.py         # Tests par stage (1-18)
+└── test_*.py              # Tests unitaires
 ```
 
 ## Providers LLM
@@ -106,12 +135,17 @@ Neo Core supporte plusieurs fournisseurs de modèles avec routing intelligent :
 
 | Provider | Type | Modèles | Usage |
 |----------|------|---------|-------|
-| Anthropic | Cloud payant | Claude Sonnet, Haiku | Brain, workers complexes |
-| Groq | Cloud gratuit | Llama 3.3 70B | Workers, fallback rapide |
-| Gemini | Cloud gratuit | Gemini Pro/Flash | Workers légers |
-| Ollama | Local gratuit | Deepseek, Llama, Mistral | Workers, mode économique |
+| Anthropic | Cloud payant | Claude Sonnet 4.6, Haiku 4.5 | Brain, workers critiques (coder, analyst) |
+| Groq | Cloud gratuit | LLaMA 3.3 70B | Workers, fallback rapide |
+| Gemini | Cloud gratuit | Gemini 2.5 Flash | Workers légers |
+| Ollama | Local gratuit | DeepSeek-R1:8b, Llama, Mistral | Workers secondaires, mode économique |
 
 Le mode `economic` privilégie les modèles locaux/gratuits. Le mode `quality` privilégie les modèles cloud performants.
+
+## Documentation
+
+- **ARCHITECTURE.md** — Documentation technique complète (10 sections)
+- **NEO_MANUAL.md** — Manuel d'installation et exploitation VPS
 
 ## Licence
 

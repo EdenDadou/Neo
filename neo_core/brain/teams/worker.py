@@ -548,15 +548,32 @@ class Worker:
 
             if stop_reason == "end_turn" or not pending_tool_uses:
                 # Le LLM a terminé — retourner UNIQUEMENT le texte final
-                # Les text_parts intermédiaires (pendant les tool_use) sont du
-                # "thinking out loud" que l'utilisateur ne veut pas voir.
-                # On prend le texte de cette dernière itération, sinon tout.
                 current_text = [b["text"] for b in content_blocks if b["type"] == "text"]
                 if current_text:
                     final_output = "\n".join(current_text)
                 else:
-                    # Fallback : si le dernier tour n'a pas de texte, utiliser tout
                     final_output = "\n".join(total_text_parts) if total_text_parts else "Tâche exécutée."
+
+                # FILET DE SÉCURITÉ : un Researcher qui termine SANS appeler
+                # web_search = hallucination quasi certaine. Marquer comme échec
+                # pour que le retry utilise un autre provider (via LearningEngine).
+                _tool_required_types = {WorkerType.RESEARCHER, WorkerType.CODER, WorkerType.ANALYST}
+                if self.worker_type in _tool_required_types and not tool_calls and iteration == 0:
+                    logger.warning(
+                        "[Worker %s] %s a terminé sans aucun appel d'outil — probable hallucination",
+                        self._worker_id, self.worker_type.value,
+                    )
+                    return WorkerResult(
+                        success=False,
+                        output=f"[Échec] Le worker {self.worker_type.value} n'a utilisé aucun outil. "
+                               f"Réponse probablement hallucinée. Retry avec un provider compatible tool_use.",
+                        worker_type=self.worker_type.value,
+                        task=self.task,
+                        tool_calls=[],
+                        errors=["NO_TOOL_CALLS: worker finished without using any tools"],
+                        metadata={"iterations": iteration + 1, "hallucination_detected": True},
+                    )
+
                 return WorkerResult(
                     success=True,
                     output=final_output,

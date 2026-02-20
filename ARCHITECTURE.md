@@ -1,441 +1,350 @@
-# Neo Core — Architecture & Documentation
+# Neo Core — Architecture Technique
 
-> **v0.9.4** | Ecosysteme IA Multi-Agents Autonome
+> **v0.9.7** | Écosystème IA Multi-Agents Autonome
+> Dernière mise à jour : 20 février 2026
 
 ---
 
 ## Vue d'ensemble
 
-Neo Core est un systeme d'IA multi-agents compose de **4 domaines** :
+Neo Core est un système d'IA multi-agents composé de **4 domaines** :
 
 ```
 neo_core/
-├── brain/           Orchestrateur — decisions, execution, LLM, workers
+├── brain/           Orchestrateur — décisions, exécution, LLM, workers
 ├── vox/             Interface humaine — CLI, API REST, Telegram
-├── memory/          Memoire persistante — FAISS, apprentissage, persona
-├── infra/           Infrastructure — daemon, guardian, resilience, securite
+├── memory/          Mémoire persistante — FAISS, apprentissage, persona
+├── infra/           Infrastructure — daemon, guardian, résilience, sécurité
 ├── config.py        Configuration centrale
-├── logging_config.py   Logging structure
+├── logging_config.py   Logging structuré
 ├── oauth.py         Gestion OAuth Anthropic
 └── validation.py    Validation des inputs
 ```
 
 ### Les 3 agents
 
-| Agent | Role | Modele par defaut |
+| Agent | Rôle | Modèle par défaut |
 |-------|------|-------------------|
-| **Vox** | Interface humaine : recoit, reformule, restitue | Claude Haiku (rapide) |
-| **Brain** | Orchestrateur : decide, delegue, apprend | Claude Sonnet (raisonnement) |
-| **Memory** | Bibliothecaire : stocke, cherche, consolide | Claude Haiku (consolidation) |
+| **Vox** | Routeur et gestionnaire de sessions (zéro LLM dans le pipeline principal) | — |
+| **Brain** | Orchestrateur : comprend, décide, agit, délègue | Claude Sonnet 4.6 |
+| **Memory** | Bibliothécaire : stocke, cherche, consolide, apprend | Claude Haiku 4.5 (consolidation) |
 
-### Flux principal
+### Flux principal — Smart Pipeline v5.0
 
 ```
 Humain
-  ↓ message
-Vox (reformulation)
-  ↓ requete structuree
-Brain (decision)
-  ├─ simple → reponse directe LLM
-  ├─ moderate → delegue a 1 Worker
-  └─ complexe → decompose en Epic (N Workers)
-  ↓ reponse
-Vox (restitution)
-  ↓ message
-Humain
-
-[En parallele]
-Memory ← stocke chaque echange
-Memory ← apprend des succes/echecs
-Heartbeat ← consolide, auto-tune, self-patch
+  ↓ message brut (aucune reformulation)
+Vox (routage + historique)
+  ↓ message brut + historique conversation
+Brain — UN SEUL appel Sonnet
+  ├─ question simple → réponse directe
+  ├─ action détectée → neo-action JSON en fin de réponse
+  │   ├── search → Worker Researcher
+  │   ├── delegate → Worker spécialisé
+  │   ├── code → Worker Coder
+  │   ├── create_project → ProjectManager (N workers)
+  │   ├── create_recurring_project → Projet cyclique (heartbeat)
+  │   └── crew_directive → Pilotage d'un projet en cours
+  └─ réponse finale
+  ↓
+Memory ← stocke l'échange + apprend
+Heartbeat ← consolide, auto-tune, self-patch (en arrière-plan)
 ```
+
+**Point clé :** Vox ne fait **aucun appel LLM** dans le pipeline de messages. Le message utilisateur arrive brut à Brain (Sonnet), qui a l'historique complet et le contexte mémoire. Zéro intermédiaire = zéro perte d'intelligence.
 
 ---
 
-## 1. BRAIN — Orchestrateur
+## 1. VOX — Routeur et Gestionnaire de Sessions
 
-### 1.1 core.py — Cerveau principal
+### 1.1 interface.py — Agent Vox
 
-**Classe `Brain`** (~700 lignes) — Point d'entree de toute requete complexe.
+**Classe `Vox`** (~590 lignes) — Point de contact entre humain et système.
 
-**Pipeline `process(request, conversation_history)` :**
-1. Valide l'input (ValidationError)
-2. Analyse la complexite (simple/moderate/complexe)
-3. Prend une decision (`BrainDecision`) — AVANT de charger le contexte memoire (optim v0.9.1)
-4. Charge le contexte memoire si necessaire
-5. Verifie le circuit breaker (Stage 5)
-6. Execute la strategie choisie
-7. Apprend du resultat (LearningEngine)
-
-**Classe `WorkerLifecycleManager`** — Thread-safe, gere le cycle de vie des Workers :
-- `register(worker)` → genere un worker_id
-- `unregister(worker)` → sauvegarde dans l'historique (max 50)
-- `cleanup_all()` → nettoyage force a l'arret
-
-**Decision (`BrainDecision`)** :
-- `action` : "direct_response" | "delegate_worker" | "delegate_crew"
-- `worker_type`, `subtasks`, `confidence`, `reasoning`
-- Patches Level 3 appliques avant la decision finale
-
-### 1.2 prompts.py — Prompts systeme
-
-- `BRAIN_SYSTEM_PROMPT` : 104 lignes definissant le role de Brain, ses capacites ("NEO CAN DO EVERYTHING"), regles de routing
-- `DECOMPOSE_PROMPT` : Template JSON pour decomposition de taches
-- `BrainDecision` : Dataclass de decision strategique
-
-### 1.3 llm.py — Infrastructure LLM
-
-**Authentification (3 methodes)** :
-1. **OAuth Bearer** + beta header (`sk-ant-oat...`)
-2. **Cle API convertie** depuis OAuth (`sk-ant-api...`)
-3. **LangChain classique** (`x-api-key`)
-
-**Fonctions cles** :
-- `init_llm(brain)` → detecte le type d'auth, initialise le client
-- `raw_llm_call(brain, prompt)` → appel LLM via multi-provider, fallback LangChain
-- `oauth_response(brain, request, context, history)` → reponse complete avec system prompt
-- `llm_response(brain, request, context, history)` → reponse via LangChain
-- `mock_response(request, complexity, context)` → reponse deterministe (tests)
-
-### 1.4 execution.py — Pipeline d'execution
-
-**`execute_with_worker(brain, request, decision, context, analysis)`** :
-1. Cree un TaskRecord dans le TaskRegistry
-2. Boucle de retry (max 3 tentatives) :
-   - Tentative 2+ : ameliore la strategie via Memory
-   - Cree un Worker via Factory
-   - Execute le Worker (async context manager)
-   - Apprend du resultat AVANT desinscription
-3. Si echec total → marque la tache "failed"
-
-**`execute_as_epic(brain, request, decision, context)`** :
-- Cree un Epic dans le TaskRegistry
-- Execute les sous-taches sequentiellement via Workers
-- Compile les resultats avec indicateurs succes/echec
-
-**`improve_strategy(brain, request, decision, errors, attempt)`** :
-- Tentative 2 : consulte Memory pour un worker alternatif
-- Tentative 3 : fallback worker generique + simplification
-
-### 1.5 self_patcher.py — Auto-correction (Level 3)
-
-**Cycle** : DETECTION → GENERATION → VALIDATION → APPLICATION → MONITORING → ROLLBACK
-
-**Classe `SelfPatcher`** :
-- `detect_patchable_patterns()` : lit les ErrorPattern du LearningEngine (count >= 3, recent < 7j)
-- `generate_patch(pattern)` : cree un PatchMetadata selon le type d'erreur :
-  - hallucination → baisse temperature a 0.3
-  - tool_failure → routing vers worker fallback
-  - timeout → augmentation timeout
-  - routing_error → regle de routing alternative
-- `validate_patch()` : estime l'amelioration, active si >= 50%
-- `apply_patches(request, worker_type)` : retourne les overrides actifs
-- `evaluate_and_rollback_all()` : desactive les patches inefficaces
-
-**Persistance** : `data/patches/*.json`
-
-### 1.6 auto_tuner.py — Optimisation parametrique (Level 1)
-
-**Classe `AutoTuner`** — Ajustement automatique par worker_type :
-- Temperature : baisse si hallucinations (bornes 0.1–1.0)
-- Timeout : augmente si >= 40% timeouts (bornes 60–600s)
-- Max retries : augmente si >= 50% erreurs transitoires (bornes 1–5)
-- Max tool iterations : ajustement stable (bornes 5–25)
-
-**Persistance** : `data/auto_tuning.json`
-
-### 1.7 providers/ — Routage multi-LLM
-
-#### base.py — Abstractions
-- `LLMProvider` (abstract) : `list_models()`, `chat()`, `test_model()`
-- `ModelInfo` : model_id, capability (BASIC/STANDARD/ADVANCED), latence, statut
-- `ChatMessage` / `ChatResponse` : format unifie cross-provider
-
-#### registry.py — Catalogue et routage (~600 lignes)
-**Classe `ModelRegistry`** (singleton via `get_model_registry()`) :
-- Decouverte : `discover_models()` fusionne tous les providers
-- Test : `test_model(id)`, `test_all()`
-- Routing : `get_best_for(agent_name)` → selectionne le meilleur modele
-
-**Priorite des providers** :
-1. Ollama (local, gratuit, illimite)
-2. Groq (cloud gratuit)
-3. Gemini (cloud gratuit)
-4. Anthropic (cloud payant)
-
-**Agents core (toujours Cloud)** : vox, brain, memory, worker:coder, worker:analyst
-
-#### router.py — Routage unifie
-**`route_chat(agent_name, messages, ...)`** :
-1. Obtient la fallback chain du registry
-2. Pour chaque modele : appelle `provider.chat()`
-3. Si tout echoue → `_fallback_anthropic()` (httpx direct)
-
-**`route_chat_raw()`** : meme chose mais retourne le format dict Anthropic (pour les Workers)
-
-#### Providers specifiques
-| Provider | Modeles | Auth | Particularites |
-|----------|---------|------|----------------|
-| **Anthropic** | Sonnet 4.5, Haiku 4.5 | API key ou OAuth Bearer | Tool use natif |
-| **Groq** | Llama 3.3 70B, Llama 3 8B, Gemma 2 9B | Bearer token | Format OpenAI, 14 400 req/jour |
-| **Gemini** | 2.5 Flash, 2.0 Flash-Lite | API key en URL | systemInstruction separe, role "model" |
-| **Ollama** | Auto-decouverts (DeepSeek, Llama, Mistral...) | Aucun (local) | Timeout 120s, catalogue dynamique |
-
-#### bootstrap.py — Initialisation
-`bootstrap_providers(config)` : enregistre les providers configures → `discover_models()` → singleton
-
-#### hardware.py — Detection materielle
-`HardwareDetector.detect()` → CPU, RAM, GPU (nvidia-smi) → recommande les modeles Ollama adaptes
-
-### 1.8 teams/ — Workers specialises
-
-#### worker.py — Agent d'execution
-**Types** : RESEARCHER, CODER, SUMMARIZER, ANALYST, WRITER, TRANSLATOR, GENERIC
-
-Chaque type a son system prompt specialise :
-- **RESEARCHER** : regles anti-hallucination, verification des sources
-- **CODER** : ecriture, analyse, debug, tests
-- **ANALYST** : identification de tendances, conclusions
-
-**Classe `Worker`** : async context manager avec lifecycle garanti
-- `execute()` → `WorkerResult` (success, output, errors, tool_calls, execution_time)
-
-#### factory.py — Creation de Workers
-**Classe `WorkerFactory`** :
-- `classify_task(request)` → score par regex (patterns sport, code, recherche, etc.)
-- `analyze_task(request)` → `TaskAnalysis` (type, subtasks, tools)
-- `create_worker(analysis)` → Worker pret avec outils
-
-### 1.9 tools/ — Outils des Workers
-
-#### base_tools.py — Outils integres
-| Outil | Fonction |
-|-------|----------|
-| `web_search_tool(query)` | Recherche DuckDuckGo (ddgs) |
-| `web_fetch_tool(url)` | Fetch + nettoyage HTML |
-| `file_read_tool(path)` | Lecture avec securite racine |
-| `file_write_tool(path, content)` | Ecriture avec controle d'acces |
-| `code_execute_tool(code)` | Execution Python sandbox |
-| `memory_search_tool(query)` | Recherche semantique via Memory |
-
-`ToolRegistry` : charge les outils par type de Worker
-`TOOL_SCHEMAS` : schemas au format Anthropic tool_use
-
-#### plugin_loader.py — Plugins dynamiques
-Charge des plugins depuis `data/plugins/` :
-```python
-# Contrat plugin
-PLUGIN_META = {"name": str, "description": str, "input_schema": dict, "worker_types": [str]}
-def execute(**kwargs) -> str: ...
-```
-- `discover()`, `load_plugin()`, `execute_plugin()` (timeout 30s)
-- Thread-safe, hot-reload
-
-#### tool_generator.py — Generation autonome (Level 4)
-**Cycle** : DETECT → GENERATE → VALIDATE → DEPLOY → MONITOR → PRUNE
-- Detecte les patterns recurrents (erreurs tool_not_found >= seuil)
-- Genere un plugin Python (`data/plugins/auto_*.py`)
-- Valide : syntaxe, securite (imports interdits : os, subprocess, sys...), dry-run
-- Deploie via hot-reload du PluginLoader
-- Monitore : usage_count, success_rate
-- Elague : deprecie si inutilise > 7j ou success_rate < 30%
-
----
-
-## 2. VOX — Interface Humaine
-
-### 2.1 interface.py — Agent Vox
-
-**Classe `Vox`** (~590 lignes) — Point de contact entre humain et systeme.
-
-**Pipeline `process_message(human_message)`** :
+**Pipeline `process_message(human_message)` :**
 1. Validation input (Sanitizer)
-2. Ajoute a l'historique (borne a 20 messages)
-3. Detection message simple (salutations, statut, conversation legere)
-4. **Simple** → `_vox_quick_reply()` (sans Brain, instantane)
-5. **Complexe** → reformulation LLM → Brain
-   - Mode async (callback) : genere un ack, lance Brain en arriere-plan
-   - Mode sync (API/Telegram) : attend Brain, retourne reponse
+2. Ajout à l'historique avec gestion par budget tokens (12K tokens, pas un compteur de messages)
+3. Le message passe **brut** à Brain — plus de reformulation, plus de quick reply
+4. Mode async (TUI) : génère un ACK statique, lance Brain en arrière-plan, délivre via callback
+5. Mode sync (API/Telegram) : attend Brain, retourne la réponse
 6. Sauvegarde dans ConversationStore + Memory
 
-**LLM dedie** : Haiku pour reformulation/restitution via `_vox_llm_call()` → route_chat multi-provider
+**Gestion de l'historique (token-based) :**
+```python
+_MAX_HISTORY_TOKENS = 12_000   # budget tokens
+_SUMMARY_TRIGGER = 14_000      # seuil compression
+```
+Quand l'historique dépasse le budget, les 20 derniers messages sont conservés intacts et les plus anciens sont compressés en un résumé condensé.
+
+**Méthodes encore présentes mais non utilisées dans le pipeline principal :**
+- `_is_simple_message()` — détection de messages simples (dead code dans le flux principal)
+- `_vox_quick_reply()` — réponse Vox sans Brain (dead code dans le flux principal)
+- `format_request_async()` — reformulation LLM (dead code dans le flux principal)
+
+**Vox utilise encore le LLM pour :**
+- `generate_session_summary()` — résumé de fin de session via Haiku
 
 **Gestion sessions** : `start_new_session()`, `resume_session()` (thread-safe via Lock)
 
-**`bootstrap()`** : Initialise Config → Memory → Brain → Vox, retourne Vox pret
+**`bootstrap()`** : Initialise Config → Memory → Brain → Vox, retourne Vox prêt
 
-### 2.2 api/ — REST API (FastAPI)
+### 1.2 api/ — REST API (FastAPI)
 
 #### server.py — Factory
 `create_app(config)` :
-- Lifespan : initialise CoreRegistry au demarrage
+- Lifespan : initialise CoreRegistry au démarrage
 - Middleware : CORS → APIKeyMiddleware → RateLimitMiddleware → SanitizerMiddleware
-- Routes depuis routes.py
 
 #### routes.py — Endpoints
-| Methode | Route | Description |
+
+| Méthode | Route | Description |
 |---------|-------|-------------|
 | POST | `/chat` | Envoie un message (120s timeout) |
-| GET | `/health` | Sante du systeme (public) |
-| GET | `/status` | Statut detaille (auth requise) |
+| GET | `/health` | Santé du système (public) |
+| GET | `/status` | Statut détaillé (auth requise) |
 | GET | `/sessions` | Liste les sessions (limit=20) |
 | GET | `/sessions/{id}/history` | Historique d'une session |
-| GET | `/persona` | Personnalite Neo + profil utilisateur |
-| WS | `/ws/chat?token=` | Chat temps reel WebSocket |
+| GET | `/persona` | Personnalité Neo + profil utilisateur |
+| WS | `/ws/chat?token=` | Chat temps réel WebSocket |
 
-#### middleware.py — Securite
+#### middleware.py — Sécurité
 - **APIKeyMiddleware** : header `X-Neo-Key`, comparaison timing-safe (`hmac.compare_digest`)
 - **RateLimitMiddleware** : 60 req/min par IP, SQLite persistant
 - **SanitizerMiddleware** : bloque les menaces medium/high sur POST/PUT/PATCH
 
-#### schemas.py — Modeles Pydantic
-ChatRequest, ChatResponse, StatusResponse, SessionInfo, HistoryTurn, ErrorResponse
-
-### 2.3 cli/ — Interface Terminal
+### 1.3 cli/ — Interface Terminal
 
 #### \_\_init\_\_.py — Dispatch des commandes
-`main()` route les commandes : `setup`, `chat`, `start`, `stop`, `restart`, `status`, `history`, `version`
+`main()` route les commandes : `setup`, `chat`, `start`, `stop`, `restart`, `status`, `history`, `health`, `providers`, `plugins`, `guardian`, `version`, `api`, `install-service`, `telegram-setup`, `update`, `logs`
 
 #### chat.py — Boucle conversationnelle Rich
-- Integration Guardian (GracefulShutdown, StateSnapshot)
-- Heartbeat en arriere-plan (30 min)
-- File de resultats Brain async
+- Intégration Guardian (GracefulShutdown, StateSnapshot)
+- Heartbeat en arrière-plan
+- File de résultats Brain async
 - Commandes slash : `/quit`, `/status`, `/health`, `/help`, `/history`, `/sessions`, `/skills`, `/tasks`, `/epics`, `/heartbeat`, `/persona`, `/profile`, `/reflect`, `/restart`
 
-#### setup.py — Wizard d'installation
-8 etapes (mode interactif) ou 5 etapes (mode auto) :
-1. Verification Python 3.10+
-2. Setup venv
-3. Installation dependances
-4. Configuration auth (auto-import Claude Code ou saisie manuelle)
-5. Test connexion Anthropic
-6. Detection hardware + providers optionnels (Ollama, Groq, Gemini)
-7. Sauvegarde config (`data/neo_config.json` + `.env`)
-8. "Make it live" (daemon + systemd + Telegram)
-
-#### status.py — Dashboard systeme
-Tables Rich : config, agents, workers, lifecycle, health monitor, providers LLM
-
+#### setup.py — Wizard d'installation (8 étapes)
+#### status.py — Dashboard système (tables Rich)
 #### history.py — Navigateur de sessions
-Table Rich : session_id, user_name, message_count, dates
 
-### 2.4 integrations/telegram.py — Bot Telegram
+### 1.4 integrations/telegram.py — Bot Telegram
 
-**Classe `TelegramBot`** :
-- Whitelist user_ids (securite)
-- Rate limit 20 req/min par user (SQLite)
-- Sanitisation input (Sanitizer)
+- Whitelist user_ids, rate limit 20 req/min
+- Sanitisation input, split réponses en chunks 4096 chars
 - Partage l'instance Vox avec CLI/API
-- Commandes : `/start`, `/help`, `/status`, `/whoami`
-- Split reponses en chunks 4096 chars (limite Telegram)
 
 ---
 
-## 3. MEMORY — Memoire Persistante
+## 2. BRAIN — Orchestrateur
 
-### 3.1 agent.py — MemoryAgent (Bibliothecaire)
+### 2.1 core.py — Cerveau principal
 
-**Orchestrateur** de tous les sous-systemes memoire :
-- `initialize()` : cree Store, ContextEngine, Consolidator, LearningEngine, TaskRegistry, PersonaEngine
+**Classe `Brain`** (~700 lignes) — Point d'entrée de toute requête.
+
+**Pipeline `process(request, conversation_history)` :**
+1. Valide l'input
+2. Détecte les commandes slash → traitement direct
+3. Appel LLM Sonnet avec :
+   - System prompt compact (~600 tokens)
+   - Historique conversation complet
+   - Contexte mémoire enrichi (projets actifs, sessions récentes)
+   - Contexte utilisateur (profil, préférences)
+4. Parse la réponse pour détecter les blocs `neo-action`
+5. Si action détectée → exécute l'action correspondante
+6. Retourne la réponse (message humain + résultat d'action)
+
+**Actions supportées :**
+- `search {query}` → Worker Researcher
+- `delegate {task, worker}` → Worker spécialisé
+- `code {code}` → Worker Coder
+- `create_project {name, steps}` → Décompose en Epic, exécute via ProjectManager
+- `create_recurring_project {name, steps, goal, schedule}` → Projet cyclique
+- `crew_directive {project, type, detail}` → Pilotage d'un projet en cours
+
+**Injection de contexte dans le prompt :**
+```python
+# Projets et sessions sont injectés dans memory_context, pas dans le system prompt
+projects_context = self._build_full_projects_context()
+if projects_context:
+    memory_context += f"\n\n=== PROJETS ACTIFS ===\n{projects_context}"
+recent_sessions = self._build_recent_sessions_context()
+if recent_sessions:
+    memory_context += f"\n\n=== SESSIONS RÉCENTES ===\n{recent_sessions}"
+```
+
+**Workers reçoivent le contexte conversation :**
+Les 5 derniers échanges (10 messages) sont transmis aux workers pour qu'ils comprennent le contexte.
+
+**Classe `WorkerLifecycleManager`** — Thread-safe, gère le cycle de vie des Workers :
+- `register(worker)` → génère un worker_id
+- `unregister(worker)` → sauvegarde dans l'historique (max 50)
+- `cleanup_all()` → nettoyage forcé à l'arrêt
+
+### 2.2 prompts.py — Prompts système
+
+- `BRAIN_SYSTEM_PROMPT` : ~18 lignes, compact, avec placeholders `{memory_context}`, `{user_context}`, `{current_date}`, `{current_time}`
+- `DECOMPOSE_PROMPT` : Template JSON pour décomposition de tâches (sans limite artificielle de nombre d'étapes)
+- `BrainDecision` : Dataclass de décision stratégique
+
+### 2.3 llm.py — Infrastructure LLM
+
+**Authentification (3 méthodes)** :
+1. **OAuth Bearer** + beta header (`sk-ant-oat...`)
+2. **Clé API convertie** depuis OAuth (`sk-ant-api...`)
+3. **LangChain classique** (`x-api-key`)
+
+### 2.4 execution.py — Pipeline d'exécution
+
+**`execute_with_worker()`** : Crée un Worker, exécute avec retry (max 3 tentatives), apprend du résultat.
+
+**`execute_as_epic()`** : Décompose en sous-tâches, exécute séquentiellement via Workers, compile les résultats.
+
+### 2.5 self_patcher.py — Auto-correction (Level 3)
+
+Cycle : DETECTION → GENERATION → VALIDATION → APPLICATION → MONITORING → ROLLBACK
+Détecte les patterns d'erreurs (count >= 3, recent < 7j), génère des patches comportementaux.
+
+### 2.6 auto_tuner.py — Optimisation paramétrique (Level 1)
+
+Ajustement automatique par worker_type : température, timeout, retries, tool iterations.
+Persisté dans `data/auto_tuning.json`.
+
+### 2.7 providers/ — Routage multi-LLM
+
+#### base.py — Abstractions
+- `LLMProvider` (abstract) : `list_models()`, `chat()`, `test_model()`
+- `ModelInfo` : model_id, capability (BASIC/STANDARD/ADVANCED)
+- `ChatResponse` : format unifié cross-provider
+
+#### registry.py — Catalogue et routage (~600 lignes)
+**Classe `ModelRegistry`** (singleton) — Découverte, test, et sélection des modèles.
+
+**Priorité des providers :**
+1. Ollama (local, gratuit, illimité)
+2. Groq (cloud gratuit)
+3. Gemini (cloud gratuit)
+4. Anthropic (cloud payant)
+
+**Agents core (toujours Cloud Anthropic)** : vox, brain, memory, worker:coder, worker:analyst
+
+#### router.py — Routage unifié
+`route_chat(agent_name, messages, ...)` : essaie chaque modèle de la fallback chain, puis `_fallback_anthropic()` en dernier recours.
+
+#### Providers spécifiques
+
+| Provider | Modèles | Auth | Particularités |
+|----------|---------|------|----------------|
+| **Anthropic** | Claude Sonnet 4.6, Haiku 4.5 | API key ou OAuth Bearer | Tool use natif |
+| **Groq** | LLaMA 3.3 70B, Llama 3 8B, Gemma 2 9B | Bearer token | Format OpenAI |
+| **Gemini** | 2.5 Flash, 2.0 Flash-Lite | API key en URL | systemInstruction séparé |
+| **Ollama** | Auto-découverts (DeepSeek-R1:8b, Llama, Mistral...) | Aucun (local) | Catalogue dynamique |
+
+### 2.8 teams/ — Workers spécialisés
+
+#### worker.py — Agent d'exécution
+**Types** : RESEARCHER, CODER, SUMMARIZER, ANALYST, WRITER, TRANSLATOR, GENERIC
+
+Chaque worker reçoit un system prompt spécialisé et les 5 derniers échanges de la conversation.
+
+**Classe `Worker`** : async context manager avec lifecycle garanti
+- `execute()` → `WorkerResult` (success, output, errors, tool_calls, execution_time)
+
+#### factory.py — WorkerFactory
+Classifie la tâche par score regex, crée le Worker approprié avec ses outils.
+
+#### project_manager.py — ProjectManager
+Coordonne l'exécution d'un Epic (projet multi-étapes) avec plusieurs Workers.
+
+#### crew.py — CrewExecutor
+Exécution parallèle/séquentielle de tâches au sein d'un projet.
+
+### 2.9 tools/ — Outils des Workers
+
+#### base_tools.py — 6 outils intégrés
+
+| Outil | Fonction |
+|-------|----------|
+| `web_search_tool(query)` | Recherche DuckDuckGo (ddgs) |
+| `web_fetch_tool(url)` | Fetch + nettoyage HTML |
+| `file_read_tool(path)` | Lecture avec sécurité racine |
+| `file_write_tool(path, content)` | Écriture avec contrôle d'accès |
+| `code_execute_tool(code)` | Exécution Python sandbox |
+| `memory_search_tool(query)` | Recherche sémantique via Memory |
+
+#### plugin_loader.py — Plugins dynamiques
+Charge des plugins depuis `data/plugins/` avec hot-reload, timeout 30s, namespace isolé.
+
+#### tool_generator.py — Génération autonome (Level 4)
+Détecte les besoins récurrents, génère des plugins Python, valide et déploie automatiquement.
+
+---
+
+## 3. MEMORY — Mémoire Persistante
+
+### 3.1 agent.py — MemoryAgent (Bibliothécaire)
+
+**Orchestrateur** de tous les sous-systèmes mémoire :
+- `initialize()` : crée Store, ContextEngine, Consolidator, LearningEngine, TaskRegistry, PersonaEngine
 - `store_memory(content, source, tags, importance)` → stocke dans FAISS + SQLite
-- `get_context(query)` → recherche semantique pour injection dans les prompts
-- `on_conversation_turn(user_msg, ai_response)` :
-  - Stocke l'echange
-  - Enrichit les taches actives
-  - Analyse la conversation (persona)
-  - Declenche la consolidation (tous les 50 tours)
-- Charge la documentation systeme depuis `data/system_docs/` (hash cache)
+- `get_context(query)` → recherche sémantique pour injection dans les prompts
+- `on_conversation_turn(user_msg, ai_response)` : stocke, enrichit les tâches, analyse (persona), consolide (tous les 50 tours)
 
 ### 3.2 store.py — Stockage vectoriel FAISS
 
-**Classe `MemoryStore`** — Double couche :
+**Double couche :**
 
-| Couche | Technologie | Role |
+| Couche | Technologie | Rôle |
 |--------|-------------|------|
-| Vecteurs | FAISS IndexFlatIP (384 dim) | Recherche semantique |
-| Metadata | SQLite (memory_meta.db) | Stockage structure |
+| Vecteurs | FAISS IndexFlatIP (384 dim) | Recherche sémantique |
+| Métadonnées | SQLite (memory_meta.db) | Stockage structuré |
 | Embeddings | FastEmbed/ONNX all-MiniLM-L6-v2 | Vectorisation |
 
-**Methodes** :
-- `store(content, source, tags, importance)` → embedding + FAISS + SQLite (atomique)
-- `search_semantic(query, n_results, min_importance)` → recherche cosinus top-k
-- `search_by_source()`, `search_by_tags()` → filtres exacts
-- `delete(record_id)` → marque supprime, rebuild necessaire
-- `rebuild_index()` → elimine les entrees supprimees
-
-**Optimisations** :
-- Modele d'embedding cache au niveau process (global)
-- Cache semantique par requete (vide entre chaque tour)
-- Index SQLite sur source, importance, timestamp
-- WAL journal mode
+Optimisations : modèle d'embedding caché au niveau process, cache sémantique par requête, index SQLite, WAL journal mode.
 
 ### 3.3 context.py — Injection de contexte
 
-**Classe `ContextEngine`** :
-- `build_context(query)` → `ContextBlock` avec :
-  - `relevant_memories` : top 5 recherche semantique
-  - `important_memories` : importance >= 0.7 (max 2)
-  - `recent_memories` : derniers (max 2)
-- Tronque si > max_context_tokens
-- `store_conversation_turn()` : estime l'importance (mots-cles identite → 0.9, preferences → 0.8, taches → 0.7)
+`build_context(query)` → `ContextBlock` avec : relevant_memories (top 5), important_memories (>= 0.7, max 2), recent_memories (max 2). Tronqué si > max_context_tokens.
 
 ### 3.4 conversation.py — Persistance des sessions
 
-**Classe `ConversationStore`** (SQLite) :
-- Tables : `sessions` (session_id, user_name, dates) + `turns` (role, content, turn_number)
-- `start_session()`, `append_turn()` (thread-safe), `get_history()`, `get_sessions()`
-- `export_to_json()` pour sauvegarde
+Tables SQLite : `sessions` + `turns`. Thread-safe, export JSON.
 
-### 3.5 consolidator.py — Consolidation memoire
+### 3.5 consolidator.py — Consolidation mémoire
 
-**Classe `MemoryConsolidator`** — Comme le sommeil humain :
-- `cleanup(max_age_days=30, min_importance=0.2)` → supprime les vieux/peu importants
-- `merge_similar(threshold=0.85)` → fusionne les doublons semantiques
-- `promote_important(boost=0.1)` → augmente l'importance des entrees populaires
-- `full_consolidation()` → cleanup + merge + promote (thread-safe)
+Comme le sommeil humain : cleanup (> 30 jours, importance < 0.2), merge (doublons sémantiques > 0.85), promote (entrées populaires).
 
-### 3.6 learning.py — Apprentissage (boucle fermee)
+### 3.6 learning.py — Apprentissage (boucle fermée)
 
-**Classe `LearningEngine`** :
-- `record_result(request, worker_type, success, time, errors)` :
-  - Met a jour les `LearnedSkill` (nom, succes, temps moyen, meilleure approche)
-  - Enregistre les `ErrorPattern` (type, count, exemples, regle d'evitement)
-  - Met a jour les `WorkerPerformance` (taux succes/echec, temps moyen)
-- `get_advice(request, proposed_worker)` → `LearningAdvice` :
-  - Workers a eviter (erreurs recurrentes)
-  - Ajustement de confiance
-  - Warnings et skills pertinents
+Enregistre succès/échecs, met à jour les LearnedSkill, ErrorPattern, WorkerPerformance. Donne des conseils pour les retries.
 
-### 3.7 persona.py — Identite et personnalite (Stage 9)
+### 3.7 persona.py — Identité et personnalité (Stage 9)
 
-**3 Commandements immuables** (FrozenInstanceError si modification) :
-1. "Neo ne s'eteint jamais"
-2. "Neo n'oublie jamais"
-3. "Neo apprend tous les jours"
+**3 Commandements immuables** : "Neo ne s'éteint jamais", "Neo n'oublie jamais", "Neo apprend tous les jours"
 
-**Traits de personnalite** (echelle 0.0–1.0, evolution EMA) :
-communication_style, humor_level, patience, verbosity, curiosity, empathy, formality, expressiveness
+**Traits** (échelle 0.0–1.0, évolution EMA) : communication_style, humor_level, patience, verbosity, curiosity, empathy, formality, expressiveness
 
-**Profil utilisateur** (appris automatiquement) :
-- Preferences : langue, longueur reponse, niveau technique, ton
-- Patterns : heures de pointe, longueur moyenne, sujets, langues
-- Observations : satisfaction, frustration, comportements (max 200)
+**Profil utilisateur** (auto-appris) : préférences, patterns, observations.
 
-**PersonaEngine** :
-- `analyze_conversation()` : detecte langue, ton, sujets, adapte les traits
-- `perform_self_reflection()` : LLM analyse les interactions recentes (toutes les 24h)
-- Injection dans le prompt Vox → affecte le style de communication
-
-### 3.8 task_registry.py — Registre de taches
+### 3.8 task_registry.py — Registre de tâches
 
 **Task** : id, description, worker_type, status (pending/in_progress/done/failed), context_notes
 **Epic** : id, description, task_ids, strategy, status
 
-CRUD complet + persistance dans MemoryStore (source="task_registry:*")
+**Projets récurrents** (nouveau) :
+```python
+recurring: bool = False
+schedule_cron: str = ""
+schedule_interval_minutes: int = 0
+cycle_count: int = 0
+max_cycles: int = 0
+cycle_template: list[dict]   # template de tâches pour chaque cycle
+goal: str = ""
+goal_reached: bool = False
+accumulated_results: list[str]  # résultats chaînés entre cycles
+```
+Méthodes : `get_recurring_epics_due()`, `advance_recurring_cycle()`, `_next_cron_time()`
 
-### 3.9 migrations.py — Versioning schema SQLite
-
-3 migrations appliquees sequentiellement : creation table versions, index timestamp, cleanup
+### 3.9 migrations.py — Versioning schéma SQLite
 
 ---
 
@@ -443,146 +352,97 @@ CRUD complet + persistance dans MemoryStore (source="task_registry:*")
 
 ### 4.1 registry.py — Singleton des agents
 
-**Classe `CoreRegistry`** — Garantit UNE seule instance Vox/Brain/Memory par process :
-- Singleton via `__new__()` + threading.Lock
-- `_bootstrap()` : cree les 3 agents + initialise les providers
-- `get_vox()`, `get_brain()`, `get_memory()` : lazy init, thread-safe
-- Reinitialisation post-fork (`os.register_at_fork`)
-
-Utilise par CLI, API, Telegram et Daemon pour partager les memes agents.
+**Classe `CoreRegistry`** — Garantit UNE seule instance Vox/Brain/Memory par process.
+Singleton via `__new__()` + threading.Lock. Utilisé par CLI, API, Telegram et Daemon.
 
 ### 4.2 daemon.py — Gestion daemon
 
-**`start(foreground, host, port)`** :
-- Mode foreground : bloquant (pour systemd)
-- Mode background : double fork → detache TTY
-- Lance en parallele : uvicorn + Heartbeat + Telegram (optionnel)
-
-**Signaux** :
-- SIGTERM/SIGINT → arret propre
-- SIGHUP → `config.reload()` (rechargement a chaud)
-
-**`generate_systemd_service()`** : template de service systemd avec hardening securite
+- Mode foreground (pour systemd) ou background (double fork)
+- Lance en parallèle : uvicorn + Heartbeat + Telegram (optionnel)
+- Signaux : SIGTERM/SIGINT → arrêt propre, SIGHUP → rechargement config
+- `generate_systemd_service()` : template avec hardening sécurité
 
 ### 4.3 guardian.py — Supervision de processus
 
-**Commandement #1** : "Neo ne s'eteint jamais"
-
-**Classe `Guardian`** :
-- Boucle infinie : lance `neo chat` → attend exit → decide restart
-- Exit code 0 → arret normal
-- Exit code 42 → restart immediat (`/restart`)
-- Autre → crash, backoff exponentiel (1s → 60s max)
-- Protection : max 10 restarts/heure
-- Reset backoff si process stable > 5 min
-
-**StateSnapshot** : sauvegarde l'etat avant crash (session_id, turn_count, taches actives) pour reprise
-
-**GracefulShutdown** : intercepte SIGTERM/SIGINT, execute les callbacks de nettoyage
+Boucle infinie de restart avec backoff exponentiel (1s → 60s max). Protection : max 10 restarts/heure. StateSnapshot pour reprise après crash.
 
 ### 4.4 heartbeat.py — Pouls autonome
 
-**Classe `HeartbeatManager`** — asyncio.Task qui pulse toutes les 30 min :
-
-| Action | Frequence | Description |
+| Action | Fréquence | Description |
 |--------|-----------|-------------|
-| Advance epics | Chaque pulse | Execute la prochaine tache des epics en cours |
-| Detect stale | Chaque pulse | Alerte si tache in_progress > 10 min |
-| Consolidation | 10 pulses (~5h) | Nettoyage + merge memoire |
+| Advance epics | Chaque pulse (~5 min) | Exécute la prochaine tâche des epics en cours |
+| Detect stale | Chaque pulse | Alerte si tâche in_progress > 10 min |
+| Recurring cycles | Chaque pulse | Vérifie et déclenche les projets récurrents dus |
+| Consolidation | 10 pulses (~50 min) | Nettoyage + merge mémoire |
 | Self-reflection | 24h | LLM analyse les interactions, ajuste la persona |
-| Auto-tuning | 5 pulses (~2.5h) | Level 1 : ajuste temperature, timeout, retries |
-| Self-patching | 10 pulses (~5h) | Level 3 : detecte + corrige les patterns d'erreur |
-| Tool generation | 15 pulses (~7.5h) | Level 4 : genere des plugins automatiquement |
+| Auto-tuning | 5 pulses (~25 min) | Level 1 : ajuste température, timeout, retries |
+| Self-patching | 10 pulses (~50 min) | Level 3 : détecte + corrige les patterns d'erreur |
+| Tool generation | 15 pulses (~75 min) | Level 4 : génère des plugins automatiquement |
 
-### 4.5 resilience.py — Tolerance aux pannes
+### 4.5 resilience.py — Tolérance aux pannes
 
-**RetryConfig** : max 3 retries, backoff exponentiel avec jitter (evite le thundering herd)
-
-**CircuitBreaker** (3 etats) :
-- Closed → normal, autorise les appels
-- Open → bloque (>= 5 echecs consecutifs, timeout 60s)
-- Half-Open → autorise 1 appel test
-
-**HealthMonitor** : error_rate, avg_response_time, statut (healthy/ok_with_errors/warning/degraded)
+**RetryConfig** : max 3 retries, backoff exponentiel avec jitter.
+**CircuitBreaker** : Closed → Open (>= 5 échecs, timeout 60s) → Half-Open.
+**HealthMonitor** : error_rate, avg_response_time, statut (healthy/degraded).
 
 ### 4.6 security/sanitizer.py — Filtrage des inputs
 
-**Classe `Sanitizer`** — Detecte et filtre :
-
-| Menace | Severite | Action |
+| Menace | Sévérité | Action |
 |--------|----------|--------|
-| Prompt injection ("ignore previous instructions", "you are now a"...) | HIGH | Bloque |
-| SQL injection (`' OR 1=1`, `; DROP TABLE`) | HIGH | Bloque |
-| XSS (`<script>`, `javascript:`, `onerror=`) | MEDIUM | [FILTERED] |
-| Path traversal (`../`, `/etc/passwd`) | MEDIUM | [BLOCKED] |
-| Depassement longueur (> 10 000 chars) | LOW | Tronque |
+| Prompt injection | HIGH | Bloque |
+| SQL injection | HIGH | Bloque |
+| XSS | MEDIUM | [FILTERED] |
+| Path traversal | MEDIUM | [BLOCKED] |
+| Dépassement longueur (> 10 000 chars) | LOW | Tronque |
 
 ### 4.7 security/vault.py — Chiffrement des secrets
 
-**Classe `KeyVault`** :
-- **Chiffrement** : Fernet (AES-128-CBC + HMAC-SHA256)
-- **Derivation** : PBKDF2 480 000 iterations
-- **Materiau** : machine-id + master password (optionnel)
-- **Liaison machine** : le vault ne peut pas etre transfere entre machines
-- **Stockage** : SQLite (`.vault.db`) + sel persistant (`.vault.salt`)
-- **Permissions** : 0o600 sur tous les fichiers vault
+Fernet (AES-128-CBC + HMAC-SHA256), PBKDF2 480K itérations, lié à la machine (machine-id).
 
 ---
 
-## 5. Modules racine
+## 5. Configuration
 
 ### config.py — Configuration centrale
 
-**NeoConfig** agrege :
-- `LLMConfig` : provider, model, api_key, temperature, max_tokens
-- `MemoryConfig` : storage_path, vector_db (faiss), max_context_tokens
-- `ResilienceConfig` : retries, timeouts, circuit breaker
-- `SelfImprovementConfig` : Level 1 (auto-tuning), Level 3 (self-patching), Level 4 (tool-generation)
+**NeoConfig** agrège : LLMConfig, MemoryConfig, ResilienceConfig, SelfImprovementConfig.
 
-**AGENT_MODELS** : mapping agent → modele LLM par defaut
-- vox, memory, worker:summarizer/writer/translator/generic → Haiku (rapide)
-- brain, worker:researcher/coder/analyst → Sonnet (raisonnement)
+**AGENT_MODELS** : mapping agent → modèle LLM par défaut
+- vox, memory, worker:summarizer/writer/translator/generic → Haiku 4.5 (rapide)
+- brain, worker:researcher/coder/analyst → Sonnet 4.6 (raisonnement)
 
-**`get_agent_model(agent_name)`** : consulte ModelRegistry, fallback sur AGENT_MODELS
+**Priorité de chargement** :
+1. Vault (secrets chiffrés)
+2. Variables d'environnement (.env)
+3. Wizard config (data/neo_config.json)
+4. Defaults intégrés
 
 ### oauth.py — Gestion OAuth Anthropic
 
-**Types de token** :
-- `sk-ant-oat...` : Access token (temporaire, ~8h)
-- `sk-ant-ort...` : Refresh token (long-terme)
-- `sk-ant-api...` : Cle API permanente (apres conversion)
-
-**Fonctions cles** :
-- `get_best_auth()` : priorite cle API > token valide > refresh+convert
-- `import_claude_code_credentials()` : import auto depuis `~/.claude/.credentials.json`
-- `convert_oauth_to_api_key()` : convertit OAuth en cle permanente
-- Stockage dans KeyVault (chiffre)
-
-### validation.py — Validation des inputs
-
-- `validate_message(msg)` : longueur [1, 10 000], type str, strip
-- `validate_task_description(desc)` : max 5 000 chars
-- `validate_session_id(id)` : regex `^[a-zA-Z0-9_-]+$`, max 100 chars
-
-### logging_config.py — Logging structure
-
-- Console (stderr, format lisible) + Fichier (rotation 5MB x 3, format JSON)
-- Niveaux par module : resilience → WARNING, reste → INFO
-- Deps externes (faiss, langchain, httpx) → WARNING
+Types de token : `sk-ant-oat...` (access, ~8h), `sk-ant-ort...` (refresh), `sk-ant-api...` (permanent).
+Import auto depuis Claude Code credentials. Conversion OAuth → API key.
 
 ---
 
-## 6. Points d'entree
+## 6. Points d'entrée
 
-| Commande | Chemin | Description |
-|----------|--------|-------------|
-| `./neo chat` | bash → `python -m neo_core.vox.cli chat` | Chat interactif |
-| `./neo setup` | bash → `python -m neo_core.vox.cli setup` | Wizard d'installation |
-| `./neo start` | bash → daemon.start() | Lancement daemon (API + Heartbeat + Telegram) |
-| `./neo stop` | bash → daemon.stop() | Arret daemon |
-| `./neo status` | bash → status.run_status() | Dashboard systeme |
-| `pip install -e .` | pyproject.toml → `neo_core.vox.cli:main` | Installation console_scripts |
-| `install.sh` | Script bash | Deploiement VPS (systemd, user neo, swap, venv) |
+| Commande | Description |
+|----------|-------------|
+| `neo chat` | Chat interactif TUI (Rich) |
+| `neo setup` | Wizard d'installation |
+| `neo start` | Lancement daemon (API + Heartbeat + Telegram) |
+| `neo stop` | Arrêt daemon |
+| `neo restart` | Redémarrage |
+| `neo status` | Dashboard système |
+| `neo providers` | Providers LLM et routing |
+| `neo history` | Sessions précédentes |
+| `neo health` | Vérification santé |
+| `neo plugins` | Plugins chargés |
+| `neo guardian` | Mode supervision (auto-restart) |
+| `neo api` | Serveur REST seul |
+| `neo install-service` | Génère le service systemd |
+| `neo update` | git pull + restart |
+| `neo version` | Version actuelle |
 
 ---
 
@@ -590,17 +450,17 @@ Utilise par CLI, API, Telegram et Daemon pour partager les memes agents.
 
 | Niveau | Nom | Description | Localisation |
 |--------|-----|-------------|--------------|
-| 0 | Execution | Repond aux requetes via LLM | brain/core.py |
-| 1 | Auto-tuning | Ajuste temperature, timeout, retries | brain/auto_tuner.py |
-| 2 | Apprentissage | Apprend des succes/echecs, conseille | memory/learning.py |
-| 3 | Self-patching | Detecte et corrige les patterns d'erreur | brain/self_patcher.py |
-| 4 | Tool generation | Genere des plugins automatiquement | brain/tools/tool_generator.py |
-| 5 | Resilience | Circuit breaker, retry, health monitoring | infra/resilience.py |
-| 9 | Persona | Evolue sa personnalite, apprend l'utilisateur | memory/persona.py |
+| 0 | Exécution | Répond aux requêtes via LLM | brain/core.py |
+| 1 | Auto-tuning | Ajuste température, timeout, retries | brain/auto_tuner.py |
+| 2 | Apprentissage | Apprend des succès/échecs, conseille | memory/learning.py |
+| 3 | Self-patching | Détecte et corrige les patterns d'erreur | brain/self_patcher.py |
+| 4 | Tool generation | Génère des plugins automatiquement | brain/tools/tool_generator.py |
+| 5 | Résilience | Circuit breaker, retry, health monitoring | infra/resilience.py |
+| 9 | Persona | Évolue sa personnalité, apprend l'utilisateur | memory/persona.py |
 
 ---
 
-## 8. Securite
+## 8. Sécurité
 
 | Couche | Module | Protection |
 |--------|--------|------------|
@@ -609,14 +469,14 @@ Utilise par CLI, API, Telegram et Daemon pour partager les memes agents.
 | Auth API | vox/api/middleware.py | API key timing-safe, rate limit 60/min |
 | Auth Telegram | vox/integrations/telegram.py | Whitelist user_ids, rate limit 20/min |
 | Secrets | infra/security/vault.py | Fernet AES-128, PBKDF2 480K, machine-bound |
-| OAuth | oauth.py | Tokens chiffres, refresh auto, conversion API key |
+| OAuth | oauth.py | Tokens chiffrés, refresh auto, conversion API key |
 | Systemd | infra/daemon.py | ProtectSystem=strict, NoNewPrivileges |
 | Tools | brain/tools/tool_generator.py | Imports interdits (os, subprocess, sys...) |
-| Workers | brain/tools/base_tools.py | Racines autorisees pour fichiers |
+| Workers | brain/tools/base_tools.py | Racines autorisées pour fichiers |
 
 ---
 
-## 9. Dependances
+## 9. Dépendances
 
 ### Core
 ```
@@ -638,4 +498,100 @@ groq                    — Provider Groq (cloud gratuit)
 google-generativeai     — Provider Gemini (cloud gratuit)
 ollama                  — Provider Ollama (local)
 python-telegram-bot     — Bot Telegram
+```
+
+---
+
+## 10. Structure complète des fichiers
+
+```
+neo_core/
+├── brain/
+│   ├── core.py                # Brain main class (~700 lignes)
+│   ├── prompts.py             # System prompt compact + BrainDecision
+│   ├── llm.py                 # OAuth + appels LLM
+│   ├── execution.py           # Pipeline worker/epic
+│   ├── auto_tuner.py          # Level 1 auto-adjustment
+│   ├── self_patcher.py        # Level 3 auto-correction
+│   ├── providers/
+│   │   ├── base.py            # Abstractions LLMProvider
+│   │   ├── registry.py        # ModelRegistry singleton (~600 lignes)
+│   │   ├── router.py          # route_chat unifié
+│   │   ├── anthropic_provider.py
+│   │   ├── groq_provider.py
+│   │   ├── gemini_provider.py
+│   │   ├── ollama_provider.py
+│   │   ├── bootstrap.py       # Initialisation providers
+│   │   └── hardware.py        # Détection CPU/RAM/GPU
+│   ├── teams/
+│   │   ├── worker.py          # Worker + 7 types + lifecycle
+│   │   ├── factory.py         # WorkerFactory
+│   │   ├── project_manager.py # Coordination multi-worker
+│   │   └── crew.py            # Exécution parallèle
+│   └── tools/
+│       ├── base_tools.py      # 6 outils intégrés
+│       ├── plugin_loader.py   # Plugins dynamiques
+│       └── tool_generator.py  # Génération autonome
+│
+├── vox/
+│   ├── interface.py           # Vox agent (routage, sessions, historique)
+│   ├── cli/
+│   │   ├── __init__.py        # CLI dispatcher (20+ commandes)
+│   │   ├── chat.py            # TUI Rich interactif
+│   │   ├── setup.py           # Wizard 8 étapes
+│   │   ├── status.py          # Dashboard
+│   │   └── history.py         # Navigateur sessions
+│   ├── api/
+│   │   ├── server.py          # FastAPI factory
+│   │   ├── routes.py          # 8 endpoints
+│   │   ├── middleware.py      # Auth, rate limit, sanitizer
+│   │   └── schemas.py         # Pydantic models
+│   └── integrations/
+│       └── telegram.py        # Bot Telegram
+│
+├── memory/
+│   ├── agent.py               # MemoryAgent orchestrateur
+│   ├── store.py               # FAISS + SQLite (384-dim)
+│   ├── context.py             # Injection de contexte
+│   ├── consolidator.py        # Consolidation (sommeil)
+│   ├── conversation.py        # Sessions SQLite
+│   ├── learning.py            # Boucle fermée
+│   ├── task_registry.py       # Tasks, Epics, projets récurrents
+│   ├── persona.py             # Identité évolutive
+│   ├── working_memory.py      # Scratchpad temps réel
+│   └── migrations.py          # Versioning SQLite
+│
+├── infra/
+│   ├── registry.py            # CoreRegistry singleton
+│   ├── daemon.py              # Daemon lifecycle + systemd
+│   ├── guardian.py            # Auto-restart crash recovery
+│   ├── heartbeat.py           # Pouls autonome + projets récurrents
+│   ├── resilience.py          # Retry, circuit breaker, health
+│   └── security/
+│       ├── sanitizer.py       # Input filtering
+│       └── vault.py           # Fernet encrypted secrets
+│
+├── config.py                  # Configuration centralisée
+├── logging_config.py          # Structured logging
+├── oauth.py                   # OAuth Anthropic
+├── validation.py              # Input validation
+└── features.py                # Feature flags
+
+data/
+├── .vault.db                  # Secrets chiffrés (Fernet-AES)
+├── .oauth_credentials.json    # Tokens OAuth
+├── neo_config.json            # Config runtime
+├── neo.log                    # Logs daemon (rotation 5MB x3)
+├── working_memory.json        # Scratchpad
+├── auto_tuning.json           # Paramètres auto-tuning
+├── memory/
+│   ├── memory.db              # SQLite mémoire
+│   ├── faiss_index.bin        # Index vectoriel
+│   └── faiss_id_map.json      # Mapping IDs
+├── guardian/state.json        # Snapshots crash recovery
+├── plugins/                   # Plugins installés + auto-générés
+├── patches/                   # Patches comportementaux
+└── system_docs/               # Documentation système embarquée
+
+tests/                         # 35 fichiers de test (pytest)
 ```

@@ -59,6 +59,7 @@ PREFER_CLOUD_AGENTS: set[str] = {
     "memory",
     "worker:coder",
     "worker:analyst",
+    "worker:researcher",   # DOIT utiliser des outils → nécessite un provider avec tool_use
 }
 
 # Priorité des providers (gratuit local > gratuit cloud > payant)
@@ -333,9 +334,14 @@ class ModelRegistry:
         if require_tools:
             matching = [m for m in matching if m.supports_tools]
 
-        # Si rien ne matche, tout prendre
+        # Si rien ne matche au niveau capability, élargir
         if not matching:
-            matching = available
+            if require_tools:
+                # CRITIQUE : ne JAMAIS donner un modèle sans tool_use quand les tools sont requis.
+                # Ça force le router à tomber sur _fallback_anthropic() qui supporte toujours les tools.
+                matching = [m for m in available if m.supports_tools]
+            else:
+                matching = available
 
         if prefer_cloud:
             cloud_priority = {
