@@ -263,6 +263,134 @@ class ConversationStore:
             ],
         }
 
+    # ─── Session Summaries (Phase 3 : mémoire épisodique) ─────
+
+    def _ensure_summaries_table(self) -> None:
+        """Crée la table session_summaries si elle n'existe pas."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS session_summaries (
+                    session_id TEXT PRIMARY KEY,
+                    summary TEXT NOT NULL,
+                    key_topics TEXT DEFAULT '[]',
+                    key_decisions TEXT DEFAULT '[]',
+                    key_facts TEXT DEFAULT '[]',
+                    message_count INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                )
+            """)
+            conn.commit()
+
+    def save_session_summary(
+        self,
+        session_id: str,
+        summary: str,
+        key_topics: list[str] | None = None,
+        key_decisions: list[str] | None = None,
+        key_facts: list[str] | None = None,
+    ) -> None:
+        """
+        Sauvegarde le résumé d'une session de conversation.
+
+        Appelé à la fin de chaque session (quit, Ctrl+C) par Vox.
+        Le résumé est généré par un appel LLM Haiku.
+        """
+        self._ensure_summaries_table()
+        now = datetime.now().isoformat()
+
+        session = self.get_session_by_id(session_id)
+        msg_count = session.message_count if session else 0
+
+        with self._write_lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO session_summaries
+                    (session_id, summary, key_topics, key_decisions, key_facts, message_count, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    session_id,
+                    summary,
+                    json.dumps(key_topics or [], ensure_ascii=False),
+                    json.dumps(key_decisions or [], ensure_ascii=False),
+                    json.dumps(key_facts or [], ensure_ascii=False),
+                    msg_count,
+                    now,
+                ))
+                conn.commit()
+
+        logger.info("Session summary saved for %s (%d messages)", session_id[:8], msg_count)
+
+    def get_recent_summaries(self, days: int = 7, limit: int = 5) -> list[str]:
+        """
+        Récupère les résumés des sessions récentes (pour injection dans le system prompt).
+
+        Retourne une liste de strings formatées, prêtes à être injectées.
+        """
+        self._ensure_summaries_table()
+
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT ss.summary, ss.key_topics, ss.created_at, s.user_name
+                    FROM session_summaries ss
+                    JOIN sessions s ON ss.session_id = s.session_id
+                    WHERE ss.created_at > ?
+                    ORDER BY ss.created_at DESC
+                    LIMIT ?
+                """, (cutoff, limit))
+                rows = cursor.fetchall()
+
+            if not rows:
+                return []
+
+            formatted = []
+            for summary, topics_json, created_at, user_name in rows:
+                try:
+                    ts = datetime.fromisoformat(created_at)
+                    date_str = ts.strftime("%d/%m %H:%M")
+                except (ValueError, TypeError):
+                    date_str = created_at[:16] if created_at else "?"
+
+                try:
+                    topics = json.loads(topics_json) if topics_json else []
+                    topics_str = f" [{', '.join(topics)}]" if topics else ""
+                except (json.JSONDecodeError, TypeError):
+                    topics_str = ""
+
+                formatted.append(f"• {date_str}{topics_str} — {summary}")
+
+            return formatted
+
+        except Exception as e:
+            logger.debug("Failed to get recent summaries: %s", e)
+            return []
+
+    def get_session_turns_for_summary(self, session_id: str, max_turns: int = 30) -> str:
+        """
+        Récupère les turns d'une session, formatés pour génération de résumé LLM.
+
+        Retourne un texte condensé des échanges (max_turns derniers).
+        """
+        turns = self.get_history(session_id, limit=max_turns)
+        if not turns:
+            return ""
+
+        lines = []
+        for turn in turns:
+            role_label = "Utilisateur" if turn.role == "human" else "Neo"
+            # Tronquer les messages longs
+            content = turn.content[:300]
+            if len(turn.content) > 300:
+                content += "..."
+            lines.append(f"{role_label}: {content}")
+
+        return "\n".join(lines)
+
     def close(self) -> None:
         """Ferme les connexions (si nécessaire)."""
         # SQLite gère les connexions automatiquement avec context managers

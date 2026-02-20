@@ -14,15 +14,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from neo_core.config import NeoConfig, default_config, get_agent_model
 from neo_core.memory.conversation import ConversationStore, ConversationSession
-from neo_core.oauth import is_oauth_token, get_valid_access_token, OAUTH_BETA_HEADER
+from neo_core.oauth import is_oauth_token
 from neo_core.validation import validate_message, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -82,22 +81,7 @@ Règles :
 - Réponds UNIQUEMENT avec la requête reformulée, rien d'autre.
 """
 
-# Prompt pour l'accusé de réception instantané
-VOX_ACK_PROMPT = """Tu es Vox, l'interface du système Neo Core.
-L'utilisateur vient d'envoyer un message. Génère un court accusé de réception
-(max 15 mots) pour lui dire que tu as compris et que Brain travaille dessus.
-
-Message : {user_message}
-
-Règles :
-- Sois naturel et rassurant
-- Maximum 15 mots
-- Pas de markdown, pas d'emojis
-- Montre que tu as compris le sujet
-- Réponds UNIQUEMENT avec l'accusé de réception, rien d'autre.
-"""
-
-# Acks statiques (fallback si LLM échoue)
+# Acks statiques pour accusé de réception instantané
 STATIC_ACKS = [
     "Je transmets à Brain, un instant...",
     "Compris, Brain analyse votre demande...",
@@ -424,31 +408,26 @@ class Vox:
 
     async def _generate_ack(self, user_message: str) -> str:
         """
-        Génère un accusé de réception instantané via LLM.
-        Fallback sur un ack statique si le LLM échoue ou est trop lent.
+        Génère un accusé de réception INSTANTANÉ (pas d'appel LLM).
+
+        L'ACK doit être immédiat (<10ms) pour que le prompt revienne
+        tout de suite. Brain tourne en fond, le résultat arrivera via callback.
         """
         import random
 
-        if self._mock_mode:
-            return random.choice(STATIC_ACKS)
+        # ACK contextuel basé sur des mots-clés simples (pas de LLM)
+        msg_lower = user_message.lower()
 
-        try:
-            import asyncio
-            prompt = VOX_ACK_PROMPT.format(user_message=user_message[:100])
-
-            # Timeout court pour ne pas bloquer — l'ack doit être rapide
-            ack = await asyncio.wait_for(
-                self._vox_llm_call(prompt),
-                timeout=3.0,
-            )
-
-            if ack and len(ack.strip()) < 100:
-                return ack.strip()
-
-        except asyncio.TimeoutError as e:
-            logger.debug("Acknowledgment generation timeout: %s", e)
-        except Exception as e:
-            logger.debug("Acknowledgment generation failed: %s", e)
+        if any(w in msg_lower for w in ("cherche", "recherche", "trouve", "search", "look")):
+            return random.choice(["🔍 Je lance la recherche...", "Je cherche ça...", "Recherche en cours..."])
+        if any(w in msg_lower for w in ("code", "script", "programme", "debug", "fix")):
+            return random.choice(["💻 Je m'en occupe...", "Je travaille dessus...", "Code en cours..."])
+        if any(w in msg_lower for w in ("crée", "créer", "monte", "lance", "projet", "project")):
+            return random.choice(["📋 Je mets ça en place...", "Projet en préparation...", "Je structure ça..."])
+        if any(w in msg_lower for w in ("écris", "rédige", "traduis", "résume")):
+            return random.choice(["✍️ J'y travaille...", "Rédaction en cours...", "Je m'en charge..."])
+        if any(w in msg_lower for w in ("analyse", "calcule", "compare", "évalue")):
+            return random.choice(["📊 Analyse en cours...", "Je calcule...", "Je regarde les données..."])
 
         return random.choice(STATIC_ACKS)
 
@@ -688,6 +667,69 @@ class Vox:
             ("human", "{input}"),
         ])
 
+    async def generate_session_summary(self) -> None:
+        """
+        Génère un résumé de la session courante via LLM Haiku.
+
+        Appelé à la fin de chaque session (quit, Ctrl+C).
+        Le résumé est stocké dans ConversationStore.session_summaries.
+        Skippé si la session a < 3 messages.
+        """
+        if not self._conversation_store or not self._current_session:
+            return
+
+        session_id = self._current_session.session_id
+        session = self._conversation_store.get_session_by_id(session_id)
+        if not session or session.message_count < 3:
+            logger.debug("Session too short for summary (%d messages)", session.message_count if session else 0)
+            return
+
+        try:
+            import asyncio
+
+            # Récupérer les turns formatés
+            turns_text = self._conversation_store.get_session_turns_for_summary(session_id)
+            if not turns_text:
+                return
+
+            summary_prompt = f"""Résume cette conversation en 2-3 phrases concises.
+Extrais aussi les sujets clés, les décisions prises, et les faits importants appris sur l'utilisateur.
+
+Conversation :
+{turns_text[:3000]}
+
+Réponds UNIQUEMENT en JSON :
+{{"summary": "résumé concis de la conversation", "key_topics": ["sujet1", "sujet2"], "key_decisions": ["décision1"], "key_facts": ["fait1"]}}"""
+
+            # Appel Haiku rapide (timeout 5s)
+            response_text = await asyncio.wait_for(
+                self._vox_llm_call(summary_prompt),
+                timeout=5.0,
+            )
+
+            if response_text:
+                import json
+                # Parser le JSON (tolérant aux backticks markdown)
+                cleaned = response_text.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                    if cleaned.endswith("```"):
+                        cleaned = cleaned[:-3]
+                    cleaned = cleaned.strip()
+
+                data = json.loads(cleaned)
+                self._conversation_store.save_session_summary(
+                    session_id=session_id,
+                    summary=data.get("summary", ""),
+                    key_topics=data.get("key_topics", []),
+                    key_decisions=data.get("key_decisions", []),
+                    key_facts=data.get("key_facts", []),
+                )
+                logger.info("[Vox] Session summary generated for %s", session_id[:8])
+
+        except Exception as e:
+            logger.warning("[Vox] Failed to generate session summary: %s", e)
+
     def get_model_info(self) -> dict:
         """Retourne les infos du modèle utilisé par Vox."""
         return {
@@ -698,6 +740,44 @@ class Vox:
                 not self._mock_mode and is_oauth_token(self.config.llm.api_key or "")
             ),
         }
+
+
+def _warmup_providers() -> None:
+    """
+    Warm-up des providers LLM au démarrage.
+
+    Envoie un appel minimal à Haiku pour ouvrir la connexion réseau.
+    Ça évite le cold start sur la première vraie requête utilisateur,
+    qui ferait timeout le classifier (8s).
+    """
+    import asyncio
+
+    async def _ping():
+        try:
+            from neo_core.brain.providers.router import route_chat
+            await asyncio.wait_for(
+                route_chat(
+                    agent_name="vox",
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=5,
+                    temperature=0.0,
+                ),
+                timeout=10.0,
+            )
+            logger.info("[Warmup] Provider connection established")
+        except Exception as e:
+            logger.warning("[Warmup] Provider warmup failed (non-blocking): %s", e)
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # On est déjà dans une boucle async → lancer en background
+            asyncio.ensure_future(_ping())
+        else:
+            loop.run_until_complete(_ping())
+    except RuntimeError:
+        # Pas de loop → en créer une
+        asyncio.run(_ping())
 
 
 def bootstrap() -> Vox:
@@ -718,5 +798,9 @@ def bootstrap() -> Vox:
 
     vox = Vox(config=config)
     vox.connect(brain=brain, memory=memory)
+
+    # Warm-up : ouvre la connexion provider pour éviter le cold start
+    if not config.is_mock_mode():
+        _warmup_providers()
 
     return vox

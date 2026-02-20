@@ -604,14 +604,17 @@ class ToolRegistry:
     """
 
     # Mapping type de worker → noms d'outils
+    # TOUS les workers ont accès à code_execute et file_write — le code
+    # Python est le couteau suisse qui permet de tout faire (scraping,
+    # BDD, API, automation, génération de fichiers, etc.)
     WORKER_TOOLS: dict[str, list[str]] = {
-        "researcher": ["web_search", "web_fetch", "memory_search", "file_read"],
-        "coder": ["code_execute", "file_read", "file_write", "memory_search"],
-        "summarizer": ["file_read", "web_fetch", "memory_search"],
-        "analyst": ["code_execute", "file_read", "web_fetch", "memory_search"],
-        "writer": ["file_read", "file_write", "web_fetch", "memory_search"],
-        "translator": ["memory_search"],
-        "generic": ["web_search", "web_fetch", "file_read", "memory_search"],
+        "researcher": ["web_search", "web_fetch", "code_execute", "file_write", "file_read", "memory_search"],
+        "coder": ["code_execute", "file_read", "file_write", "web_search", "web_fetch", "memory_search"],
+        "summarizer": ["file_read", "web_fetch", "code_execute", "file_write", "memory_search"],
+        "analyst": ["code_execute", "file_read", "file_write", "web_search", "web_fetch", "memory_search"],
+        "writer": ["file_read", "file_write", "code_execute", "web_fetch", "memory_search"],
+        "translator": ["memory_search", "file_read", "file_write"],
+        "generic": ["web_search", "web_fetch", "code_execute", "file_read", "file_write", "memory_search"],
     }
 
     # Mapping nom → instance d'outil (LangChain)

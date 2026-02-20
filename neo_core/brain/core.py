@@ -184,6 +184,7 @@ class Brain:
     def __post_init__(self):
         self._model_config = get_agent_model("brain")
         self._worker_manager = WorkerLifecycleManager()
+        self._action_result_callback = None  # Callable[[str], None] | None
 
         # Stage 5 : Initialiser la résilience
         retry, circuit, health = create_resilience_from_config(self.config.resilience)
@@ -495,6 +496,40 @@ class Brain:
         r"scrape|scraping|crawl)\b", re.IGNORECASE,
     )
 
+    # Filet de sécurité : verbes d'action clairs qui ne devraient PAS rester en "conversation"
+    # Si le classifier dit "conversation" mais que la requête contient ces verbes → promote
+    _LOOKS_LIKE_ACTION_RE = re.compile(
+        r"(?:^|\b)(?:"
+        # Verbes d'action FR
+        r"cherche|trouve|recherche|regarde|vérifie|check|analyse|calcule|"
+        r"écris|rédige|traduis|résume|crée|génère|fabrique|"
+        r"installe|configure|déploie|teste|debug|corrige|fixe|"
+        r"télécharge|download|upload|envoie|"
+        r"scrape|crawl|fetch|parse|"
+        # Verbes d'action EN
+        r"find|search|look\s*up|write|create|build|make|run|execute|"
+        r"install|deploy|test|fix|generate|analyze|summarize|translate"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_action(self, request: str) -> bool:
+        """
+        Détecte si une requête classée 'conversation' contient en réalité
+        un verbe d'action qui devrait déclencher un worker.
+
+        Filet de sécurité pour éviter que le classifier ne laisse passer
+        des demandes d'action comme de simples conversations.
+        """
+        # Ne pas promouvoir les questions pures (qui est, qu'est-ce que, c'est quoi)
+        if re.search(r"^\s*(?:qui|que|quel|comment|pourquoi|c[''']est\s+quoi|qu[''']est)", request, re.IGNORECASE):
+            return False
+        # Ne pas promouvoir les messages très courts (<4 mots) sauf impératif clair
+        words = request.split()
+        if len(words) < 4 and not re.match(r"(?:cherche|trouve|crée|écris|lance|fais)\b", request, re.IGNORECASE):
+            return False
+        return bool(self._LOOKS_LIKE_ACTION_RE.search(request))
+
     # Détection de questions sur un crew actif (bidirectionnel)
     _CREW_QUERY_RE = re.compile(
         r"\b(où en est|avancement|statut|status|briefing|rapport|progrès|progress)\b.*"
@@ -574,35 +609,35 @@ class Brain:
 Requête : {request}
 {original_block}{context_block}{task_registry_block}
 
-Types d'intent :
-- "conversation" : question simple, discussion, demande d'info PURE (pas d'action demandée)
-- "tool_use" : nécessite un outil externe (recherche web, exécution code, lecture/écriture fichier, scraping)
-- "project" : l'utilisateur veut CRÉER, MONTER, LANCER un nouveau projet, plan, système, ou tâche structurée. Même si la formulation est informelle ("j'aimerais qu'on fasse...", "on pourrait monter...", "fais-moi un truc pour...")
-- "crew_directive" : l'utilisateur veut DIRIGER, MODIFIER, PILOTER un projet/crew EXISTANT. Exemples : "change l'approche du P1", "mets en pause le projet", "ajoute une étape de test", "concentre-toi sur X pour P2", "arrête le projet", "reprends le projet", "modifie l'étape 3"
+Types d'intent (du plus passif au plus structuré) :
+- "conversation" : UNIQUEMENT si l'utilisateur pose une question pure, discute, ou demande une info sans vouloir qu'on FASSE quoi que ce soit. Ex: "c'est quoi le Kelly criterion ?", "comment ça va ?", "explique-moi X"
+- "smart_action" : l'utilisateur demande de FAIRE quelque chose de concret mais en une seule action. Recherche, code, analyse, rédaction, calcul, traduction, vérification — tout ce qui demande d'AGIR sans être un gros projet. C'est l'intent le PLUS COURANT. Ex: "cherche les résultats de Roland Garros", "écris un script Python pour X", "analyse ce CSV", "traduis ce texte", "calcule le rendement de...", "vérifie si...", "résume cet article"
+- "tool_use" : synonyme de smart_action (traité de la même façon). Utilise smart_action de préférence.
+- "project" : l'utilisateur veut lancer un GROS travail structuré en plusieurs étapes. Un projet = une mission complexe avec planification. Ex: "monte-moi un bot de trading", "crée une app web pour gérer...", "mets en place un système de..."
+- "crew_directive" : l'utilisateur donne un ORDRE à un projet/crew EXISTANT. Ex: "change l'approche du P1", "pause le projet", "ajoute une étape", "reprends le P2"
 
-IMPORTANT :
-- Si la requête RÉFÉRENCE un projet existant (P1, P2, T3...) sans en créer un nouveau → "conversation" OU "crew_directive"
-- "crew_directive" = l'utilisateur donne un ORDRE/INSTRUCTION au crew (pause, resume, modifier, rediriger, ajouter étape)
-- "conversation" = l'utilisateur POSE UNE QUESTION sans demander d'action (statut, avancement, info)
-- Si la requête est une confirmation ("oui", "ok", "continue") en contexte → "conversation"
-- Dès que l'utilisateur demande de CRÉER, FAIRE, MONTER, PRÉPARER quelque chose de nouveau → "project" (même sans le mot "projet")
-- En cas de doute entre "conversation" et "project", privilégie "project" si une ACTION est demandée
-- Si la requête demande une action (tool_use) qui CONCERNE un projet existant, indique le short_id du projet dans "target_project"
+RÈGLE D'OR : en cas de doute, choisis "smart_action". C'est TOUJOURS mieux d'agir que de juste parler.
+- Si l'utilisateur dit "cherche X" → smart_action (PAS conversation)
+- Si l'utilisateur dit "fais X" → smart_action (PAS conversation)
+- Si l'utilisateur dit "écris X" → smart_action (PAS conversation)
+- "conversation" = ZÉRO action demandée, juste une question ou une discussion
+- "project" = UNIQUEMENT si c'est clairement un gros travail multi-étapes
 
 Pour "crew_directive", indique aussi :
 - "directive_type" : "send_instruction|pause|resume|add_step|modify_step"
 - "target_project" : le short_id du projet concerné (P1, P2, etc.)
 
-Types de worker (si tool_use ou project) :
-- "researcher" : recherche web, collecte d'infos
-- "coder" : écriture/exécution de code
-- "analyst" : analyse de données, calculs, stratégie
-- "writer" : rédaction de textes, rapports
+Types de worker (pour smart_action/tool_use/project) :
+- "researcher" : recherche web, collecte d'infos, actualité
+- "coder" : écriture/exécution de code, debug, scripts
+- "analyst" : analyse de données, calculs, stratégie, finance
+- "writer" : rédaction de textes, rapports, emails
 - "summarizer" : résumés, synthèses
-- "generic" : tâches mixtes
+- "translator" : traduction
+- "generic" : tâches mixtes ou inclassables
 
 Réponds UNIQUEMENT avec ce JSON :
-{{"intent": "conversation|tool_use|project|crew_directive", "worker_type": "researcher|coder|analyst|writer|summarizer|generic", "confidence": 0.0-1.0, "reasoning": "explication courte", "target_project": "P1|P2|...|null", "directive_type": "send_instruction|pause|resume|add_step|modify_step|null"}}"""
+{{"intent": "conversation|smart_action|tool_use|project|crew_directive", "worker_type": "researcher|coder|analyst|writer|summarizer|translator|generic", "confidence": 0.0-1.0, "reasoning": "explication courte", "target_project": "P1|P2|...|null", "directive_type": "send_instruction|pause|resume|add_step|modify_step|null"}}"""
 
     def _build_task_registry_context(self, request: str) -> str:
         """
@@ -663,6 +698,30 @@ Réponds UNIQUEMENT avec ce JSON :
         except Exception as e:
             logger.debug("Failed to build task registry context: %s", e)
             return ""
+
+    def _build_recent_sessions_context(self) -> str:
+        """
+        Construit un résumé des sessions de conversation récentes.
+
+        Ouvre le ConversationStore et charge les résumés de session_summaries.
+        Retourne un texte formaté pour injection dans le system prompt.
+        """
+        try:
+            from neo_core.memory.conversation import ConversationStore
+
+            db_path = self.config.memory.storage_path / "conversations.db"
+            if not db_path.exists():
+                return "(aucune session précédente)"
+
+            store = ConversationStore(db_path)
+            summaries = store.get_recent_summaries(days=7, limit=5)
+            if summaries:
+                return "\n".join(summaries)
+
+            return "(aucune session précédente)"
+        except Exception as e:
+            logger.debug("Failed to build recent sessions context: %s", e)
+            return "(aucune session précédente)"
 
     def _build_full_projects_context(self) -> str:
         """
@@ -812,8 +871,8 @@ Réponds UNIQUEMENT avec ce JSON :
         return self._classify_intent_regex(request, original_request)
 
     def _classify_intent_regex(self, request: str, original_request: str = "") -> dict:
-        """Fallback regex pour la classification (ancien système)."""
-        # Epic intent
+        """Fallback regex pour la classification (ancien système amélioré)."""
+        # Epic intent → project
         has_epic = bool(self._EPIC_INTENT_RE.search(request))
         if not has_epic and original_request:
             has_epic = bool(self._EPIC_INTENT_RE.search(original_request))
@@ -821,14 +880,21 @@ Réponds UNIQUEMENT avec ce JSON :
             return {"intent": "project", "worker_type": "generic", "confidence": 0.7,
                     "reasoning": "regex: epic intent detected"}
 
-        # Tool needed
+        # Outil explicitement requis → smart_action
         if self._NEEDS_TOOL_RE.search(request):
-            return {"intent": "tool_use", "worker_type": "researcher", "confidence": 0.7,
+            worker_type = self.factory.classify_task(request)
+            return {"intent": "smart_action", "worker_type": worker_type.value, "confidence": 0.7,
                     "reasoning": "regex: tool keyword detected"}
 
-        # Default
+        # Verbe d'action détecté → smart_action (filet de sécurité)
+        if self._looks_like_action(request):
+            worker_type = self.factory.classify_task(request)
+            return {"intent": "smart_action", "worker_type": worker_type.value, "confidence": 0.6,
+                    "reasoning": "regex: action verb detected"}
+
+        # Default → conversation (vraiment aucun signal d'action)
         return {"intent": "conversation", "worker_type": "generic", "confidence": 0.6,
-                "reasoning": "regex: no special pattern"}
+                "reasoning": "regex: pure conversation"}
 
     def make_decision(self, request: str, working_context: str = "",
                       original_request: str = "",
@@ -836,15 +902,16 @@ Réponds UNIQUEMENT avec ce JSON :
         """
         Prend une décision stratégique sur la manière de traiter la requête.
 
-        v3.0 — Classification 100% LLM (plus de heuristiques regex) :
-        0. Commandes slash (/status, /tasks) → fast-path direct
-        1. Classification LLM (Haiku, 3s timeout) → intent routing
-        2. Fallback regex UNIQUEMENT si le LLM échoue/timeout
+        v4.0 — Classification fluide avec smart_action :
+        0. Commandes slash → fast-path direct
+        1. Classification LLM (Haiku, 8s timeout) → intent routing
+        2. Fallback regex amélioré si le LLM échoue
 
-        Pipeline :
-        1. LLM intent == "project" → delegate_crew
-        2. LLM intent == "tool_use" → delegate_worker
-        3. LLM intent == "conversation" → direct_response
+        Pipeline (du plus structuré au plus simple) :
+        1. "project" → delegate_crew (multi-étapes)
+        2. "crew_directive" → piloter un projet existant
+        3. "smart_action" / "tool_use" → delegate_worker (action concrète)
+        4. "conversation" → direct_response (avec promotion si verbe d'action)
         """
         # 0. Commandes slash → fast-path direct (pas besoin de LLM)
         if request.strip().startswith("/"):
@@ -932,7 +999,30 @@ Réponds UNIQUEMENT avec ce JSON :
                 decision.metadata["target_project"] = target_project
             return decision
 
-        # 4. Défaut → direct_response (Claude Sonnet + mémoire)
+        # 4. Intent "smart_action" → Brain décide dynamiquement
+        if intent == "smart_action":
+            try:
+                worker_type = WorkerType(llm_worker_type)
+            except ValueError:
+                worker_type = self.factory.classify_task(classification_input)
+            # smart_action = le LLM pense qu'il faut agir mais pas forcément un projet
+            # → on délègue à un worker unique (pas un crew complet)
+            decision = self._decide_typed_worker(
+                request, complexity, worker_type, patch_overrides
+            )
+            decision.reasoning = f"Smart action ({classification.get('reasoning', '')[:60]}) → {worker_type.value}"
+            return decision
+
+        # 5. Défaut → direct_response (Claude Sonnet + mémoire)
+        # Filet de sécurité : si la requête contient un verbe d'action clair
+        # et que le classifier a mis "conversation" par défaut, on promeut en tool_use
+        if intent == "conversation" and self._looks_like_action(request):
+            logger.info("[Brain] Promotion conversation → tool_use (verbe d'action détecté)")
+            worker_type = self.factory.classify_task(classification_input)
+            return self._decide_typed_worker(
+                request, complexity, worker_type, patch_overrides
+            )
+
         return self._decide_direct(request, complexity)
 
     # (Supprimé : _is_simple_conversation())
@@ -1146,30 +1236,246 @@ Réponds UNIQUEMENT avec ce JSON :
 
     # ─── Pipeline principal ─────────────────────────────────
 
+    # ─── Callbacks pour résultats asynchrones ───────────────
+
+    def set_action_result_callback(self, callback):
+        """Enregistre un callback pour recevoir les résultats d'actions async."""
+        self._action_result_callback = callback
+
+    def _deliver_action_result(self, message: str):
+        """Délivre un résultat d'action via callback (thread-safe)."""
+        if self._action_result_callback:
+            try:
+                self._action_result_callback(message)
+            except Exception as e:
+                logger.warning("[Brain] Action result callback failed: %s", e)
+
+    # ─── Smart Response : parse action JSON ──────────────
+    def _parse_smart_response(self, raw_response: str) -> tuple:
+        """
+        Parse une réponse Brain pour extraire le texte et une éventuelle action JSON.
+
+        Brain peut ajouter un bloc JSON en fin de réponse pour déclencher une action.
+        Format attendu : texte libre suivi de ```neo-action\\n{...}\\n```
+
+        Returns:
+            (text_part, action_dict) — action_dict est None si pas d'action
+        """
+        import re as _re
+
+        # Cherche un bloc ```neo-action ... ``` en fin de réponse
+        pattern = _re.compile(
+            r'```neo-action\s*\n(\{.*?\})\s*\n```\s*$',
+            _re.DOTALL,
+        )
+        match = pattern.search(raw_response)
+        if match:
+            try:
+                action = json.loads(match.group(1))
+                text_part = raw_response[:match.start()].strip()
+                logger.info("[Brain] Smart action detected: %s", action.get("action", "?"))
+                return text_part, action
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.warning("[Brain] Failed to parse action JSON: %s", e)
+
+        # Fallback : cherche un JSON brut en dernière ligne
+        lines = raw_response.strip().split("\n")
+        if lines:
+            last_line = lines[-1].strip()
+            if last_line.startswith("{") and last_line.endswith("}"):
+                try:
+                    action = json.loads(last_line)
+                    if "action" in action:
+                        text_part = "\n".join(lines[:-1]).strip()
+                        logger.info("[Brain] Smart action (inline): %s", action.get("action", "?"))
+                        return text_part, action
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+        return raw_response, None
+
+    async def _execute_action(self, action: dict, request: str,
+                               memory_context: str,
+                               original_request: str = "") -> None:
+        """
+        Exécute une action détectée dans la réponse Brain (en arrière-plan).
+
+        Appelé via asyncio.create_task() — ne bloque pas le pipeline principal.
+        Les résultats sont délivrés via _action_result_callback.
+        """
+        action_type = action.get("action", "")
+        logger.info("[Brain] Executing async action: %s", action_type)
+
+        try:
+            if action_type in ("search", "delegate"):
+                # Déléguer à un Worker
+                worker_type_str = action.get("worker", "researcher")
+                task_desc = action.get("task") or action.get("query") or request
+                try:
+                    wt = WorkerType(worker_type_str)
+                except ValueError:
+                    wt = WorkerType.RESEARCHER if action_type == "search" else WorkerType.GENERIC
+
+                decision = BrainDecision(
+                    action="delegate_worker",
+                    subtasks=[task_desc],
+                    confidence=0.8,
+                    worker_type=wt.value,
+                    reasoning=f"Smart action → {wt.value}",
+                )
+                analysis = self.factory.analyze_task(task_desc)
+                result = await self._execute_with_worker(task_desc, decision, memory_context, analysis)
+                self._deliver_action_result(f"✅ {result[:1000]}")
+
+            elif action_type == "code":
+                # Exécuter du code via un Worker Coder
+                code = action.get("code", "")
+                task_desc = f"Exécute ce code Python et retourne le résultat :\n```python\n{code}\n```"
+                decision = BrainDecision(
+                    action="delegate_worker",
+                    subtasks=[task_desc],
+                    confidence=0.9,
+                    worker_type="coder",
+                    reasoning="Smart action → code execution",
+                )
+                analysis = self.factory.analyze_task(task_desc)
+                result = await self._execute_with_worker(task_desc, decision, memory_context, analysis)
+                self._deliver_action_result(f"✅ {result[:1000]}")
+
+            elif action_type == "create_project":
+                # Créer un projet (Crew)
+                name = action.get("name", "Projet")
+                steps = action.get("steps", [request])
+                decision = BrainDecision(
+                    action="delegate_crew",
+                    subtasks=steps if steps else [request],
+                    confidence=0.8,
+                    worker_type="generic",
+                    reasoning=f"Smart action → Projet '{name}'",
+                    metadata={"epic_intent": True, "llm_classified": True},
+                )
+                _orig = original_request or request
+                result = await self._execute_as_epic(request, decision, memory_context, _orig)
+                self._deliver_action_result(f"🏁 Projet terminé : {result[:1000]}")
+
+            elif action_type == "crew_directive":
+                # Diriger un crew existant
+                project_id = action.get("project", "")
+                directive_type = action.get("type", "send_instruction")
+                detail = action.get("detail", request)
+                decision = BrainDecision(
+                    action="crew_directive",
+                    confidence=0.8,
+                    reasoning=f"Smart action → directive {directive_type} sur {project_id}",
+                    metadata={
+                        "crew_directive": True,
+                        "directive_type": directive_type,
+                        "target_project": project_id,
+                    },
+                )
+                result = await self._execute_crew_directive(detail, decision)
+                self._deliver_action_result(f"📋 {result[:1000]}")
+
+            else:
+                logger.warning("[Brain] Unknown action type: %s", action_type)
+                self._deliver_action_result(f"⚠️ Action inconnue : {action_type}")
+
+        except Exception as e:
+            logger.error("[Brain] Action execution failed: %s — %s", action_type, e)
+            self._deliver_action_result(f"❌ Erreur ({action_type}): {str(e)[:300]}")
+
     async def process(self, request: str,
                       conversation_history: list[BaseMessage] | None = None,
                       original_request: str = "") -> str:
         """
-        Pipeline principal de Brain.
+        Pipeline principal de Brain — v5.0 Smart Pipeline.
 
-        Stage 5 :
-        1. Vérifie la santé du système (circuit breaker)
-        2. Récupère le contexte mémoire
-        3. Prend une décision (direct / worker)
-        4. Si direct → répond via LLM (avec retry)
-        5. Si worker → crée un Worker, exécute, apprend du résultat
+        UN SEUL appel Sonnet qui comprend + décide + répond.
+        Si Brain décide d'agir, il ajoute un bloc JSON action en fin de réponse.
+        Les actions sont exécutées en arrière-plan (asyncio.create_task).
+
+        Fallback sur l'ancien pipeline (classify → make_decision) si smart échoue.
         """
-        # Stage 11: Input validation
+        import asyncio as _aio
+
+        # Input validation
         try:
             request = validate_message(request)
         except ValidationError as e:
             logger.warning("Validation du message échouée: %s", e)
             return f"[Brain Erreur] Message invalide: {str(e)[:200]}"
 
-        # ── Optimisation v0.9.2 : working memory AVANT la décision ──
-        # La working memory (topic courant, actions en attente) est en RAM (~0ms),
-        # elle permet à make_decision de comprendre les requêtes courtes
-        # ("continue", "fais pareil") dans leur contexte.
+        # Slash commands → fast-path direct (pas de LLM)
+        if request.strip().startswith("/"):
+            return await self._process_legacy(request, conversation_history, original_request)
+
+        # Mock mode → ancien pipeline
+        if self._mock_mode:
+            return await self._process_legacy(request, conversation_history, original_request)
+
+        # Circuit breaker
+        if not self.health.can_make_api_call():
+            return (
+                "[Brain] Le système est temporairement indisponible "
+                "(trop d'erreurs consécutives). Réessayez dans quelques instants."
+            )
+
+        # ── Charger le contexte ──
+        working_context = ""
+        if self.memory and self.memory.is_initialized:
+            try:
+                working_context = self.memory.get_working_context()
+            except Exception as e:
+                logger.debug("Failed to load working context: %s", e)
+
+        memory_context = self.get_memory_context(
+            request, working_context=working_context,
+        )
+
+        # Enrichir avec le contexte crew si question sur un projet
+        crew_epic_id = self._detect_crew_query(request)
+        if crew_epic_id:
+            try:
+                executor = CrewExecutor(brain=self)
+                briefing = executor.get_briefing(crew_epic_id)
+                memory_context += f"\n\n=== CREW ACTIF ===\n{briefing}"
+            except Exception as e:
+                logger.debug("Injection contexte crew échouée: %s", e)
+
+        # ── UN SEUL appel Sonnet — comprend + décide + répond ──
+        try:
+            if self._oauth_mode:
+                raw_response = await self._oauth_response(request, memory_context, conversation_history)
+            else:
+                raw_response = await self._llm_response(request, memory_context, conversation_history)
+
+            # Parser : texte + éventuelle action JSON
+            text_part, action = self._parse_smart_response(raw_response)
+
+            if action:
+                # Spawner l'action en arrière-plan — ne bloque pas
+                _aio.create_task(
+                    self._execute_action(action, request, memory_context, original_request)
+                )
+                logger.info("[Brain] Action '%s' spawned in background", action.get("action"))
+                return text_part or "C'est parti, je m'en occupe."
+
+            # Pas d'action → réponse directe (conversation)
+            return text_part
+
+        except Exception as e:
+            logger.warning("[Brain] Smart pipeline failed, falling back to legacy: %s", e)
+            return await self._process_legacy(request, conversation_history, original_request)
+
+    async def _process_legacy(self, request: str,
+                               conversation_history: list[BaseMessage] | None = None,
+                               original_request: str = "") -> str:
+        """
+        Ancien pipeline (classify → make_decision → execute).
+        Utilisé comme fallback si le smart pipeline échoue,
+        et pour les slash commands / mock mode.
+        """
+        # Working memory
         working_context = ""
         if self.memory and self.memory.is_initialized:
             try:
@@ -1177,8 +1483,7 @@ Réponds UNIQUEMENT avec ce JSON :
             except Exception as e:
                 logger.debug("Failed to load working context for decision: %s", e)
 
-        # ── Classification LLM async (Haiku, 8s timeout) ──
-        # Toutes les requêtes passent par le LLM (sauf commandes slash)
+        # Classification LLM async (Haiku, 8s timeout)
         llm_classification = None
         if not request.strip().startswith("/"):
             try:
@@ -1195,84 +1500,56 @@ Réponds UNIQUEMENT avec ce JSON :
             llm_classification=llm_classification,
         )
 
-        # Contexte mémoire chargé pour TOUTES les réponses
-        # direct_response est maintenant le chemin principal → toujours enrichir
-        needs_context = True
-        # Réutilise le working_context et le learning advice déjà calculés
         cached_advice = decision.metadata.pop("_cached_learning_advice", None)
-        memory_context = (
-            self.get_memory_context(
-                request,
-                working_context=working_context,
-                cached_learning_advice=cached_advice,
-            )
-            if needs_context
-            else ""
+        memory_context = self.get_memory_context(
+            request, working_context=working_context,
+            cached_learning_advice=cached_advice,
         )
 
-        # ── Intercept crew directives (Brain pilote le Crew) ──
+        # Intercept crew directives
         if decision.action == "crew_directive":
             try:
-                result = await self._execute_crew_directive(request, decision)
-                return result
+                return await self._execute_crew_directive(request, decision)
             except Exception as e:
                 logger.error("Crew directive failed: %s", e)
-                # Fallback → répondre normalement avec le contexte crew
                 decision = BrainDecision(
-                    action="direct_response",
-                    confidence=0.7,
+                    action="direct_response", confidence=0.7,
                     reasoning=f"Crew directive fallback: {e}",
                 )
 
-        # ── Intercept crew queries (bidirectionnel Brain ↔ Crew) ──
+        # Intercept crew queries
         crew_epic_id = self._detect_crew_query(request)
         if crew_epic_id:
             try:
                 executor = CrewExecutor(brain=self)
                 briefing = executor.get_briefing(crew_epic_id)
                 memory_context += f"\n\n=== CREW ACTIF ===\n{briefing}"
-                # Forcer direct_response pour que Brain réponde avec le contexte crew
                 decision = BrainDecision(
-                    action="direct_response",
-                    confidence=0.9,
+                    action="direct_response", confidence=0.9,
                     reasoning=f"Question sur crew actif {crew_epic_id[:8]}",
                 )
             except Exception as e:
                 logger.debug("Injection contexte crew échouée: %s", e)
 
-        # Garder la requête originale (avant reformulation Vox)
         _original_req = original_request or request
 
         if self._mock_mode:
             if decision.action == "delegate_crew" and decision.subtasks:
                 return await self._execute_as_epic(request, decision, memory_context, _original_req)
-
             if decision.action == "delegate_worker" and decision.worker_type:
                 return await self._execute_with_worker(request, decision, memory_context)
-
             complexity = self.analyze_complexity(request)
             return self._mock_response(request, complexity, memory_context)
 
-        # Stage 5 : Vérifier le circuit breaker
         if not self.health.can_make_api_call():
-            return (
-                "[Brain] Le système est temporairement indisponible "
-                "(trop d'erreurs consécutives). Réessayez dans quelques instants."
-            )
+            return "[Brain] Système temporairement indisponible."
 
         try:
             if decision.action == "delegate_crew" and decision.subtasks:
                 return await self._execute_as_epic(request, decision, memory_context, _original_req)
-
             if decision.action == "delegate_worker" and decision.worker_type:
-                # Optimisation v0.9.1 : heuristiques SEULES, plus d'appel LLM redondant
-                # L'ancien _decompose_task_with_llm() faisait un appel Sonnet de 2-5s
-                # alors que _basic_decompose() dans make_decision l'avait déjà fait.
                 analysis = self.factory.analyze_task(request)
-
                 return await self._execute_with_worker(request, decision, memory_context, analysis)
-
-            # Réponse directe
             if self._oauth_mode:
                 return await self._oauth_response(request, memory_context, conversation_history)
             else:
@@ -1714,30 +1991,45 @@ Réponds UNIQUEMENT avec ce JSON :
                 epic_id = epic.id
 
         # Si pas de target explicite, chercher le crew actif unique
+        # Si aucun crew actif, chercher aussi les projets terminés (pour réouverture)
         if not epic_id:
             active_crews = executor.list_active_crews()
-            if not active_crews:
-                return (
-                    "Aucun projet actif en cours d'exécution. "
-                    "Je ne peux pas appliquer de directive sans crew actif."
-                )
-            if len(active_crews) == 1:
-                epic_id = active_crews[0].epic_id
+            if active_crews:
+                if len(active_crews) == 1:
+                    epic_id = active_crews[0].epic_id
+                else:
+                    # Plusieurs crews → essayer de matcher par sujet
+                    request_lower = request.lower()
+                    for crew in active_crews:
+                        subject_words = crew.epic_subject.lower().split()[:5]
+                        if any(word in request_lower for word in subject_words if len(word) > 3):
+                            epic_id = crew.epic_id
+                            break
+                    if not epic_id:
+                        crew_list = "\n".join(
+                            f"  • #{c.epic_id[:8]} — {c.epic_subject[:60]}"
+                            for c in active_crews
+                        )
+                        return (
+                            f"Plusieurs projets actifs détectés. Précise lequel :\n{crew_list}"
+                        )
             else:
-                # Plusieurs crews → essayer de matcher par sujet
-                request_lower = request.lower()
-                for crew in active_crews:
-                    subject_words = crew.epic_subject.lower().split()[:5]
-                    if any(word in request_lower for word in subject_words if len(word) > 3):
-                        epic_id = crew.epic_id
-                        break
-                if not epic_id:
-                    crew_list = "\n".join(
-                        f"  • #{c.epic_id[:8]} — {c.epic_subject[:60]}"
-                        for c in active_crews
-                    )
+                # Pas de crew actif → chercher le projet le plus récent (done/failed)
+                # pour permettre la réouverture avec de nouvelles étapes
+                recent_epic = self._find_most_recent_epic()
+                if recent_epic:
+                    epic_id = recent_epic.id
+                    # Rouvrir le crew en "active" pour accepter les nouvelles étapes
+                    state = executor.load_state(epic_id)
+                    if state and state.status in ("done", "failed"):
+                        state.status = "active"
+                        executor.save_state(state)
+                        logger.info("[Brain] Réouverture du projet %s pour directive", epic_id[:8])
+                else:
                     return (
-                        f"Plusieurs projets actifs détectés. Précise lequel :\n{crew_list}"
+                        "Aucun projet trouvé. "
+                        "Crée d'abord un projet avec une demande comme "
+                        "\"crée un projet Smash Gang pour les paris ATP\"."
                     )
 
         # Dispatch selon le type de directive
@@ -1750,19 +2042,25 @@ Réponds UNIQUEMENT avec ce JSON :
             return f"▶️ {event.message}"
 
         if directive_type == "add_step":
-            # Extraire la description de l'étape à ajouter via LLM
-            step_info = await self._extract_step_from_directive(request)
-            if step_info:
-                desc, wtype = step_info
-                try:
-                    worker_type = WorkerType(wtype)
-                except ValueError:
-                    worker_type = WorkerType.GENERIC
-                success = executor.add_step(epic_id, desc, worker_type)
-                if success:
-                    return f"➕ Étape ajoutée au crew : {desc[:80]} ({worker_type.value})"
-                return "Impossible d'ajouter l'étape (crew inactif ou introuvable)."
-            return "Je n'ai pas compris quelle étape ajouter. Peux-tu préciser ?"
+            # Extraire les étapes à ajouter via LLM (supporte plusieurs d'un coup)
+            steps_info = await self._extract_steps_from_directive(request, epic_id)
+            if steps_info:
+                added = []
+                for desc, wtype in steps_info:
+                    try:
+                        worker_type = WorkerType(wtype)
+                    except ValueError:
+                        worker_type = WorkerType.GENERIC
+                    success = executor.add_step(epic_id, desc, worker_type)
+                    if success:
+                        added.append(f"  • {desc[:80]} ({worker_type.value})")
+                if added:
+                    summary = "\n".join(added)
+                    # Relancer le PM automatiquement sur les nouvelles étapes
+                    relaunch_msg = await self._relaunch_pm_on_new_steps(epic_id, executor)
+                    return f"➕ {len(added)} étape(s) ajoutée(s) :\n{summary}\n\n{relaunch_msg}"
+                return "Impossible d'ajouter les étapes (crew introuvable)."
+            return "Je n'ai pas compris quelles étapes ajouter. Peux-tu préciser ?"
 
         if directive_type == "modify_step":
             # Extraire l'index et les modifications via LLM
@@ -1783,21 +2081,113 @@ Réponds UNIQUEMENT avec ce JSON :
         briefing = executor.get_briefing(epic_id)
         return f"📋 {event.message}\n\nÉtat actuel :\n{briefing}"
 
-    async def _extract_step_from_directive(self, request: str) -> Optional[tuple[str, str]]:
-        """Extrait la description et le worker_type d'une étape à ajouter."""
+    async def _extract_steps_from_directive(
+        self, request: str, epic_id: str,
+    ) -> list[tuple[str, str]]:
+        """
+        Extrait UNE ou PLUSIEURS étapes d'une directive utilisateur.
+
+        L'utilisateur peut dire :
+        - "ajoute une étape de scraping" → 1 étape
+        - "scrapper les données, créer une BDD, analyser, placer un pari" → 4 étapes
+
+        Retourne une liste de (description, worker_type).
+        """
+        # Injecter le contexte du projet pour que le LLM comprenne
+        project_ctx = ""
+        try:
+            executor = CrewExecutor(brain=self)
+            state = executor.load_state(epic_id)
+            if state:
+                project_ctx = (
+                    f"\nProjet : « {state.epic_subject} »\n"
+                    f"Étapes existantes : {len(state.steps)}\n"
+                )
+        except Exception:
+            pass
+
         prompt = (
-            f"L'utilisateur veut ajouter une étape à un projet.\n"
-            f"Requête : {request}\n\n"
-            f"Extrais la description de l'étape et le type de worker.\n"
-            f"Réponds en JSON : {{\"description\": \"...\", \"worker_type\": \"researcher|coder|analyst|writer|summarizer|generic\"}}"
+            f"L'utilisateur veut ajouter des étapes à un projet.\n"
+            f"Requête : {request}\n{project_ctx}\n"
+            f"Extrais TOUTES les étapes décrites (1 ou plusieurs).\n"
+            f"Chaque étape doit être une ACTION CONCRÈTE.\n\n"
+            f"Types de worker :\n"
+            f"- researcher : collecte web, scraping, veille\n"
+            f"- coder : code, scripts, BDD, automatisation\n"
+            f"- analyst : analyse données, calculs, stratégie\n"
+            f"- writer : rédaction, rapports\n"
+            f"- generic : tâches mixtes\n\n"
+            f"Réponds en JSON (array) :\n"
+            f'[{{"description": "...", "worker_type": "researcher|coder|analyst|writer|generic"}}]\n\n'
+            f"IMPORTANT : même si l'utilisateur décrit les étapes informellement "
+            f"(\"scrapper, créer une bdd, analyser...\"), extrais CHAQUE action "
+            f"comme une étape séparée avec un worker_type adapté."
         )
         try:
             response = await self._raw_llm_call(prompt)
             data = self._parse_json_response(response)
-            return data.get("description", ""), data.get("worker_type", "generic")
+            if isinstance(data, list):
+                return [
+                    (item.get("description", ""), item.get("worker_type", "generic"))
+                    for item in data
+                    if item.get("description")
+                ]
+            # Fallback si le LLM retourne un dict (1 étape)
+            if isinstance(data, dict) and data.get("description"):
+                return [(data["description"], data.get("worker_type", "generic"))]
         except Exception as e:
-            logger.debug("Extraction step from directive failed: %s", e)
-            return None
+            logger.warning("Extraction steps from directive failed: %s", e)
+        return []
+
+    async def _relaunch_pm_on_new_steps(self, epic_id: str, executor: CrewExecutor) -> str:
+        """
+        Relance le ProjectManager sur les étapes non-complétées d'un crew.
+
+        Appelé après add_step pour exécuter immédiatement les nouvelles étapes
+        au lieu d'attendre le heartbeat.
+        """
+        state = executor.load_state(epic_id)
+        if not state:
+            return ""
+
+        completed_set = set(state.completed_indices)
+        pending_steps = [s for s in state.steps if s.index not in completed_set]
+
+        if not pending_steps:
+            return "Toutes les étapes sont déjà terminées."
+
+        try:
+            from neo_core.brain.teams.project_manager import ProjectManagerWorker
+
+            pm = ProjectManagerWorker(
+                brain=self,
+                epic_id=epic_id,
+                epic_subject=state.epic_subject,
+                steps=pending_steps,
+                memory_context=state.memory_context,
+                original_request=state.original_request,
+                event_callback=self._handle_crew_event,
+            )
+
+            logger.info(
+                "[Brain] Relance PM sur %d étapes pending pour %s",
+                len(pending_steps), epic_id[:8],
+            )
+
+            pm_result = await pm.execute()
+
+            if self.memory and self.memory.is_initialized:
+                try:
+                    final_status = "done" if pm_result.success else "failed"
+                    self.memory.update_epic_status(epic_id, final_status)
+                except Exception:
+                    pass
+
+            return pm_result.synthesis
+
+        except Exception as e:
+            logger.error("PM relaunch failed: %s", e)
+            return f"[Relance échouée] {type(e).__name__}: {str(e)[:200]}"
 
     async def _extract_step_modification(self, request: str) -> Optional[tuple[int, str | None, str | None]]:
         """Extrait l'index, nouvelle description et nouveau worker_type d'une modification."""
@@ -1822,6 +2212,20 @@ Réponds UNIQUEMENT avec ce JSON :
                 return int(idx), new_desc, new_wtype
         except Exception as e:
             logger.debug("Extraction step modification failed: %s", e)
+        return None
+
+    def _find_most_recent_epic(self):
+        """Trouve l'epic le plus récent (tous statuts) dans le TaskRegistry."""
+        if not self.memory or not self.memory.task_registry:
+            return None
+        try:
+            epics = self.memory.task_registry.get_all_epics(limit=5)
+            if epics:
+                # Trier par date de création décroissante
+                epics.sort(key=lambda e: e.created_at, reverse=True)
+                return epics[0]
+        except Exception as e:
+            logger.debug("Find most recent epic failed: %s", e)
         return None
 
     # ─── Communication bidirectionnelle Crew ↔ Brain ────
@@ -1852,12 +2256,22 @@ Réponds UNIQUEMENT avec ce JSON :
             logger.debug("Détection crew query échouée: %s", e)
             return None
 
+    def set_crew_progress_callback(self, callback) -> None:
+        """
+        Définit un callback pour remonter les événements crew vers l'UI (CLI/API).
+
+        Le callback reçoit un string formaté pour affichage utilisateur.
+        Permet de voir la progression en temps réel au lieu d'attendre
+        la synthèse finale.
+        """
+        self._crew_progress_callback = callback
+
     def _handle_crew_event(self, event: CrewEvent) -> None:
         """
         Reçoit les notifications proactives des crews.
 
-        Stocke en mémoire (pour que Brain retrouve l'info sémantiquement)
-        et notifie via Telegram.
+        Stocke en mémoire, notifie Telegram, ET remonte vers le CLI/API
+        via le callback de progression.
         """
         # Stocker en mémoire
         if self.memory and self.memory.is_initialized:
@@ -1870,6 +2284,24 @@ Réponds UNIQUEMENT avec ce JSON :
                 )
             except Exception as e:
                 logger.debug("Stockage crew event échoué: %s", e)
+
+        # Remonter vers le CLI/API (progression temps réel)
+        progress_cb = getattr(self, "_crew_progress_callback", None)
+        if progress_cb:
+            try:
+                # Formater un message court pour l'UI
+                icon = {
+                    "step_completed": "✅",
+                    "step_failed": "❌",
+                    "crew_done": "🏁",
+                    "crew_paused": "⏸️",
+                    "crew_resumed": "▶️",
+                    "directive_received": "📋",
+                    "orchestrator_replan": "🔄",
+                }.get(event.event_type, "📌")
+                progress_cb(f"{icon} {event.message}")
+            except Exception as e:
+                logger.debug("Crew progress callback failed: %s", e)
 
         # Notifier via Telegram
         try:
@@ -2092,12 +2524,15 @@ Réponds UNIQUEMENT avec ce JSON :
         # Injection proéminente des projets actifs (séparée du memory_context)
         projects_context = self._build_full_projects_context()
 
+        recent_sessions = self._build_recent_sessions_context()
+
         system_prompt = BRAIN_SYSTEM_PROMPT.format(
             memory_context=memory_context,
             projects_context=projects_context,
             current_date=now.strftime("%A %d %B %Y"),
             current_time=now.strftime("%H:%M"),
             user_context=user_context,
+            recent_sessions=recent_sessions,
         )
 
         try:
@@ -2143,6 +2578,8 @@ Réponds UNIQUEMENT avec ce JSON :
 
         projects_context = self._build_full_projects_context()
 
+        recent_sessions = self._build_recent_sessions_context()
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", BRAIN_SYSTEM_PROMPT),
             MessagesPlaceholder("conversation_history", optional=True),
@@ -2153,6 +2590,7 @@ Réponds UNIQUEMENT avec ce JSON :
             "memory_context": memory_context,
             "projects_context": projects_context,
             "user_context": user_context,
+            "recent_sessions": recent_sessions,
             "current_date": now.strftime("%A %d %B %Y"),
             "current_time": now.strftime("%H:%M"),
             "conversation_history": conversation_history or [],

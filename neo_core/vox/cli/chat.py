@@ -741,7 +741,21 @@ async def conversation_loop(vox):
         """Callback appelé quand Brain termine en arrière-plan."""
         brain_results.put_nowait(result)
 
+    def on_crew_progress(message: str):
+        """Callback pour la progression crew — affiché en temps réel."""
+        brain_results.put_nowait(f"[dim]{message}[/dim]")
+
     vox.set_brain_done_callback(on_brain_done)
+
+    # Connecter la progression crew et les résultats d'actions async
+    if hasattr(vox, 'brain') and vox.brain:
+        vox.brain.set_crew_progress_callback(on_crew_progress)
+
+        def on_action_result(result: str):
+            """Callback pour les résultats d'actions async (search, code, delegate...)."""
+            brain_results.put_nowait(result)
+
+        vox.brain.set_action_result_callback(on_action_result)
 
     print_banner(config)
 
@@ -810,6 +824,13 @@ async def conversation_loop(vox):
                     f"  {config.user_name} > ",
                 )
             except (KeyboardInterrupt, EOFError):
+                # Générer le résumé de session AVANT de quitter
+                try:
+                    if hasattr(vox, 'generate_session_summary'):
+                        console.print("\n  [dim]Sauvegarde de la session...[/dim]")
+                        await vox.generate_session_summary()
+                except Exception as e:
+                    logger.debug("Session summary generation failed on exit: %s", e)
                 await _cleanup_and_exit()
                 shutdown_handler.save_state(shutdown_reason="signal")
                 shutdown_handler.clear_state()
@@ -928,22 +949,13 @@ async def conversation_loop(vox):
                     console.print(f"[red]  Erreur: {e}[/red]")
                 continue
 
-            # ── Callback ack : Vox envoie un accusé de réception pendant que Brain réfléchit ──
-            ack_displayed = False
-
-            def on_thinking(ack_text: str):
-                nonlocal ack_displayed
-                if not ack_displayed:
-                    console.print(f"\n  [dim cyan]Vox >[/dim cyan] [dim]{ack_text}[/dim]")
-                    ack_displayed = True
-
-            vox.set_thinking_callback(on_thinking)
-
-            # Process via Vox → Brain → Vox
+            # ── Mode non-bloquant : Vox retourne un ACK, Brain tourne en fond ──
+            # Le callback on_brain_done est déjà câblé (ligne ~748).
+            # Vox détecte le callback et lance Brain en background automatiquement.
+            # Le résultat arrivera via brain_results queue → _background_queue_watcher.
             try:
-                with console.status("[bold cyan]  Brain analyse...[/bold cyan]"):
-                    response = await vox.process_message(user_input)
-
+                response = await vox.process_message(user_input)
+                # response = ACK instantané (Brain en fond) OU réponse directe (slash cmd)
                 console.print(f"\n  [bold cyan]Vox >[/bold cyan] {response}\n")
             except Exception as e:
                 console.print(f"\n  [bold red]Erreur >[/bold red] {type(e).__name__}: {e}\n")
